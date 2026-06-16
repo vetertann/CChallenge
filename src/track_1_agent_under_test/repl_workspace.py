@@ -104,7 +104,7 @@ class CarWorkspace:
     """State and tool emitters available to model-written Python."""
 
     def __init__(self) -> None:
-        self.scratchpad: dict[str, Any] = {"gates": {}}
+        self.scratchpad: dict[str, Any] = self._new_scratchpad()
         self.policy: str = ""
         self.available_tools: dict[str, dict[str, Any]] = {}
         self.last_user_message: str = ""
@@ -113,6 +113,190 @@ class CarWorkspace:
         self.messages: list[dict[str, Any]] = []
         self._pending_tool_calls: list[dict[str, Any]] = []
         self._response_text: str | None = None
+
+    @staticmethod
+    def _new_scratchpad() -> dict[str, Any]:
+        return {
+            "gates": {},
+            "entities": {},
+            "facts": {},
+        }
+
+    def _ensure_scratchpad_shape(self) -> None:
+        defaults = self._new_scratchpad()
+        for key, default in defaults.items():
+            if key not in self.scratchpad or not isinstance(self.scratchpad[key], type(default)):
+                self.scratchpad[key] = default
+
+    @staticmethod
+    def _preview(value: Any, limit: int = 240) -> str:
+        if isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=True)
+        text = " ".join(text.split())
+        return text if len(text) <= limit else text[: limit - 12] + " ...[truncated]"
+
+    def remember(self, key: str, value: Any, section: str = "facts") -> Any:
+        self._ensure_scratchpad_shape()
+        if section not in self.scratchpad or not isinstance(self.scratchpad[section], dict):
+            raise ValueError(f"scratchpad section {section!r} is not a mapping")
+        self.scratchpad[section][key] = value
+        return value
+
+    def remember_entity(self, key: str, value: Any) -> Any:
+        return self.remember(key, value, section="entities")
+
+    def tool_available(self, tool_name: str) -> bool:
+        return tool_name in self.available_tools
+
+    def tool_schema(self, tool_name: str) -> dict[str, Any]:
+        if tool_name not in self.available_tools:
+            raise KeyError(f"Tool {tool_name!r} is not available")
+        return self.available_tools[tool_name].get("function", {}).get("parameters", {}) or {}
+
+    def tool_required_arguments(self, tool_name: str) -> list[str]:
+        schema = self.tool_schema(tool_name)
+        return [str(name) for name in schema.get("required", []) or []]
+
+    def tool_optional_arguments(self, tool_name: str) -> list[str]:
+        schema = self.tool_schema(tool_name)
+        properties = schema.get("properties", {}) or {}
+        required = set(self.tool_required_arguments(tool_name))
+        return [str(name) for name in properties if name not in required]
+
+    def tool_signature(self, tool_name: str) -> str:
+        required = self.tool_required_arguments(tool_name)
+        optional = self.tool_optional_arguments(tool_name)
+        args = required + [f"{name}=..." for name in optional]
+        joined = ", ".join(args)
+        return f"{tool_name}({joined})"
+
+    def _tool_mode_tag(self, tool_name: str) -> str:
+        read_prefixes = (
+            "get_",
+            "search_",
+            "calculate_",
+            "convert_",
+            "think",
+            "planning_tool",
+        )
+        return "readonly" if tool_name.startswith(read_prefixes) or tool_name in {"think", "planning_tool"} else "mutating"
+
+    def describe_tool(self, tool_name: str) -> dict[str, Any]:
+        if tool_name not in self.available_tools:
+            available = ", ".join(self.available_tool_names())
+            raise KeyError(f"Tool {tool_name!r} is not available. Available tools: {available}")
+        fn = self.available_tools[tool_name].get("function", {}) or {}
+        description = (fn.get("description") or "").strip()
+        schema = fn.get("parameters", {}) or {}
+        properties = schema.get("properties", {}) or {}
+        return {
+            "name": tool_name,
+            "signature": self.tool_signature(tool_name),
+            "mode": self._tool_mode_tag(tool_name),
+            "confirmation_required": description.startswith("REQUIRES_CONFIRMATION"),
+            "description": description,
+            "required_arguments": self.tool_required_arguments(tool_name),
+            "optional_arguments": self.tool_optional_arguments(tool_name),
+            "schema": schema,
+            "argument_descriptions": {
+                str(name): (value.get("description") or "").strip()
+                for name, value in properties.items()
+                if isinstance(value, dict)
+            },
+        }
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = []
+        for tool_name in self.available_tool_names():
+            info = self.describe_tool(tool_name)
+            tools.append(
+                {
+                    "name": info["name"],
+                    "confirmation_required": info["confirmation_required"],
+                    "description": info["description"],
+                }
+            )
+        return tools
+
+    def tool_supports_arguments(self, tool_name: str, argument_names: list[str] | tuple[str, ...] | set[str] | None = None) -> bool:
+        if tool_name not in self.available_tools:
+            return False
+        if not argument_names:
+            return True
+        schema = self.tool_schema(tool_name)
+        properties = schema.get("properties", {}) or {}
+        if not properties:
+            return False
+        required_names = [str(name) for name in argument_names]
+        return all(name in properties for name in required_names)
+
+    def capability_claim_gate(
+        self,
+        requirements: list[Any],
+        gate_name: str = "capability_claim",
+    ) -> bool:
+        self._ensure_scratchpad_shape()
+        normalized: list[dict[str, Any]] = []
+        missing_tools: list[str] = []
+        missing_arguments: list[dict[str, Any]] = []
+
+        for item in requirements:
+            tool_name = ""
+            argument_names: list[str] = []
+            if isinstance(item, str):
+                tool_name = item
+            elif isinstance(item, dict):
+                tool_name = str(item.get("tool_name") or item.get("tool") or "")
+                raw_args = item.get("arguments") or item.get("argument_names") or []
+                if isinstance(raw_args, str):
+                    argument_names = [raw_args]
+                else:
+                    argument_names = [str(name) for name in raw_args]
+            elif isinstance(item, (tuple, list)) and item:
+                tool_name = str(item[0])
+                if len(item) > 1:
+                    raw_args = item[1]
+                    if isinstance(raw_args, str):
+                        argument_names = [raw_args]
+                    else:
+                        argument_names = [str(name) for name in raw_args or []]
+            if not tool_name:
+                raise ValueError("capability_claim_gate requirements must include a tool name")
+            normalized.append({"tool_name": tool_name, "arguments": argument_names})
+            if not self.tool_available(tool_name):
+                missing_tools.append(tool_name)
+                continue
+            if argument_names and not self.tool_supports_arguments(tool_name, argument_names):
+                schema = self.available_tools[tool_name].get("function", {}).get("parameters", {}) or {}
+                properties = schema.get("properties", {}) or {}
+                missing = [name for name in argument_names if name not in properties]
+                if missing:
+                    missing_arguments.append(
+                        {
+                            "tool_name": tool_name,
+                            "missing_arguments": missing,
+                        }
+                    )
+
+        ok = not missing_tools and not missing_arguments
+        self.scratchpad["gates"][gate_name] = {
+            "status": "YES" if ok else "NO",
+            "requirements": normalized,
+            "missing_tools": missing_tools,
+            "missing_arguments": missing_arguments,
+        }
+        return ok
+
+    def note_assistant_step(
+        self,
+        *,
+        thought: str,
+        response_text: str | None,
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        _ = (thought, response_text, tool_calls)
 
     def reset_actions(self) -> None:
         self._pending_tool_calls = []
@@ -190,6 +374,17 @@ class PythonExecutor:
             "respond": ws.respond,
             "emit_tool_call": ws.emit_tool_call,
             "call": ws.emit_tool_call,
+            "remember": ws.remember,
+            "remember_entity": ws.remember_entity,
+            "list_tools": ws.list_tools,
+            "describe_tool": ws.describe_tool,
+            "tool_schema": ws.tool_schema,
+            "tool_signature": ws.tool_signature,
+            "tool_required_arguments": ws.tool_required_arguments,
+            "tool_optional_arguments": ws.tool_optional_arguments,
+            "tool_available": ws.tool_available,
+            "tool_supports_arguments": ws.tool_supports_arguments,
+            "capability_claim_gate": ws.capability_claim_gate,
         }
         for tool_name in ALL_TOOL_NAMES:
             globals_dict[tool_name] = self._make_tool_wrapper(tool_name)
@@ -241,4 +436,3 @@ def format_observation(result: ExecutionResult, scratchpad: dict[str, Any]) -> s
     if scratchpad:
         parts.append(f"SCRATCHPAD\n{json.dumps(scratchpad, indent=2, ensure_ascii=True)}")
     return "\n\n".join(parts)
-

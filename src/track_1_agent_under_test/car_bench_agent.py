@@ -95,6 +95,9 @@ class AgentSession:
     workspace: CarWorkspace = field(default_factory=CarWorkspace)
     executor: PythonExecutor | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
+    stable_messages: list[dict[str, Any]] = field(default_factory=list)
+    system_prompt: str = ""
+    initial_user_request: str = ""
     initialized: bool = False
     metrics: SessionMetrics = field(default_factory=SessionMetrics)
     trace: TraceWriter | None = None
@@ -309,25 +312,26 @@ class CARBenchAgentExecutor(AgentExecutor):
             ws.policy = inbound.policy_text
 
         if not session.initialized:
-            session.messages = [
-                {
-                    "role": "system",
-                    "content": build_system_prompt(
-                        car_policy=ws.policy,
-                        tools=list(ws.available_tools.values()),
-                        tool_mode=self.tool_mode,
-                    ),
-                }
-            ]
+            session.system_prompt = build_system_prompt(
+                car_policy=ws.policy,
+                tools=list(ws.available_tools.values()),
+                tool_mode=self.tool_mode,
+            )
+            session.initial_user_request = inbound.user_text or "none"
+            session.stable_messages = []
+            session.messages = self._rebuild_messages(session)
             ws.observe_user(inbound.user_text or "none")
-            session.messages.append({"role": "user", "content": initial_user_message(inbound.user_text)})
             session.initialized = True
             return
+
+        session.messages = self._rebuild_messages(session)
 
         if inbound.source == SOURCE_ENVIRONMENT:
             if inbound.tool_results:
                 ws.observe_environment(inbound.tool_results)
-                session.messages.append({"role": "user", "content": environment_message(inbound.tool_results)})
+                message = environment_message(inbound.tool_results)
+                session.stable_messages.append({"role": "user", "content": message})
+                session.messages.append({"role": "user", "content": message})
             else:
                 ws.observe_empty(SOURCE_ENVIRONMENT)
                 session.messages.append({"role": "user", "content": "Environment sent an empty message. Continue carefully."})
@@ -335,6 +339,26 @@ class CARBenchAgentExecutor(AgentExecutor):
 
         ws.observe_user(inbound.user_text or "none")
         session.messages.append({"role": "user", "content": user_followup_message(inbound.user_text or "none")})
+
+    @staticmethod
+    def _rebuild_messages(session: AgentSession) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        if session.system_prompt:
+            messages.append({"role": "system", "content": session.system_prompt})
+        if session.initial_user_request:
+            messages.append({"role": "user", "content": initial_user_message(session.initial_user_request)})
+        messages.extend(session.stable_messages)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Current persistent scratchpad state:\n"
+                    f"{json.dumps(session.workspace.scratchpad, indent=2, ensure_ascii=True)}\n\n"
+                    "Use this as your compact carry-forward memory. Prefer updating it over relying on stale transcript details."
+                ),
+            }
+        )
+        return messages
 
     def _run_until_benchmark_action(
         self,
@@ -440,6 +464,18 @@ class CARBenchAgentExecutor(AgentExecutor):
             )
 
             if result.tool_calls or result.response_text:
+                session.workspace.note_assistant_step(
+                    thought=thought,
+                    response_text=result.response_text,
+                    tool_calls=result.tool_calls,
+                )
+                if thought.strip():
+                    session.stable_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": f"Prior assistant plan:\n{thought.strip()}",
+                        }
+                    )
                 trace.write(
                     "benchmark_action_ready",
                     step_index=step_index,

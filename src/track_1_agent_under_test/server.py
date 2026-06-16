@@ -57,6 +57,7 @@ def main() -> None:
     parser.add_argument("--model-provider", type=str, help="Provider: nebius, openai, openrouter, deepseek, cerebras.")
     parser.add_argument("--base-url", type=str, help="OpenAI-compatible base URL override for Nebius/OpenAI-style providers.")
     parser.add_argument("--tool-mode", type=str, choices=["prompt_json", "native"], help="How to force execute_python.")
+    parser.add_argument("--skill", type=str, help="Domain skill file in Skills/; also CAR_AGENT_SKILL (default car_domain.md).")
     args = parser.parse_args()
 
     if args.agent_llm:
@@ -67,9 +68,11 @@ def main() -> None:
         os.environ["CAR_AGENT_BASE_URL"] = args.base_url
     if args.tool_mode:
         os.environ["CAR_AGENT_TOOL_MODE"] = args.tool_mode
+    if args.skill:
+        os.environ["CAR_AGENT_SKILL"] = args.skill
 
     from car_bench_agent import CARBenchAgentExecutor
-    from config import MODEL_ID, MODEL_PROVIDER, MODEL_TOOL_MODE
+    from config import CAR_AGENT_SKILL, MODEL_ID, MODEL_PROVIDER, MODEL_TOOL_MODE
 
     agent_url = args.card_url or f"http://{args.host}:{args.port}/"
     logger.info(
@@ -77,6 +80,7 @@ def main() -> None:
         model=MODEL_ID,
         provider=MODEL_PROVIDER,
         tool_mode=MODEL_TOOL_MODE,
+        skill=CAR_AGENT_SKILL,
         host=args.host,
         port=args.port,
     )
