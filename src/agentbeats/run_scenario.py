@@ -1,6 +1,6 @@
 import argparse
 import asyncio
-import os, sys, time, subprocess, shlex, signal
+import os, sys, time, subprocess, shlex, signal, socket
 from pathlib import Path
 import tomllib
 from typing import Any
@@ -18,6 +18,47 @@ sys.path.pop(0)
 load_dotenv(override=False)
 logger = configure_logger(role="orchestrator")
 DEFAULT_AGENT_STARTUP_TIMEOUT_SECONDS = 90
+
+
+def _connect_host(host: str) -> str:
+    if host in {"", "0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+
+def _port_is_listening(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((_connect_host(host), port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def preflight_ports(cfg: dict, evaluate_only: bool = False) -> bool:
+    """Fail fast when a scenario would start a server on an occupied port."""
+
+    if evaluate_only:
+        return True
+    ok = True
+    for role in ("agent_under_test", "evaluator"):
+        info = cfg.get(role, {})
+        if not info.get("cmd"):
+            continue
+        host = info["host"]
+        port = info["port"]
+        if _port_is_listening(host, port):
+            logger.error(
+                "Configured port is already in use before startup",
+                role=role,
+                host=host,
+                port=port,
+                hint=(
+                    "Stop the existing listener or change this scenario to use a "
+                    "different endpoint/port before rerunning."
+                ),
+            )
+            ok = False
+    return ok
 
 
 async def wait_for_agents(
@@ -177,6 +218,8 @@ def main():
         sys.exit(1)
 
     cfg = parse_toml(args.scenario)
+    if not preflight_ports(cfg, evaluate_only=args.evaluate_only):
+        sys.exit(1)
 
     sink = None if args.show_logs or args.serve_only else subprocess.DEVNULL
     parent_bin = str(Path(sys.executable).parent)

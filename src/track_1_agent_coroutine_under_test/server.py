@@ -1,4 +1,4 @@
-"""Server entry point for the CAR-bench A-Agent style agent."""
+"""Server entry point for the coroutine-bridge CAR-bench agent."""
 
 from __future__ import annotations
 
@@ -15,17 +15,16 @@ from a2a.types import AgentCard
 from starlette.applications import Starlette
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from logging_utils import configure_logger
-sys.path.pop(0)
+from logging_utils import configure_logger  # noqa: E402
 
 
-logger = configure_logger(role="agent_under_test", context="server")
+logger = configure_logger(role="agent_under_test", context="coroutine_server")
 
 
 def prepare_agent_card(url: str) -> AgentCard:
     card = AgentCard(
-        name="car_bench_a_agent",
-        description="A-Agent style in-car voice assistant for CAR-bench",
+        name="car_bench_coroutine_agent",
+        description="Coroutine-bridge Python REPL in-car assistant for CAR-bench",
         version="1.0.0",
         default_input_modes=["text/plain", "application/json"],
         default_output_modes=["text/plain", "application/json"],
@@ -41,15 +40,15 @@ def prepare_agent_card(url: str) -> AgentCard:
     card.capabilities.extended_agent_card = False
 
     skill = card.skills.add()
-    skill.id = "car_assistant"
-    skill.name = "CAR-bench A-Agent"
-    skill.description = "Uses a Python REPL planner to emit CAR-bench tool calls"
-    skill.tags.extend(["benchmark", "car-bench", "python-repl"])
+    skill.id = "car_assistant_coroutine"
+    skill.name = "CAR-bench Coroutine Agent"
+    skill.description = "Uses blocking Python tool wrappers bridged over A2A tool calls"
+    skill.tags.extend(["benchmark", "car-bench", "python-repl", "coroutine"])
     return card
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the CAR-bench A-Agent style agent.")
+    parser = argparse.ArgumentParser(description="Run the CAR-bench coroutine-bridge agent.")
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--card-url", type=str)
@@ -71,12 +70,12 @@ def main() -> None:
     if args.skill:
         os.environ["CAR_AGENT_SKILL"] = args.skill
 
-    from car_bench_agent import CARBenchAgentExecutor
-    from config import CAR_AGENT_SKILL, MODEL_ID, MODEL_PROVIDER, MODEL_TOOL_MODE
+    from config import CAR_AGENT_SKILL, MODEL_ID, MODEL_PROVIDER, MODEL_TOOL_MODE  # noqa: E402
+    from coroutine_agent import CoroutineCARBenchAgentExecutor  # noqa: E402
 
     agent_url = args.card_url or f"http://{args.host}:{args.port}/"
     logger.info(
-        "Starting CAR-bench A-Agent",
+        "Starting CAR-bench coroutine agent",
         model=MODEL_ID,
         provider=MODEL_PROVIDER,
         tool_mode=MODEL_TOOL_MODE,
@@ -87,7 +86,7 @@ def main() -> None:
 
     card = prepare_agent_card(agent_url)
     request_handler = DefaultRequestHandler(
-        agent_executor=CARBenchAgentExecutor(),
+        agent_executor=CoroutineCARBenchAgentExecutor(),
         task_store=InMemoryTaskStore(),
         agent_card=card,
     )
@@ -106,4 +105,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

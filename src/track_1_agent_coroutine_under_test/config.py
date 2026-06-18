@@ -1,4 +1,4 @@
-"""Configuration for the CAR-bench A-Agent style agent."""
+"""Configuration for the CAR-bench coroutine agent."""
 
 from __future__ import annotations
 

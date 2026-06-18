@@ -1,4 +1,4 @@
-"""Provider routing for the CAR-bench A-Agent style agent."""
+"""Provider routing for the CAR-bench coroutine agent."""
 
 from __future__ import annotations
 
@@ -145,8 +145,7 @@ def call_model_with_retry(
             last_exc = exc
             if attempt >= MODEL_MAX_ATTEMPTS or not _is_retryable(exc):
                 break
-            sleep_s = min(2 ** attempt, 30)
-            time.sleep(sleep_s)
+            time.sleep(min(2 ** attempt, 30))
     raise ModelCallError(str(last_exc)) from last_exc
 
 
@@ -333,4 +332,3 @@ def _is_retryable(exc: BaseException) -> bool:
         "APITimeoutError",
         "APIConnectionError",
     }
-

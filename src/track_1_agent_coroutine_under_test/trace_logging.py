@@ -1,4 +1,4 @@
-"""JSONL tracing for CAR-bench agent turns."""
+"""JSONL tracing for CAR-bench coroutine agent turns."""
 
 from __future__ import annotations
 

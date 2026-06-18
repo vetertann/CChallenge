@@ -1,0 +1,59 @@
+[evaluator]
+endpoint = "http://127.0.0.1:18081"
+cmd = "python src/evaluator/server.py --host 127.0.0.1 --port 18081"
+
+[agent_under_test]
+endpoint = "http://127.0.0.1:18080"
+cmd = "python src/track_1_agent_coroutine_under_test/server.py --host 127.0.0.1 --port 18080 --model-provider nebius --agent-llm openai/gpt-oss-120b-fast --skill car_domain_120b.md"
+
+[config]
+num_trials = 1
+task_split = "train"
+tasks_base_num_tasks = 0
+tasks_hallucination_num_tasks = 35
+tasks_hallucination_task_id_filter = [
+  "hallucination_0",
+  "hallucination_2",
+  "hallucination_4",
+  "hallucination_10",
+  "hallucination_12",
+  "hallucination_14",
+  "hallucination_16",
+  "hallucination_20",
+  "hallucination_22",
+  "hallucination_26",
+  "hallucination_30",
+  "hallucination_32",
+  "hallucination_34",
+  "hallucination_36",
+  "hallucination_38",
+  "hallucination_40",
+  "hallucination_46",
+  "hallucination_48",
+  "hallucination_50",
+  "hallucination_52",
+  "hallucination_54",
+  "hallucination_56",
+  "hallucination_58",
+  "hallucination_64",
+  "hallucination_66",
+  "hallucination_68",
+  "hallucination_70",
+  "hallucination_72",
+  "hallucination_76",
+  "hallucination_82",
+  "hallucination_84",
+  "hallucination_86",
+  "hallucination_90",
+  "hallucination_92",
+  "hallucination_94",
+]
+tasks_disambiguation_num_tasks = 0
+max_steps = 50
+
+user_model = "gpt-4.1"
+user_provider = "openai"
+user_thinking = false
+
+policy_evaluator_model = "gpt-4.1"
+policy_evaluator_provider = "openai"
