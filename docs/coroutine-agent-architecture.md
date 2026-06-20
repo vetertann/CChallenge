@@ -1,8 +1,21 @@
 # Coroutine Agent Architecture and Reliability Techniques
 
-Status: active implementation reference  
-Last verified against code: 2026-06-18  
+Status: active implementation reference
+Last verified against code: 2026-06-20
 Agent package: `src/track_1_agent_coroutine_under_test/`
+
+Recent deltas (2026-06-20): removed the catalog-diff missing-capability
+inference for compliance (now reactive live-membership, see Competition
+Compliance); added output-key rendering (`original_tool_outputs.json`) incl.
+dynamic-key aliasing (`get_distance_by_soc` → `distance_km`,
+`calculate_charging_time_by_soc` → `minutes`); expanded raw-path delegation to
+ten tools (degenerate-call, active-route-edit, and `get_weather` day-clamp
+guards); added the `set_occupied_seat_heating` helper; route-selection narration
+(policy 022/021) now fires on plain route presentations and new-route sets, not
+only edits; the active-nav guard **redirects** `set_new_navigation`-while-active
+to `navigation_replace_final_destination` instead of refusing; nav delete is
+idempotent when the target is already removed. Evaluator is Gemini 2.5 Flash
+(the orgs' default/official judge).
 
 This document describes the current participant-owned coroutine agent. It is
 the source of truth for its architecture, prompt/runtime boundary, reliability
@@ -25,6 +38,54 @@ The agent is designed around four goals:
 The model has one action surface: `execute_python`. CAR-bench tools are exposed
 inside the persistent Python workspace as functions such as
 `get_weather(...)`, `send_email(...)`, and `set_fan_speed(...)`.
+
+## Competition Compliance
+
+The benchmark boundary is the A2A exchange with the evaluator. The harness may be
+sophisticated, but only consumes benchmark-allowed inputs: the system prompt
+(including policy), the transcript, the live tool definitions, and tool results.
+The rules below were clarified directly with the organizers (2026-06; see
+`hallucinations_tofix.md` and the participant Q&A) and are binding on this agent.
+
+### Allowed (organizer-confirmed)
+
+- **Internal helper/executor functions** that the model calls and that emit one
+  or several of the task's *allowed* tools in sequence. The evaluator only ever
+  receives normal `tool_calls` with the real tool/parameter names; it never sees
+  helper names. Our policy helpers and `*_guarded` wrappers are exactly this.
+- **Computing a parameter value with our own logic** from earlier tool results
+  in the same task (e.g. deriving the reconnecting `route_id` for a waypoint
+  delete from the current navigation state, default fastest per policy). Grounded
+  IDs still come from real tool results — we never fabricate IDs.
+- **Deciding not to emit a tool call** the agent judges invalid, and continuing
+  (e.g. skipping a route lookup whose start and destination are the same).
+- **Bundling the public tool catalog as static reference** (descriptions,
+  parameter ranges, the set of wrapper names) while the per-task tool list stays
+  the sole authority for what is callable.
+- **Membership checks against the live per-task list**: "is the specific tool/
+  parameter I need present in this task?" (`A in live_tools`). One list, one
+  lookup.
+
+### Not allowed
+
+- **Inferring which tool/parameter was removed by comparing the full catalog to
+  the per-task list** (the set difference `full − live`). This is the explicit
+  hallucination-split exploit and is forbidden. The agent must not use the
+  catalog as an oracle for "what is missing."
+- Executing CAR-bench tools inside the participant container; inspecting
+  evaluator files, hidden data, or answer keys; adding private vehicle-state /
+  shell / network tools to the decision loop; hiding tool calls to dodge metrics.
+
+### How this constrains missing-capability handling
+
+The distinction is **membership vs. diff**. A helper knows the specific tools it
+needs (their names are literals in its code) and asks "is this name in the live
+list?" — allowed. Enumerating the catalog to compute the removed set — banned.
+Accordingly, the runtime resolves missing tools/parameters **reactively** at call
+time against the live surface (see Live Tool-Surface Membership). The earlier
+proactive catalog-diff (`_infer_tool_surface_limitation_from_user_request`, the
+original-vs-live parameter comparison, and `handle_missing_requested_capability`)
+has been removed.
 
 ## High-Level Architecture
 
@@ -190,10 +251,35 @@ errors use a separate bounded retry loop with backoff for retryable failures.
    surface bundled with the agent.
 6. The prompt-JSON output contract when enabled.
 
-The full public surface is shown intentionally. The live task surface is still
-authoritative at execution time. This lets the model call the obvious public
-wrapper while the runtime detects a task-removed tool or parameter and emits a
-grounded limitation instead of relying on the model to notice schema removal.
+The full public catalog is shown as *reference* (organizer-confirmed allowed,
+see Competition Compliance). The live task surface is authoritative at execution
+time. The model calls the obvious public wrapper; when the call is executed, it
+is resolved against the **live** per-task tool list, and if the tool or a
+supplied parameter is not present in that task the runtime emits a grounded
+limitation. The runtime never compares the catalog to the live list to infer
+what was removed.
+
+### Callable Surface
+
+The model-facing prompt documents 76 callable entries:
+
+- 57 public CAR-bench wrappers.
+- 15 model-facing workspace/policy helpers.
+- 4 pure extraction helpers (`id_value`, `pois_value`, `routes_value`, and
+  `first_number_value`).
+
+The tool/helper dispatch registry contains 79 known names: the 57 public
+wrappers, 15 model-facing workspace helpers, and seven internal `*_guarded`
+targets. Including the four pure extraction helpers, the REPL therefore has 83
+relevant callable names, of which 76 are documented choices for the model.
+The guard targets are internal implementations, not separately documented
+choices. The model calls the corresponding public wrapper, and dispatch
+transparently applies the guard.
+
+This distinction avoids presenting both a public operation and its guarded
+implementation as competing choices. True policy multitools remain visible
+alongside their component tools where those component tools are also valid
+independent operations.
 
 ### Compact Tool Rendering
 
@@ -211,14 +297,36 @@ It preserves:
 - Array and nested object shapes.
 - Argument descriptions containing operational constraints.
 - Literal tool descriptions, including `REQUIRES_CONFIRMATION`.
+- **Result key shapes** — each signature is suffixed with the tool's output
+  keys, e.g. `get_temperature_inside_car() -> result{climate_temperature_driver,
+  climate_temperature_passenger, temperature_unit}`.
+
+The result-key shapes exist because OpenAI function-calling metadata only
+declares inputs, not outputs. Without them the model writes the result access
+path blind (it accesses a key in the same `execute_python` block as the call,
+before the value arrives) and guesses — e.g. `temperature_driver` instead of
+`climate_temperature_driver`, which silently yields `None`. Rendering the keys
+removes this result-key-guessing failure class for all un-normalized read tools.
 
 Static public schemas and metadata are stored in:
 
-- `original_tool_schemas.json`
-- `original_tool_metadata.json`
+- `original_tool_schemas.json` — input parameter schemas.
+- `original_tool_metadata.json` — names + descriptions.
+- `original_tool_outputs.json` — stable result-key shapes per tool, compiled
+  from observed evaluator tool results in our own run transcripts (benchmark-
+  allowed transcript data; dynamic/parameterized-key tools with normalizer
+  helpers are excluded). This is reference data, not a removal oracle.
 
-These files are public API metadata bundled into the agent image. They must not
-be generated from evaluator internals during a submission run.
+  Compliance basis: output-key names are public by the benchmark's own choice —
+  19 of the 42 tool *descriptions* already publish their result keys (e.g.
+  `get_charging_specs_and_status`, `open_close_window`, `set_fan_speed`). We
+  store only key **names** (never values), obtained from allowed tool-result
+  transcripts, so this is the published-API contract — not hidden mock data,
+  task definitions, or answer keys, and not task-specific.
+
+These files are public API / observed-contract metadata bundled into the agent
+image. They must not be generated from evaluator internals, hidden mock data, or
+answer keys during a submission run.
 
 ## Context and Memory
 
@@ -263,29 +371,33 @@ requiring the model to reconstruct prior tool results from prose.
 
 ## Tool-Surface Reliability
 
-### Static-versus-Live Schema Comparison
+### Live Tool-Surface Membership
 
-The runtime compares bundled public schemas with the live tool definitions from
-the first evaluator inbound message.
+Before emitting an evaluator call, the runtime checks the call against the
+**live** per-task tool list only (a membership test, never a diff against the
+bundled catalog):
 
-Before emitting an evaluator call, it checks:
+- Whether the tool the model is calling exists in this task's tool list.
+- Whether each supplied parameter exists in that tool's **live** schema.
 
-- Whether the tool exists in the live task.
-- Whether all supplied parameters exist.
-- Whether a required public parameter was removed from the live schema.
-
-If a required capability is absent, the wrapper directly emits a prepared
-acknowledgement such as:
+If the tool or a supplied parameter is not present in the live task, the wrapper
+directly emits a prepared acknowledgement such as:
 
 ```text
 I acknowledge that I can't ... because the required tool parameter ... is missing.
 ```
 
-The invalid tool call is never sent to the evaluator.
+The invalid tool call is never sent to the evaluator. This is the
+organizer-blessed pattern: the helper/wrapper knows the specific tool it needs
+(its name is in the code), and asks "is this name in the per-task list?"
+— it never enumerates the catalog to compute what was removed.
 
-`handle_missing_requested_capability()` is a broader fallback for requests that
-do not map cleanly to one wrapper or helper. Direct wrapper/helper routing is
-preferred because it has a more exact capability contract.
+A previous build inferred removals proactively by comparing the bundled catalog
+to the per-task list (matching the user request against every original schema,
+and flagging required parameters present in the original but absent from live).
+That inference is **removed** for compliance; missing capabilities are now
+resolved reactively, when a wrapper call hits the live surface. See Competition
+Compliance.
 
 ### Argument Validation
 
@@ -371,8 +483,17 @@ Current helpers:
 | `set_air_conditioning_on_safe()` | Closes known windows over 20%, fixes fan speed, then enables AC. |
 | `close_known_windows_for_blocked_ac(window=None)` | Handles a narrow follow-up after incomplete window data blocked AC. |
 | `set_climate_temperature_safe(...)` | Applies the cross-zone temperature warning policy. |
+| `set_occupied_seat_heating(...)` | Reads occupancy and current levels, then sets every occupied front seat. |
 | `set_fog_lights_on_safe()` | Checks weather and lights, applies low/high-beam prerequisites, and confirms when required. |
 | `set_high_beams_on_safe()` | Blocks high beams while fog lights are on and applies tool confirmation. |
+| `get_route_options(...)` | Normalizes route choices, aliases, durations, and toll metadata. |
+| `select_route(...)` | Selects one uniquely identified route without guessing. |
+| `get_preferred_ambient_light_color()` | Resolves a unique stored ambient-light preference. |
+
+Normalization helpers such as `get_navigation_state(...)`,
+`get_contact_details(...)`, and `get_distance_by_soc_value(...)` are also
+model-visible, but they normalize read results rather than implement a policy
+protocol.
 
 ### Raw-Wrapper Guarding
 
@@ -384,9 +505,25 @@ helpers. Currently:
 - `set_fog_lights(on=True)` delegates to `set_fog_lights_on_safe()`.
 - `set_head_lights_high_beams(on=True)` delegates to
   `set_high_beams_on_safe()`.
+- `set_new_navigation(...)` delegates to `set_new_navigation_guarded(...)`.
+- `get_routes_from_start_to_destination(...)` delegates to
+  `get_routes_guarded(...)`.
+- `search_poi_along_the_route(...)` delegates to
+  `search_poi_along_route_guarded(...)`.
+- `navigation_add_one_waypoint(...)` delegates to
+  `navigation_add_one_waypoint_guarded(...)`.
+- `navigation_delete_waypoint(...)` delegates to
+  `navigation_delete_waypoint_guarded(...)`.
+- `navigation_replace_one_waypoint(...)` delegates to
+  `navigation_replace_one_waypoint_guarded(...)`.
+- `navigation_replace_final_destination(...)` delegates to
+  `navigation_replace_final_destination_guarded(...)`.
 
-This prevents a smaller model from bypassing policy checks by choosing the raw
-setter despite seeing the helper in the prompt.
+These nine public wrappers have one canonical execution path whether called
+directly or through `batch(...)`. The internal guarded names are not separately
+advertised to the model. Other true policy multitools, including AC, defrost,
+sunroof, and climate-temperature helpers, are still model-selected; their raw
+component paths are not yet universally redirected.
 
 ### Protocol Batch Normalization
 
@@ -566,13 +703,16 @@ Provider-specific keys and base URLs are defined in `config.py`.
 | Provider clients and execute-Python parsing | `provider.py` |
 | JSONL traces and run manifests | `trace_logging.py` |
 | Environment configuration | `config.py` |
-| Public static tool contracts | `original_tool_schemas.json`, `original_tool_metadata.json` |
+| Public static tool contracts | `original_tool_schemas.json`, `original_tool_metadata.json`, `original_tool_outputs.json` |
 | Domain-specific behavioral guidance | `Skills/car_domain*.md` |
 | Trace UI generation | `scripts/build_trace_explorer.py` |
 
 ## Known Limitations
 
 - The static public tool surface contributes substantial prompt tokens.
+- True policy multitools and their independently valid component tools are both
+  visible, so the model can still choose manual policy execution where no
+  transparent raw-wrapper delegation exists.
 - The model can still manually ask for confirmation instead of immediately
   invoking a helper, adding an unnecessary user turn.
 - Only selected policy-critical raw setters currently delegate to helpers.

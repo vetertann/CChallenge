@@ -4,7 +4,21 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
+
+
+# Stable result-key shapes per tool, compiled from observed evaluator tool
+# results in our own run transcripts (benchmark-allowed data — not catalog
+# internals or hidden mock data). Shown so the model writes the correct result
+# access path (e.g. result["climate_temperature_driver"]) instead of guessing.
+_TOOL_OUTPUTS_PATH = Path(__file__).resolve().parent / "original_tool_outputs.json"
+try:
+    ORIGINAL_TOOL_OUTPUTS: dict[str, list[str]] = json.loads(
+        _TOOL_OUTPUTS_PATH.read_text(encoding="utf-8")
+    )
+except Exception:
+    ORIGINAL_TOOL_OUTPUTS = {}
 
 
 _ARGUMENT_SIGNAL = re.compile(
@@ -65,7 +79,11 @@ def render_tool_functions(tools: list[dict[str, Any]]) -> str:
             _render_argument(name, properties.get(name) or {}, optional=True)
             for name in optional
         ]
-        lines.append(f"- `{name}({', '.join(args)})`")
+        signature = f"{name}({', '.join(args)})"
+        output_keys = ORIGINAL_TOOL_OUTPUTS.get(name)
+        if output_keys:
+            signature += " -> result{" + ", ".join(output_keys) + "}"
+        lines.append(f"- `{signature}`")
         if description:
             lines.append(f"  {description}")
         notes = _render_argument_notes(properties)

@@ -23,7 +23,7 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 
 ## Runtime
 - You have exactly one model action surface: execute Python code.
-- Persistent Python globals include `ws`, `scratchpad`, `respond`, `batch`, `result_by_tool`, `result_value`, `id_value`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `handle_missing_requested_capability`, `get_navigation_state`, `get_contact_details`, `defrost_front_window`, `open_sunroof_safe`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `get_route_options`, `select_route`, `get_preferred_ambient_light_color`, and one bare function for each CAR-bench tool name.
+- Persistent Python globals include `ws`, `scratchpad`, `respond`, `batch`, `result_by_tool`, `result_value`, `id_value`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `defrost_front_window`, `open_sunroof_safe`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `set_occupied_seat_heating`, `get_route_options`, `select_route`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
 - Variables you define persist across execute_python calls for the same CAR-bench task.
 - The CAR-bench evaluator, not this Python runtime, executes vehicle/navigation/weather/productivity tools.
 - CAR-bench tool wrappers are API-like coroutine calls: calling a wrapper first checks the current evaluator tool surface. If the tool or a parameter is missing in this task, the wrapper does not emit an invalid evaluator call; it emits the prepared missing-capability response. If supported, it emits the official A2A tool call, waits for evaluator results on the next A2A inbound, then returns the parsed tool result to Python.
@@ -60,10 +60,12 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 ## Execution Strategy
 - Prefer a single Python execution that batches independent reads, branches over returned values, then performs required side effects only after all prerequisites are satisfied.
 - At the start of every user follow-up, if `scratchpad["facts"].get("pending_confirmation")` exists, call `handle_pending_confirmation()` first. If it returns anything other than `None`, stop; it has already answered or executed the confirmed pending action.
-- Prefer calling the relevant wrapper/helper over hand-writing missing-capability refusals. Use `handle_missing_requested_capability()` only when no single obvious wrapper/helper should be called.
+- Prefer calling the relevant wrapper/helper. If a requested tool or parameter is not in the current task's tool list, the runtime emits a grounded limitation when you call the wrapper — you do not need to detect missing capabilities yourself.
 - Treat each workspace helper as a building block, not as proof that the whole user request is finished. After any helper call, re-check the original request and complete every remaining requested action before calling `respond(...)`.
 - If the user asked for multiple outcomes in one request, do not stop after the first successful helper or tool path. Finish all grounded remaining subgoals, or explicitly state what is still blocked.
 - On follow-up questions about what you just changed, check `scratchpad["facts"]` first for helper reports or remembered side effects before re-reading state or guessing.
+- For "today" / current time / current location use `policy_now()` and `policy_location_id()` (mirrored in `scratchpad["facts"]`); never use the host clock.
+- For a follow-up like "which one" or "call it", reuse the runtime-persisted `scratchpad["entities"]` (`last_pois`, `last_routes`, `last_contacts`, `navigation_state`) instead of re-searching.
 - If the last helper report has `status: "UNAVAILABLE"` and the user asks why, what is missing, or which known items are affected, answer from that report. Do not perform side effects to work around a missing capability or missing information.
 - If the last helper report has `status: "UNAVAILABLE"` for AC/window policy 011 and the follow-up asks only to close a known blocking window, call `close_known_windows_for_blocked_ac(...)` and stop. Do not retry the blocked AC/defrost parent action unless the missing information becomes available.
 - Use `batch([...])` for independent reads:
@@ -118,6 +120,10 @@ close_known_windows_for_blocked_ac(window="DRIVER")
 - For explicit temperature changes, prefer the policy-safe helper:
 ```python
 set_climate_temperature_safe(seat_zone="DRIVER", temperature=22)
+```
+- To heat the occupied seats (absolute or relative), prefer the helper so the setter actually runs:
+```python
+set_occupied_seat_heating(increase_by=2)   # or set_occupied_seat_heating(level=3)
 ```
 - For EV range/distance between battery percentages, prefer the normalized helper:
 ```python
@@ -256,8 +262,6 @@ def render_workspace_helpers() -> str:
     return (
         "- `handle_pending_confirmation()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. On follow-up turns, resolves a stored pending confirmation from `scratchpad[\"facts\"][\"pending_confirmation\"]`: executes the stored evaluator calls only on a clear yes/proceed, cancels on a clear no/cancel, or asks for clearer confirmation.\n"
-        "- `handle_missing_requested_capability(action=\"do that\")`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. For hallucination-split missing tool/parameter cases, compares the current user request against the public original tool schema and the live task tool surface. If a requested tool or required parameter is missing, it directly emits the canonical static limitation response and returns a report; otherwise returns `None`.\n"
         "- `id_value(value, field=None)`\n"
         "  Built-in pure extraction helper. Accepts a wrapper result, `result` payload, single-result list, or string and returns the best grounded ID string (`id`, `location_id`, `route_id`, etc.). Use this instead of hand-parsing location/route/POI IDs.\n"
         "- `pois_value(value)`\n"
@@ -286,6 +290,8 @@ def render_workspace_helpers() -> str:
         "  Built-in workspace helper, not a direct evaluator tool. For follow-ups after an AC/defrost helper reported missing window-position information, closes only windows already recorded as known open more than 20%, then responds with the remaining limitation. Does not retry AC or infer unavailable window positions.\n"
         "- `set_climate_temperature_safe(seat_zone, temperature)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Sets an explicit temperature and, for DRIVER or PASSENGER single-zone changes, informs the user if the resulting temperature difference to the other zone is more than 3 degrees Celsius.\n"
+        "- `set_occupied_seat_heating(level=None, increase_by=None)`\n"
+        "  Built-in workspace helper, not a direct evaluator tool. For requests to heat the occupied seats, reads occupancy and current levels from live state and calls `set_seat_heating` for each occupied front seat (DRIVER/PASSENGER). Pass `level` for an absolute target or `increase_by` for a relative change. Use this instead of reading occupancy and then claiming the seats were heated.\n"
         "- `get_route_options(start_id, destination_id)`\n"
         "  Built-in read-only helper, not a direct evaluator tool. Calls `get_routes_from_start_to_destination(...)` and normalizes route results into a stable dict with `routes`, `fastest`, `shortest`, aliases, duration totals, toll metadata, and `raw_result`.\n"
         "- `select_route(routes, route_id=None, alias=None, name_via=None, prefer=None)`\n"
