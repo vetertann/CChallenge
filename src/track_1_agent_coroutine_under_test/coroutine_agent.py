@@ -34,6 +34,8 @@ from config import (  # noqa: E402
     MODEL_TOOL_MODE,
 )
 from coroutine_prompts import (  # noqa: E402
+    NAVIGATION_STATE_POLICY_REMINDER,
+    PREFLIGHT_ATTENTION_REMINDER,
     build_system_prompt,
     environment_message,
     initial_user_message,
@@ -46,6 +48,7 @@ from coroutine_repl import (  # noqa: E402
     OutboundAction,
     ToolBridge,
     format_observation,
+    json_dumps_safe,
 )
 from logging_utils import configure_logger  # noqa: E402
 from provider import (  # noqa: E402
@@ -231,6 +234,8 @@ class CoroutineAgentWorker:
                 return
             try:
                 self._handle_inbound(inbound)
+                self._preflight_state(inbound)
+                self.messages = self._rebuild_messages()
                 self._run_until_outbound()
             except Exception as exc:
                 self.ctx_logger.exception("Coroutine worker failure", error=str(exc))
@@ -245,6 +250,18 @@ class CoroutineAgentWorker:
                         error=str(exc),
                     )
                 )
+
+    def _preflight_state(self, inbound: InboundTurn) -> None:
+        """Ground stable system state before the model starts this user turn."""
+
+        if inbound.source != SOURCE_USER:
+            return
+        result = self.workspace.preflight_navigation_state()
+        self.trace.write(
+            "navigation_state_preflight",
+            status=result.get("status"),
+            navigation_state=result.get("navigation_state"),
+        )
 
     def _handle_inbound(self, inbound: InboundTurn) -> None:
         ws = self.workspace
@@ -283,9 +300,12 @@ class CoroutineAgentWorker:
             return
 
         ws.observe_user(inbound.user_text or "none")
-        self.messages.append(
-            {"role": "user", "content": user_followup_message(inbound.user_text or "none")}
-        )
+        followup = {
+            "role": "user",
+            "content": user_followup_message(inbound.user_text or "none"),
+        }
+        self.stable_messages.append(followup)
+        self.messages.append(followup)
 
     def _rebuild_messages(self) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -299,8 +319,11 @@ class CoroutineAgentWorker:
                 "role": "user",
                 "content": (
                     "Current persistent scratchpad state:\n"
-                    f"{json.dumps(self.workspace.scratchpad, indent=2, ensure_ascii=True)}\n\n"
-                    "Use this as your compact carry-forward memory."
+                    f"{json_dumps_safe(self.workspace.scratchpad, indent=2)}\n\n"
+                    "Use this as your compact carry-forward memory.\n\n"
+                    "Navigation policy reminder:\n"
+                    f"{NAVIGATION_STATE_POLICY_REMINDER}\n\n"
+                    f"{PREFLIGHT_ATTENTION_REMINDER}"
                 ),
             }
         )
@@ -330,10 +353,9 @@ class CoroutineAgentWorker:
             )
 
             if result.response_text:
-                if thought.strip():
-                    self.stable_messages.append(
-                        {"role": "assistant", "content": f"Prior assistant plan:\n{thought.strip()}"}
-                    )
+                self.stable_messages.append(
+                    {"role": "assistant", "content": result.response_text}
+                )
                 metadata = {TURN_METRICS_KEY: self.metrics.as_metadata(self.model)}
                 self.metrics.reset()
                 self.trace.write(
@@ -352,9 +374,9 @@ class CoroutineAgentWorker:
 
     def _next_execute_python(self, step_index: int) -> tuple[dict[str, Any], str, str, str]:
         for retry in range(MODEL_SCHEMA_MAX_RETRIES):
-            request_messages = self.messages
+            request_messages = list(self.messages)
             if retry:
-                request_messages = self.messages + [
+                request_messages = request_messages + [
                     build_repair_message("invalid execute_python action", self.tool_mode)
                 ]
             self.trace.write(

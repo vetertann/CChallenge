@@ -1,10 +1,72 @@
 # Coroutine Agent Architecture and Reliability Techniques
 
 Status: active implementation reference
-Last verified against code: 2026-06-20
+Last verified against code: 2026-06-22
 Agent package: `src/track_1_agent_coroutine_under_test/`
 
-Recent deltas (2026-06-20): removed the catalog-diff missing-capability
+Recent deltas (2026-06-21) — the **facts-vs-intention** refactor: the runtime
+now enforces facts and strict policy but leaves interpretation to the model.
+(1) The active-nav guard no longer redirects — it returns a structured
+`NEEDS_ACTIVE_ROUTE_EDIT` block (with `candidate_destination_id` and
+`active_route`) and the model chooses the edit. (2) Failed mutations are tracked
+by `(tool, target args)` so one target's success can't clear another's failure,
+with a conservative proved-by-read reconciler (a window-position read clears a
+window-close failure). (3) Success-path helpers no longer lock the response
+(`_helper_message` records a suggested sentence) so the model composes one
+message covering every subgoal and warning; locking is reserved for terminal
+conditions (missing capability, confirmation ask, policy block, info
+unavailable, unrecoverable failure). (4) Route narration is staged
+(`search`=offer, `select`="selected for this segment",
+`navigate`="this route segment is now using") so a read is never narrated as an
+action. (5) Contacts/POIs are normalized
+additively (`get_contact_id_by_contact_name` to `contact_ids`/`by_id`; POIs gain
+`poi_id`/`plug_ids`) preserving the raw result. (6) Batched helper results hoist
+non-reserved keys onto the envelope, now tagged with the name the model called
+(not the internal `*_guarded` target). (7) An absent-waypoint delete reports
+`already_absent`/`waypoint_deleted: False` instead of claiming a deletion.
+The follow-up reliability pass keeps this boundary while removing observed
+regressions: helper suggestions accumulate instead of overwriting one another;
+mandatory policy disclosures are response obligations appended only when the
+model omitted them; mutation failures survive all Python blocks in one user
+turn; exact window-field mappings replace substring proofs; identical
+same-state reads are cached and marked `no_progress` without blocking further
+reasoning; successful mutations invalidate that cache. Navigation mutations
+persist returned waypoint/route state with a revision and invalidate stale route
+options. Nested contact names and charging-plug lists are normalized additively.
+Mixed batches preserve the model's original result order. A second ergonomics
+pass adds `ws.facts`/`ws.entities`/`ws.gates`, stable route aliases
+(`selected_route_id`, fastest/shortest IDs), normalized contact `matches`,
+POI `navigation_id` vs `host_location_id`, numeric `remaining_range_km`, and
+safe serialization of arbitrary model-owned scratchpad values. Known pure
+context callables are resolved before helper execution and persistence. Final
+destination replacement keeps a valid model-supplied route ID or fills the route
+only when exactly one option exists; it does not parse user language or
+preferences. Before the first model decision on each user turn, navigation state
+is refreshed and stored as facts. After serializing the scratchpad, the agent
+appends the first **preflight attention message**: a short static policy reminder
+placed next to the state fields it applies to. The reminder does not derive an
+answer from those values, parse user wording, or block a tool. The model remains
+responsible for interpreting the request and choosing the route. This mechanism
+can be extended to other frequently relevant grounded state, including
+disambiguation facts, while preserving the same facts-vs-intention boundary.
+`set_new_navigation(...)` on an active route remains a fact-only
+`NEEDS_ACTIVE_ROUTE_EDIT` result and does not redirect to a mutation.
+Confirmation-required wrappers store the fully grounded action before asking,
+so a follow-up `handle_pending_confirmation()` resumes the exact call.
+Consecutive contact lookups expose their grounded ID intersection without
+selecting a recipient, and `get_next_calendar_entry()` performs the
+current-policy-day calendar read and returns the next entry without interpreting
+the user's larger workflow. Two additional runtime-boundary checks are now
+fact-based and non-task-specific: confirmation-required `send_email(...)`
+repairs a single-recipient address only when a unique contact intersection is
+known and the chosen address belongs to a different grounded contact; and
+`set_new_navigation(...)` validates known multi-leg route chains, replacing a
+stale/base route ID only when there is a unique known connecting route. If route
+facts are incomplete, the model's call is left alone; if all facts are known and
+the chain is impossible with no unique repair, the wrapper returns
+`ROUTE_CHAIN_MISMATCH` rather than emitting a guaranteed-invalid evaluator call.
+
+Prior deltas (2026-06-20): removed the catalog-diff missing-capability
 inference for compliance (now reactive live-membership, see Competition
 Compliance); added output-key rendering (`original_tool_outputs.json`) incl.
 dynamic-key aliasing (`get_distance_by_soc` → `distance_km`,
@@ -12,10 +74,9 @@ dynamic-key aliasing (`get_distance_by_soc` → `distance_km`,
 ten tools (degenerate-call, active-route-edit, and `get_weather` day-clamp
 guards); added the `set_occupied_seat_heating` helper; route-selection narration
 (policy 022/021) now fires on plain route presentations and new-route sets, not
-only edits; the active-nav guard **redirects** `set_new_navigation`-while-active
-to `navigation_replace_final_destination` instead of refusing; nav delete is
-idempotent when the target is already removed. Evaluator is Gemini 2.5 Flash
-(the orgs' default/official judge).
+only edits; nav delete avoids the delete-loop when the target is already
+removed (now reported as `already_absent`, see 2026-06-21). Evaluator is Gemini
+2.5 Flash (the orgs' default/official judge).
 
 This document describes the current participant-owned coroutine agent. It is
 the source of truth for its architecture, prompt/runtime boundary, reliability
@@ -184,6 +245,9 @@ while helpers execute through their Python implementations and may perform
 their own staged tool calls. Dependent operations still must not be bundled
 into the same `batch(...)`.
 
+The returned result list preserves the input call order even though raw calls
+are grouped for parallel transport and helpers execute separately.
+
 Batch call names are normalized against the bundled public tool and helper
 registry. Quoted names are preferred. Known preloaded wrapper/helper callables
 are accepted through their canonical `__name__`; arbitrary callables and
@@ -268,9 +332,9 @@ The model-facing prompt documents 76 callable entries:
 - 4 pure extraction helpers (`id_value`, `pois_value`, `routes_value`, and
   `first_number_value`).
 
-The tool/helper dispatch registry contains 79 known names: the 57 public
-wrappers, 15 model-facing workspace helpers, and seven internal `*_guarded`
-targets. Including the four pure extraction helpers, the REPL therefore has 83
+The tool/helper dispatch registry contains 81 known names: the 57 public
+wrappers, 15 model-facing workspace helpers, and nine internal `*_guarded`
+targets. Including the four pure extraction helpers, the REPL therefore has 85
 relevant callable names, of which 76 are documented choices for the model.
 The guard targets are internal implementations, not separately documented
 choices. The model calls the corresponding public wrapper, and dispatch
@@ -341,9 +405,9 @@ Across A2A user turns, the model context is rebuilt from:
 - The original system prompt.
 - The initial user request.
 - Stable environment messages, when applicable.
-- Short prior assistant plans saved after user-facing responses.
+- Actual prior user follow-ups and outward assistant responses.
 - The current scratchpad snapshot.
-- The latest user follow-up.
+- Preflight attention messages adjacent to that snapshot.
 
 Previous generated code and full REPL observations are dropped across user
 turns. This preserves continuity without carrying large low-value transcripts.
@@ -362,12 +426,96 @@ scratchpad = {
 
 - `gates` stores policy, confirmation, disambiguation, and capability verdicts.
 - `entities` stores grounded IDs and selected objects.
-- `facts` stores durable derived facts, helper reports, and pending
-  confirmations.
+- `facts` stores durable derived facts, helper reports, pending confirmations,
+  and turn-local response/no-progress records.
 
 Helpers write structured reports to `facts`, including
 `last_helper_report`. This gives follow-up turns grounded continuity without
 requiring the model to reconstruct prior tool results from prose.
+
+Successful helper suggestions accumulate in `pending_helper_messages` for the
+current user turn. Policy-mandated disclosures can additionally register a
+`pending_response_obligation`; `respond(...)` appends only obligations the
+model's text did not already satisfy. This preserves compound-request
+flexibility without making required warnings optional.
+
+### Preflight Attention Messages
+
+A preflight attention message is a short prompt-level reminder placed directly
+after freshly grounded scratchpad state. Its purpose is to make a
+decision-relevant policy or disambiguation rule hard to overlook in a long
+prompt. It is an attention mechanism, not a runtime decision mechanism.
+
+The sequence is:
+
+1. Read frequently needed system state through an official evaluator tool.
+2. Normalize and store only grounded facts in the scratchpad.
+3. Serialize the current scratchpad for the model.
+4. Append a concise reminder that names the relevant fields and the general
+   policy or disambiguation rule.
+5. Let the model combine those facts with the user request and choose its next
+   Python action.
+
+The message text is static and general. Whether a message is included may depend
+on the presence or category of grounded preflight state, and may point out
+simple decision dimensions such as `is_multi_stop` or candidate count. It must
+not parse task wording, identify a benchmark task, encode a destination/contact
+answer, or decide which valid action the user intended.
+
+Current navigation example:
+
+```text
+Scratchpad facts:
+waypoint_count = 2
+segment_count = 1
+is_multi_stop = false
+
+Attention:
+For final-destination replacement with exactly two waypoints and one segment,
+present alternatives and wait unless the user or preferences uniquely selected
+one. The proactive fastest default applies to multi-stop routes.
+```
+
+Organizer Q&A on 2026-06-22 clarified two route-policy boundaries used by this
+attention message and the navigation wrappers:
+
+- If the user explicitly asks to see multiple route options, that explicit
+  request overrides the default proactive-fastest rule. The agent should present
+  options and wait for the user's choice.
+- After deleting or replacing a waypoint, the fastest-route default applies to
+  the newly created or replaced segment. It does not require rewriting unrelated
+  existing route segments.
+
+Route-edit narration should therefore be scoped to what changed, e.g. "the new
+Brussels-to-Berlin connection uses the fastest route", not "the whole
+navigation is now using the fastest route" unless every segment is known to have
+been selected that way.
+
+The same pattern can support other high-value state without restricting model
+reasoning. Possible examples include:
+
+- Seat occupancy: remind the model to use grounded occupancy for requests about
+  occupied seats, while respecting an explicitly named seat.
+- Window and climate state: place the relevant AC/window prerequisite next to
+  current positions so the model can plan the required sequence.
+- Contact candidates: when grounded candidate facts show several valid matches,
+  remind the model to apply policy, explicit constraints, preferences, and
+  intersections before asking or selecting; never default to the first result.
+- Calendar state: place the current policy date and grounded next-entry facts
+  next to the rule that available system facts should be used before asking the
+  user for information.
+
+Guardrails:
+
+- Preflight facts must come from official tools, policy context, or prior
+  successful participant-agent calls, never evaluator internals or hidden task
+  data.
+- Messages may attract attention to facts and policy, but must not perform a
+  mutation, suppress a valid tool path, or manufacture a user selection.
+- State freshness and invalidation must be explicit. A reminder beside stale
+  state is worse than no reminder.
+- Keep the set small and high-value. Repeating every policy rule after the
+  scratchpad would recreate prompt noise and defeat the mechanism.
 
 ## Tool-Surface Reliability
 
@@ -413,6 +561,19 @@ Before A2A emission, the runtime validates calls against the live schema:
 
 Some stable normalizations are applied before validation, such as accepted
 window labels and grounded object IDs.
+
+### Turn-Scoped Outcome and Read State
+
+Mutation failures are keyed by tool plus semantic target arguments and survive
+all model-written Python blocks in the same user turn. A success on the same
+target, or a conservative exact state proof, clears the failure. A new user turn
+clears unresolved failures so they cannot contaminate unrelated requests.
+
+Successful non-mutating calls are cached by tool, normalized arguments, and
+runtime state revision. Repeating the exact read in the same state returns the
+grounded cached result with `cached: True` and `no_progress: True`; it does not
+emit another evaluator call or prohibit different reasoning. Any successful
+mutation advances the runtime state revision and invalidates the read cache.
 
 ## Missing Response Data
 
@@ -462,7 +623,23 @@ Examples:
 - Navigation state exposes `start_id`, `destination_id`, `waypoint_ids`,
   `route_ids`, `waypoints`, and `routes`.
 - Contact information keyed by contact ID becomes `contacts`, `by_id`, and
-  single-contact shortcuts such as `email`.
+  single-contact shortcuts such as `email`; nested names also expose
+  `first_name`, `last_name`, and `display_name`.
+- Charging POIs preserve normalized `charging_plugs` and expose `plug_ids` plus
+  `available_plug_ids`; both `pois_found` and `pois_found_along_route` payloads
+  are recognized.
+- POI summaries keep the chosen place and its containing location adjacent:
+  `name`, `poi_id`, `navigation_id`, `host_location_id`,
+  `host_location_name`, and a compact `display` string. Navigation targets the
+  `navigation_id`; the host location is context only.
+- Loc-to-POI routes may include both a POI-specific `route_id` and a
+  location-level `base_route_id`. If a model supplies the `base_route_id` while
+  replacing a destination with a POI, the wrapper maps it to the unique matching
+  POI route ID before emitting the evaluator call.
+- Calendar entries from `get_entries_from_calendar(...)` expose stable
+  `start_time` / `start_time_24h`, numeric `start_hour`, `start_minute`,
+  `start_minutes`, and `display` fields in addition to the original `start`
+  object.
 - A unique `matches` mapping can be resolved by `id_value(...)`.
 
 Normalization reduces model retries, key guessing, and accidental use of
@@ -487,7 +664,7 @@ Current helpers:
 | `set_fog_lights_on_safe()` | Checks weather and lights, applies low/high-beam prerequisites, and confirms when required. |
 | `set_high_beams_on_safe()` | Blocks high beams while fog lights are on and applies tool confirmation. |
 | `get_route_options(...)` | Normalizes route choices, aliases, durations, and toll metadata. |
-| `select_route(...)` | Selects one uniquely identified route without guessing. |
+| `select_route(...)` | Selects one uniquely identified route without guessing and records revision-bound provenance. |
 | `get_preferred_ambient_light_color()` | Resolves a unique stored ambient-light preference. |
 
 Normalization helpers such as `get_navigation_state(...)`,
@@ -508,8 +685,11 @@ helpers. Currently:
 - `set_new_navigation(...)` delegates to `set_new_navigation_guarded(...)`.
 - `get_routes_from_start_to_destination(...)` delegates to
   `get_routes_guarded(...)`.
+- `get_weather(...)` delegates to `get_weather_guarded(...)`.
 - `search_poi_along_the_route(...)` delegates to
   `search_poi_along_route_guarded(...)`.
+- `get_contact_id_by_contact_name(...)` delegates to
+  `get_contact_id_by_contact_name_guarded(...)`.
 - `navigation_add_one_waypoint(...)` delegates to
   `navigation_add_one_waypoint_guarded(...)`.
 - `navigation_delete_waypoint(...)` delegates to
@@ -519,11 +699,35 @@ helpers. Currently:
 - `navigation_replace_final_destination(...)` delegates to
   `navigation_replace_final_destination_guarded(...)`.
 
-These nine public wrappers have one canonical execution path whether called
+These eleven public wrappers have one canonical execution path whether called
 directly or through `batch(...)`. The internal guarded names are not separately
 advertised to the model. Other true policy multitools, including AC, defrost,
 sunroof, and climate-temperature helpers, are still model-selected; their raw
 component paths are not yet universally redirected.
+
+The final-destination wrapper does not determine whether user wording authorizes
+a route choice. It validates a supplied route ID against retrieved alternatives,
+fills an omitted ID only when one route exists, and preserves the model's choice
+otherwise.
+
+Before the first model decision on every user turn, the worker preflights
+`get_current_navigation_state(...)` when that tool is available. `observe_user`
+marks the previous turn's snapshot stale, so the first preflight reads fresh
+state; repeated access within the same turn can reuse that result. The
+normalized waypoint order, count, segment count, and `is_multi_stop` value are
+placed in `scratchpad["entities"]["navigation_state"]`. Model-written Python is
+not interrupted, and `batch(...)` returns every completed result normally.
+
+Stored navigation state contains facts, not an embedded instruction. A static
+navigation-policy reminder is appended after the serialized scratchpad so the
+model sees the relevant policy next to the current route shape. This is the
+first implemented preflight attention message. It does not inspect user wording,
+choose a route, block a wrapper, or inject a per-call dynamic message.
+
+Conversation continuity also retains actual user follow-ups and outward
+assistant responses in the stable model history. This allows references such as
+"that route" to be resolved from what the assistant really presented, rather
+than from a generated plan summary.
 
 ### Protocol Batch Normalization
 
@@ -555,6 +759,8 @@ On the next user turn, `handle_pending_confirmation()`:
 - Executes stored calls only after clear confirmation.
 - Cancels them after a clear refusal.
 - Requests a clearer answer when intent is ambiguous.
+- Locks the grounded completion response after confirmed calls succeed, avoiding
+  an unnecessary extra model composition step.
 
 Policy helpers use the same mechanism for interaction in the middle of a
 protocol, such as unsafe-weather sunroof or fog-light activation. No keyword is
@@ -574,7 +780,7 @@ This supports direct responses for:
 - Policy refusals.
 - Confirmation prompts.
 - Failed tool results.
-- Completed helper protocols.
+- Completed explicitly confirmed pending actions.
 
 `_response_locked` prevents later model-written statements in the same Python
 block from overwriting a runtime-generated answer. For example:
@@ -586,6 +792,9 @@ respond("Fog lights are on.")
 
 If the helper reports missing data, execution stops and the ungrounded success
 claim is never used.
+
+Ordinary successful helpers do not lock the response. They return reports and
+suggested sentences so the model can finish all subgoals in a compound request.
 
 ## Provider Routing
 

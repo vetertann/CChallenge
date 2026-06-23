@@ -198,6 +198,32 @@ def summarize_step(events: list[dict[str, Any]], start_index: int, end_index: in
     }
 
 
+def llm_bunches_from_events(events: list[dict[str, Any]]) -> list[int]:
+    """Sequence of LLM-call bunch sizes between tool-call bunches.
+
+    The trace alternates LLM calls (`model_request` — each model generation,
+    including a parse-error retry) and tool-call bunches (`coroutine_resume_tool_results`
+    — one or more tool calls the bridge ran from the preceding generation's code).
+    We count the LLM calls that accumulate between tool-call bunches. The Track-1
+    rule caps each such bunch at 5 sequential LLM calls (parallel tool calls,
+    being driven by one generation, never split a bunch). A runtime preflight
+    tool read has no preceding model_request, so it never closes a bunch.
+    """
+
+    bunches: list[int] = []
+    cur = 0
+    for e in events:
+        ev = e.get("event")
+        if ev == "model_request":
+            cur += 1
+        elif ev == "coroutine_resume_tool_results" and cur > 0:
+            bunches.append(cur)
+            cur = 0
+    if cur > 0:
+        bunches.append(cur)
+    return bunches
+
+
 def summarize_trace(path: Path) -> dict[str, Any]:
     events = read_jsonl(path)
     inbound_idx = [i for i, e in enumerate(events) if e.get("event") == "inbound_a2a"]
@@ -206,11 +232,14 @@ def summarize_trace(path: Path) -> dict[str, Any]:
         end = inbound_idx[pos + 1] if pos + 1 < len(inbound_idx) else len(events)
         steps.append(summarize_step(events, start, end))
     session = next((e for e in events if e.get("event") == "session_start"), {})
+    llm_bunches = llm_bunches_from_events(events)
     metrics = {
         "task_wall_time_ms": elapsed_ms(events[0].get("ts") if events else None, events[-1].get("ts") if events else None),
         "model_latency_ms": sum(s["metrics"]["model_latency_ms"] for s in steps),
         "total_tokens": sum(s["metrics"]["total_tokens"] for s in steps),
         "num_llm_calls": sum(s["metrics"]["num_llm_calls"] for s in steps),
+        "llm_bunches": llm_bunches,
+        "max_llm_bunch": max(llm_bunches) if llm_bunches else 0,
     }
     return {
         "context_id": events[0].get("context_id") if events else path.stem,
@@ -252,6 +281,82 @@ def task_metrics_from_row(row: dict[str, Any]) -> dict[str, float]:
     }
 
 
+# Track-1 (Cerebras) inference-compute constraints.
+#   * Tokens: average over tasks must stay under this cap (baseline ~54k).
+#   * Sequential LLM calls: per next-action decision, up to 5x the baseline's
+#     sequential steps; parallel tool calls inside one step count as one. A
+#     batched/parallel tool round is already a single assistant message, so
+#     `num_a2a_turns` (assistant messages) is the sequential-call count with
+#     parallelism already collapsed.
+TOKEN_CAP_AVG = 500_000
+SEQ_CALL_CAP = 5  # max sequential LLM calls in one bunch (between tool-call bunches)
+
+
+def compute_constraints(
+    total_tokens: float,
+    llm_bunches: list[int] | None = None,
+) -> dict[str, Any]:
+    """Per-task Track-1 compute-constraint check.
+
+    Two limits:
+      * Tokens: the run AVERAGE must stay under TOKEN_CAP_AVG (baseline ~54k). A
+        single task over the cap is flagged as "pulls the average", not a hard
+        per-task violation.
+      * Sequential LLM calls: walk the trace, count the LLM calls in each bunch
+        between tool-call bunches; no bunch may exceed SEQ_CALL_CAP (5). One
+        generation can drive many sequential/parallel tool calls through the
+        coroutine bridge, so tool calls split bunches but do not inflate them.
+
+    `llm_bunches` comes from the REPL trace; without a trace the sequential check
+    is "unknown" (we never flag it).
+    """
+
+    total_tokens = int(number(total_tokens))
+    max_bunch = max(llm_bunches) if llm_bunches else None
+    have_trace = llm_bunches is not None
+
+    violations: list[str] = []
+    if total_tokens > TOKEN_CAP_AVG:
+        violations.append("tokens_over_cap")  # informational; cap is on the average
+    if max_bunch is not None and max_bunch > SEQ_CALL_CAP:
+        violations.append("seq_calls_over_cap")
+
+    return {
+        "total_tokens": total_tokens,
+        "token_cap_avg": TOKEN_CAP_AVG,
+        "tokens_over_cap": total_tokens > TOKEN_CAP_AVG,
+        "have_trace": have_trace,
+        "llm_bunches": llm_bunches or [],
+        "max_llm_bunch": max_bunch,
+        "seq_cap": SEQ_CALL_CAP,
+        "seq_ok": max_bunch is None or max_bunch <= SEQ_CALL_CAP,
+        "violations": violations,
+    }
+
+
+def summarize_constraints(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    token_vals = [
+        t["constraints"]["total_tokens"]
+        for t in tasks
+        if isinstance(t.get("constraints"), dict)
+    ]
+    avg_tokens = sum(token_vals) / len(token_vals) if token_vals else 0.0
+    return {
+        "avg_tokens": avg_tokens,
+        "token_cap_avg": TOKEN_CAP_AVG,
+        "avg_tokens_ok": avg_tokens <= TOKEN_CAP_AVG,
+        "tasks_over_token_cap": [
+            t["task_id"] for t in tasks if t.get("constraints", {}).get("tokens_over_cap")
+        ],
+        "tasks_over_seq_cap": [
+            t["task_id"]
+            for t in tasks
+            if "seq_calls_over_cap" in t.get("constraints", {}).get("violations", [])
+        ],
+        "flagged_tasks": [t["task_id"] for t in tasks if t.get("constraints", {}).get("violations")],
+    }
+
+
 def parse_run_file(path: Path) -> dict[str, Any] | None:
     data = json.loads(path.read_text(errors="replace"))
     if not isinstance(data, dict) or "metadata" not in data or "final_result" not in data:
@@ -267,6 +372,7 @@ def parse_run_file(path: Path) -> dict[str, Any] | None:
         for row in rows or []:
             task = row.get("task", {}) or {}
             traj = row.get("trajectory") or row.get("traj") or []
+            expected_actions = task.get("actions") or []
             tasks.append(
                 {
                     "split": split,
@@ -276,12 +382,17 @@ def parse_run_file(path: Path) -> dict[str, Any] | None:
                     "error": row.get("error"),
                     "first_user": first_user_from_traj(traj),
                     "instruction": task.get("instruction"),
-                    "expected_actions": task.get("actions") or [],
+                    "expected_actions": expected_actions,
                     "reward_info": row.get("reward_info") or {},
                     "metrics": task_metrics_from_row(row),
+                    # Sequential-call check needs the REPL trace; build_payload
+                    # recomputes it once the trace is attached. Here: tokens only.
+                    "constraints": compute_constraints(number(row.get("agent_total_tokens"))),
                     "trajectory": slim(traj),
                 }
             )
+
+    constraint_summary = summarize_constraints(tasks)
 
     pass_by_split = {}
     for split, info in (final.get("pass_at_k_scores_by_split", {}) or {}).items():
@@ -312,6 +423,7 @@ def parse_run_file(path: Path) -> dict[str, Any] | None:
         "pass_at_k": final.get("pass_at_k_scores", {}) or {},
         "pass_power_k": final.get("pass_power_k_scores", {}) or {},
         "pass_by_split": pass_by_split,
+        "constraint_summary": constraint_summary,
         "tasks": tasks,
     }
 
@@ -465,6 +577,18 @@ def build_payload(
         if run is None:
             continue
         attach_traces(run, trace_dir)
+        # Recompute the sequential-call constraint from the REPL trace: count true
+        # model GENERATIONS per decision (one generation can drive many tool calls
+        # via the coroutine bridge), not A2A tool rounds. Done before omission so
+        # the small constraints dict survives even when traces are dropped.
+        for task in run["tasks"]:
+            tr = task.get("trace")
+            if tr:
+                task["constraints"] = compute_constraints(
+                    task["metrics"]["total_tokens"],
+                    (tr.get("metrics") or {}).get("llm_bunches"),
+                )
+        run["constraint_summary"] = summarize_constraints(run["tasks"])
         # Large full-set runs keep their scoreboard + per-task reward_info, but
         # drop embedded REPL steps / trajectories so the single HTML stays light.
         # Step-level drill-in is preserved for smaller, targeted runs.
@@ -520,6 +644,8 @@ HTML_TEMPLATE = """<!doctype html>
   .pass { color:var(--ok); border-color:rgba(89,195,106,.4); }
   .fail { color:var(--bad); border-color:rgba(255,107,107,.4); }
   .mid { color:var(--warn); border-color:rgba(246,200,95,.4); }
+  .pill.warn { color:var(--warn); border-color:rgba(246,200,95,.4); }
+  .badtx { color:var(--bad); font-weight:600; }
   .panel { border:1px solid var(--line); background:var(--panel); border-radius:12px; padding:14px; margin-bottom:14px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:9px; }
   .kv { background:var(--panel2); border-radius:9px; padding:9px; }
@@ -565,6 +691,31 @@ function pct(x){return `${(num(x)*100).toFixed(1)}%`;}
 function fmtMs(x){const n=num(x);return n>=1000?`${(n/1000).toFixed(1)} s`:`${n.toFixed(0)} ms`;}
 function fmtTok(x){const n=num(x);return n>=1000?`${(n/1000).toFixed(1)}k`:`${Math.round(n)}`;}
 function rewardCls(r){if(r===null||r===undefined)return 'mid';return num(r)>=0.99?'pass':'fail';}
+// Compact constraint badge for the task table: red on a real budget violation,
+// amber when a single task exceeds the per-task token figure (cap is on the
+// average), green when both checks pass.
+function constraintBadge(c){
+  if(!c)return '';
+  const seqBad=(c.violations||[]).includes('seq_calls_over_cap');
+  const tokHi=(c.violations||[]).includes('tokens_over_cap');
+  if(seqBad)return `<span class="pill fail" title="a bunch of ${c.max_llm_bunch} sequential LLM calls between tool calls exceeds the cap of ${c.seq_cap}">⚠ ${c.max_llm_bunch}/${c.seq_cap} LLM</span>`;
+  if(tokHi)return `<span class="pill warn" title="this task uses ${fmtTok(c.total_tokens)} tokens; the 500k cap is on the run average">▲ ${fmtTok(c.total_tokens)}</span>`;
+  if(c.max_llm_bunch==null)return '<span class="pill mid" title="no REPL trace: sequential-call count unavailable">tok ok</span>';
+  return `<span class="pill pass" title="largest LLM-call bunch ${c.max_llm_bunch} ≤ cap ${c.seq_cap}">ok ${c.max_llm_bunch}/${c.seq_cap}</span>`;
+}
+function constraintPanel(c){
+  if(!c)return '';
+  const seqBad=(c.violations||[]).includes('seq_calls_over_cap');
+  const bunches=(c.llm_bunches||[]).join(', ')||'—';
+  return `<h3>Track-1 Compute Constraints</h3><div class="grid">
+    <div class="kv"><b>Max LLM calls between tool calls</b><span class="${seqBad?'badtx':''}">${c.max_llm_bunch==null?'—':c.max_llm_bunch}</span> / cap ${c.seq_cap}</div>
+    <div class="kv"><b>LLM-call bunches</b>${esc(bunches)}</div>
+    <div class="kv"><b>Tokens (task)</b><span class="${c.tokens_over_cap?'badtx':''}">${fmtTok(c.total_tokens)}</span> / 500k avg-cap</div>
+  </div>
+  <div class="small">The trace alternates LLM-call bunches and tool-call bunches. We count the LLM calls in each bunch between tool calls; the cap is ${c.seq_cap} sequential LLM calls. One generation drives many sequential/parallel tool calls through the coroutine bridge, so tool calls split bunches without inflating them. Token cap (500k) is on the run average.</div>
+  ${c.have_trace?'':'<div class="small" style="color:var(--warn)">⚠ No matched REPL trace, so the LLM-call bunches are unavailable for this task.</div>'}
+  ${seqBad?'<div class="small" style="color:var(--bad)">⚠ A bunch of LLM calls between tool calls exceeded the cap — inspect the trace for a reasoning loop or parse-retry storm.</div>':''}`;
+}
 function rdate(s){return s?String(s).replace('T',' ').replace(/\\..*/,'').replace('+00:00','Z'):'-';}
 
 function runPass(r){const p1=r.pass_at_k&&r.pass_at_k['Pass@1'];return p1!==undefined?p1:r.pass_rate;}
@@ -626,6 +777,7 @@ function renderTask(run,task){
   return `<section class="panel">
     <h2>${esc(task.task_id)} · ${esc(task.split)} · trial ${task.trial} ${task.reward!==null&&task.reward!==undefined?`<span class="pill ${rewardCls(task.reward)}">reward ${task.reward}</span>`:''}</h2>
     <h3>Task Metrics</h3>${metricCards(task.metrics)}
+    ${constraintPanel(task.constraints)}
     <h3>First User Message</h3><pre>${esc(task.first_user||'(none captured)')}</pre>
     ${task.instruction?`<h3>Task Instruction (evaluator)</h3><pre>${esc(task.instruction)}</pre>`:''}
     ${Object.keys(task.reward_info||{}).length?`<h3>Reward Info</h3><pre>${pretty(task.reward_info)}</pre>`:''}
@@ -672,17 +824,26 @@ function renderRun(){
         ${Object.entries(run.pass_power_k||{}).map(([k,v])=>`<div class="kv"><b>${esc(k)}</b>${pct(v)}</div>`).join('')}
       </div>
       ${splits.length>1?`<h3>By Split</h3><div class="grid">${splits.map(s=>`<div class="kv"><b>${esc(s)}</b>${pct((run.pass_by_split[s].pass_at_k||{})['Pass@1'])}</div>`).join('')}</div>`:''}
+      ${run.constraint_summary?(cs=>`<h3>Compute Constraints</h3><div class="grid">
+        <div class="kv"><b>Avg tokens / task</b><span class="${cs.avg_tokens_ok?'':'badtx'}">${fmtTok(cs.avg_tokens)}</span> / 500k cap</div>
+        <div class="kv"><b>Token cap status</b><span class="pill ${cs.avg_tokens_ok?'pass':'fail'}">${cs.avg_tokens_ok?'within cap':'OVER CAP'}</span></div>
+        <div class="kv"><b>Seq-cap violations (&gt;5 LLM/bunch)</b><span class="pill ${(cs.tasks_over_seq_cap||[]).length?'fail':'pass'}">${(cs.tasks_over_seq_cap||[]).length}</span></div>
+        <div class="kv"><b>Tasks over 500k (pull avg)</b>${(cs.tasks_over_token_cap||[]).length}</div>
+      </div>
+      ${(cs.tasks_over_seq_cap||[]).length?`<div class="small" style="color:var(--bad)">⚠ Sequential LLM-call cap exceeded: ${cs.tasks_over_seq_cap.map(esc).join(', ')}</div>`:''}
+      ${(cs.tasks_over_token_cap||[]).length?`<div class="small">Tasks above the 500k per-task figure (cap is on the average): ${cs.tasks_over_token_cap.map(esc).join(', ')}</div>`:''}`)(run.constraint_summary):''}
       ${run.incomplete?`<div class="small" style="margin-top:8px">⚠ Incomplete run reconstructed from run_logs traces only (no evaluator result file — killed or in progress). Rewards / pass rates are unavailable; the REPL traces below are shown.</div>`:''}
       ${run.detail_omitted?`<div class="small" style="margin-top:8px">⚠ Large run (${run.detail_omitted} tasks): per-task REPL traces and trajectories are omitted to keep the catalog light. Reward, reward_info, and metrics are kept. To inspect this run's traces, rebuild with <code>--output-dir ${esc((run.file||'').split('/').slice(0,-1).join('/'))}</code>.</div>`:''}
       <details><summary>Run file</summary><div class="db"><pre>${esc(run.file)}\n${esc(run.run_log_dir||'(no matched run_logs dir)')}</pre></div></details>
     </section>
     <section class="panel">
       <h2>Tasks (${run.tasks.length})</h2>
-      <table><thead><tr><th>Task</th><th>Split</th><th>Trial</th><th>Reward</th><th>Tokens</th><th>A2A turns</th><th>Trace</th></tr></thead><tbody>
+      <table><thead><tr><th>Task</th><th>Split</th><th>Trial</th><th>Reward</th><th>Tokens</th><th>A2A turns</th><th>Constraints</th><th>Trace</th></tr></thead><tbody>
         ${run.tasks.map(t=>`<tr class="tk ${taskKey(t)===selTask?'active':''}" onclick="selectTask('${esc(taskKey(t))}')">
           <td>${esc(t.task_id)}</td><td>${esc(t.split)}</td><td>${t.trial}</td>
           <td><span class="pill ${rewardCls(t.reward)}">${t.reward??'-'}</span></td>
           <td>${fmtTok(t.metrics.total_tokens)}</td><td>${fmtTok(t.metrics.num_a2a_turns)}</td>
+          <td>${constraintBadge(t.constraints)}</td>
           <td>${t.trace?'✓':'—'}</td></tr>`).join('')}
       </tbody></table>
     </section>

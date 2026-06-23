@@ -7,9 +7,12 @@ from track_1_agent_coroutine_under_test.coroutine_repl import (
     ResponseReady,
     UnknownToolResponseValue,
     WORKSPACE_HELPER_NAMES,
+    id_value,
+    json_dumps_safe,
     result_by_tool,
     result_value,
     routes_value,
+    unique_id_intersection,
 )
 
 
@@ -102,17 +105,24 @@ class CoroutineBatchHelperTest(unittest.TestCase):
         self.assertEqual(location["location_id"], "loc_rom_1")
         self.assertEqual(navigation["destination_id"], "loc_rom_1")
         self.assertEqual(
+            [result["tool_name"] for result in results],
+            ["get_navigation_state", "get_location_id_by_location_name"],
+        )
+        self.assertEqual(
             [[call["tool_name"] for call in request] for request in bridge.requests],
             [["get_location_id_by_location_name"], ["get_current_navigation_state"]],
         )
 
     def test_executor_batch_uses_helper_aware_dispatch(self) -> None:
-        workspace, _ = self.make_workspace()
+        workspace, bridge = self.make_workspace()
         executor = BlockingPythonExecutor(workspace)
 
         execution = executor.run(
             """
-results = batch([("get_navigation_state", {"detailed_information": True})])
+results = batch([
+    ("get_navigation_state", {"detailed_information": True}),
+    ("get_location_id_by_location_name", {"location": "Rome"}),
+])
 navigation = result_value(result_by_tool(results, "get_navigation_state"))
 print(navigation["destination_id"])
 """
@@ -120,6 +130,14 @@ print(navigation["destination_id"])
 
         self.assertIsNone(execution.error)
         self.assertEqual(execution.stdout.strip(), "loc_rom_1")
+        self.assertEqual(
+            [[call["tool_name"] for call in request] for request in bridge.requests],
+            [["get_location_id_by_location_name"], ["get_current_navigation_state"]],
+        )
+        self.assertEqual(
+            workspace.scratchpad["entities"]["navigation_state"]["destination_id"],
+            "loc_rom_1",
+        )
         self.assertNotIn("get_navigation_state", workspace.scratchpad["gates"])
 
     def test_every_registered_helper_is_dispatched_as_a_helper(self) -> None:
@@ -198,8 +216,13 @@ batch([(custom_call, {})])
 
         self.assertEqual(bridge.requests, [])
         self.assertEqual(called, ["set_high_beams_on_safe"])
-        self.assertEqual(results[0]["tool_name"], "set_high_beams_on_safe")
+        # The result envelope is tagged with the name the model actually called
+        # (the raw tool), not the internal delegation target, so the model can
+        # locate it via result_by_tool(results, "set_head_lights_high_beams").
+        self.assertEqual(results[0]["tool_name"], "set_head_lights_high_beams")
         self.assertEqual(results[0]["status"], "SUCCESS")
+        # Non-reserved helper fields are hoisted onto the envelope.
+        self.assertEqual(results[0]["enabled"], True)
 
     def test_helper_batch_preserves_non_success_status(self) -> None:
         workspace, bridge = self.make_workspace()
@@ -282,6 +305,42 @@ batch([(custom_call, {})])
         self.assertIs(value["remaining_range"], unknown)
         self.assertIsNone(workspace._response_text)
 
+    def test_result_value_selects_index_from_result_list(self) -> None:
+        results = [
+            {"status": "SUCCESS", "tool_name": "lookup", "result": {"id": "a"}},
+            {"status": "SUCCESS", "tool_name": "lookup", "result": {"id": "b"}},
+        ]
+
+        self.assertEqual(result_value(results, index=1), {"id": "b"})
+
+    def test_id_value_reads_one_normalized_contact_id(self) -> None:
+        self.assertEqual(id_value({"contact_ids": ["con_1"]}), "con_1")
+
+    def test_id_value_rejects_ambiguous_normalized_contacts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "2 candidates"):
+            id_value({"contact_ids": ["con_1", "con_2"]})
+
+    def test_unique_id_intersection_accepts_normalized_contact_lookups(self) -> None:
+        self.assertEqual(
+            unique_id_intersection(
+                {"contact_ids": ["con_1", "con_2"]},
+                {"matches": ["con_2", "con_3"]},
+            ),
+            "con_2",
+        )
+
+    def test_unique_id_intersection_rejects_ambiguous_or_empty_results(self) -> None:
+        with self.assertRaises(ValueError):
+            unique_id_intersection(["con_1", "con_2"], ["con_1", "con_2"])
+        with self.assertRaises(ValueError):
+            unique_id_intersection(["con_1"], ["con_2"])
+
+    def test_json_dumps_safe_handles_model_owned_callables(self) -> None:
+        text = json_dumps_safe({"value": lambda: None})
+
+        self.assertIn("<callable", text)
+        self.assertNotIn("0x", text)
+
     def test_parsed_success_exposes_unknown_result_field_at_top_level(self) -> None:
         workspace, _ = self.make_workspace()
         parsed = workspace._parse_tool_result(
@@ -319,6 +378,7 @@ batch([(custom_call, {})])
         }
 
         selected = workspace.select_route([route], prefer="fastest")
+        self.assertEqual(selected["selected_route_id"], "route-fast")
 
         self.assertEqual(selected["status"], "SUCCESS")
         self.assertIs(selected["result"], selected["route"])
