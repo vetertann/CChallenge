@@ -586,6 +586,12 @@ class UnknownToolResponseValue(str):
     def require(self) -> NoReturn:
         self._workspace._abort_missing_tool_response(self.response_path)
 
+    def __copy__(self) -> "UnknownToolResponseValue":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "UnknownToolResponseValue":
+        return self
+
     def __bool__(self) -> bool:
         self.require()
 
@@ -1170,8 +1176,9 @@ class CoroutineWorkspace:
                 "confirmation_required": False,
                 "description": (
                     "Built-in policy helper for activating high beams. It reads fog-light state, "
-                    "blocks activation while fog lights are on under policy 014, and routes the "
-                    "high-beam setter through its explicit confirmation requirement."
+                    "blocks activation only when fog lights are known on under policy 014, records "
+                    "unknown fog state internally, and routes the high-beam setter through its "
+                    "explicit confirmation requirement."
                 ),
                 "required_arguments": [],
                 "optional_arguments": [],
@@ -1658,6 +1665,8 @@ class CoroutineWorkspace:
             for key in (
                 "last_helper_message",
                 "last_no_progress",
+                "last_climate_settings_turn",
+                "last_navigation_state_turn",
                 "pending_helper_messages",
                 "pending_response_obligations",
                 "pending_route_narration",
@@ -1684,6 +1693,18 @@ class CoroutineWorkspace:
             # Replace the model's (likely optimistic) text with a grounded,
             # truthful failure so we never claim an unexecuted change.
             self._respond_locked(blocker)
+            return
+        fan_blocker = self._unknown_fan_speed_relative_response(message)
+        if fan_blocker is not None:
+            self._respond_locked(fan_blocker)
+            return
+        nav_blocker = self._unknown_navigation_structure_response(message)
+        if nav_blocker is not None:
+            self._respond_locked(nav_blocker)
+            return
+        replacement_blocker = self._missing_destination_replacement_response(message)
+        if replacement_blocker is not None:
+            self._respond_locked(replacement_blocker)
             return
         message = self._append_response_obligations(message)
         message = self._append_pending_route_narration(message)
@@ -1802,6 +1823,344 @@ class CoroutineWorkspace:
             return "I hit an internal issue while preparing the response."
         return clean
 
+    @staticmethod
+    def _fan_speed_delta_phrase(
+        delta: int | None,
+        direction: str | None = None,
+    ) -> str:
+        if delta is None:
+            if direction in {"increase", "decrease"}:
+                return f"{direction} the fan speed by the requested number of levels"
+            return "change the fan speed by the requested number of levels"
+        direction = "increase" if delta > 0 else "decrease"
+        steps = abs(int(delta))
+        if steps == 1:
+            return f"{direction} the fan speed by one level"
+        return f"{direction} the fan speed by {steps} levels"
+
+    def _unknown_fan_speed_relative_message(
+        self,
+        delta: int | None = None,
+        direction: str | None = None,
+    ) -> str:
+        return (
+            f"I can't {self._fan_speed_delta_phrase(delta, direction)} because I looked it up "
+            "and the car system did not provide the current fan speed."
+        )
+
+    def _current_turn_climate_settings(self) -> dict[str, Any] | None:
+        facts = self.scratchpad.get("facts")
+        if not isinstance(facts, dict):
+            return None
+        if facts.get("last_climate_settings_turn") != self.last_user_message:
+            return None
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        climate = entities.get("last_climate_settings")
+        return climate if isinstance(climate, dict) else None
+
+    @staticmethod
+    def _fan_speed_value_unavailable(climate: dict[str, Any]) -> bool:
+        if "fan_speed" not in climate:
+            return True
+        value = climate.get("fan_speed")
+        return value is None or isinstance(value, UnknownToolResponseValue)
+
+    def _relative_fan_speed_direction_from_user_request(self) -> str | None:
+        text = self.last_user_message.lower()
+        if "fan" not in text:
+            return None
+        if any(
+            phrase in text
+            for phrase in (
+                "increase",
+                "raise",
+                "turn up",
+                "speed up",
+                "higher",
+                "boost",
+            )
+        ):
+            return "increase"
+        if any(
+            phrase in text
+            for phrase in (
+                "decrease",
+                "lower",
+                "turn down",
+                "reduce",
+                "drop",
+            )
+        ):
+            return "decrease"
+        return None
+
+    @staticmethod
+    def _message_requests_current_fan_speed(message: str) -> bool:
+        text = message.lower()
+        if "fan" not in text or "speed" not in text:
+            return False
+        return (
+            "?" in message
+            or "tell me" in text
+            or "provide" in text
+            or "current fan speed" in text
+            or "look up" in text
+        )
+
+    def _unknown_fan_speed_relative_response(self, message: str) -> str | None:
+        direction = self._relative_fan_speed_direction_from_user_request()
+        if direction is None:
+            return None
+        climate = self._current_turn_climate_settings()
+        if climate is None or not self._fan_speed_value_unavailable(climate):
+            return None
+        if not self._message_requests_current_fan_speed(message):
+            return None
+        return self._unknown_fan_speed_relative_message(direction=direction)
+
+    @staticmethod
+    def _navigation_state_unknown_fields(payload: dict[str, Any]) -> list[str]:
+        fields: list[str] = []
+        paths = [
+            "navigation_active",
+            "waypoints_id",
+            "routes_to_final_destination_id",
+        ]
+        if isinstance(payload.get("details"), dict):
+            paths.extend(["details.waypoints", "details.routes"])
+        for path in paths:
+            value = CoroutineWorkspace._response_path_value(payload, path)
+            if value is None or isinstance(value, UnknownToolResponseValue):
+                fields.append(f"result.get_current_navigation_state.{path}")
+        return fields
+
+    def _navigation_edit_action_from_user_request(self) -> str | None:
+        text = self.last_user_message.lower()
+        if not any(
+            term in text
+            for term in (
+                "route",
+                "navigation",
+                "waypoint",
+                "destination",
+                "stop",
+            )
+        ):
+            return None
+        if any(term in text for term in ("remove", "delete", "skip")):
+            if any(term in text for term in ("intermediate", "waypoint", "stop")):
+                return "remove the intermediate stop"
+            if "destination" in text:
+                return "remove the destination"
+            return "remove the requested route point"
+        if any(term in text for term in ("change", "replace", "switch")) and "destination" in text:
+            return "change the destination"
+        if any(term in text for term in ("add", "insert")) and any(
+            term in text for term in ("stop", "waypoint", "destination")
+        ):
+            return "add the requested route point"
+        if any(term in text for term in ("go straight", "direct", "straight to")):
+            return "edit the current route"
+        return None
+
+    @staticmethod
+    def _navigation_unknown_field_category(missing_fields: list[str]) -> str:
+        if any(field.endswith(".navigation_active") for field in missing_fields):
+            return "active_state"
+        if any("waypoints_id" in field or "details.waypoints" in field for field in missing_fields):
+            if any("routes_to_final_destination_id" in field or "details.routes" in field for field in missing_fields):
+                return "waypoints_and_routes"
+            return "waypoints"
+        if any("routes_to_final_destination_id" in field or "details.routes" in field for field in missing_fields):
+            return "routes"
+        return "structure"
+
+    def _unknown_navigation_structure_message(
+        self,
+        missing_fields: list[str],
+        action: str | None = None,
+    ) -> str:
+        clean_action = _clean_action_phrase(
+            action
+            or self._navigation_edit_action_from_user_request()
+            or "use the current navigation state"
+        )
+        category = self._navigation_unknown_field_category(missing_fields)
+        if category == "active_state":
+            unavailable = "whether navigation is active"
+            consequence = "Without that, I cannot know which navigation edit is safe."
+        elif category == "waypoints":
+            unavailable = "the current waypoint order"
+            consequence = "Without the waypoint order, I cannot identify which stop to change safely."
+        elif category == "routes":
+            unavailable = "the current route IDs"
+            consequence = "Without the route IDs, I cannot preserve or replace the affected route segment safely."
+        elif category == "waypoints_and_routes":
+            unavailable = "the current waypoint order or route information"
+            consequence = "Without that route structure, I cannot identify the stop to remove or the direct replacement segment safely."
+        else:
+            unavailable = "the current route structure"
+            consequence = "Without that, I cannot make the route edit safely."
+        return (
+            f"I can't {clean_action} because I looked up the current navigation state "
+            f"and the car system did not provide {unavailable}. {consequence}"
+        )
+
+    def _record_unknown_navigation_structure(
+        self,
+        gate_name: str,
+        missing_fields: list[str],
+        action: str | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_scratchpad_shape()
+        message = self._unknown_navigation_structure_message(missing_fields, action)
+        report = {
+            "helper": gate_name,
+            "status": "UNAVAILABLE",
+            "missing_response_fields": missing_fields,
+            "reason": "current navigation route structure was unavailable",
+            "message": message,
+        }
+        self.scratchpad["gates"][gate_name] = {
+            "status": "NO",
+            "missing_response_fields": missing_fields,
+            "reason": report["reason"],
+        }
+        self._store_helper_report(gate_name, report)
+        return report
+
+    def _abort_unknown_navigation_structure(
+        self,
+        gate_name: str,
+        missing_fields: list[str],
+        action: str | None = None,
+    ) -> NoReturn:
+        report = self._record_unknown_navigation_structure(gate_name, missing_fields, action)
+        self._abort_with_response(str(report["message"]))
+
+    def _current_turn_navigation_state(self) -> dict[str, Any] | None:
+        facts = self.scratchpad.get("facts")
+        if not isinstance(facts, dict):
+            return None
+        if facts.get("last_navigation_state_turn") != self.last_user_message:
+            return None
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        state = entities.get("navigation_state")
+        return state if isinstance(state, dict) else None
+
+    @staticmethod
+    def _message_is_vague_navigation_limitation(message: str) -> bool:
+        text = message.lower()
+        return (
+            "internal issue" in text
+            or "try again" in text
+            or "need more information" in text
+            or "which waypoint" in text
+            or "which stop" in text
+            or "tell me the waypoint" in text
+            or "provide the waypoint" in text
+        )
+
+    def _unknown_navigation_structure_response(self, message: str) -> str | None:
+        action = self._navigation_edit_action_from_user_request()
+        if action is None:
+            return None
+        state = self._current_turn_navigation_state()
+        if not isinstance(state, dict):
+            return None
+        missing_fields = state.get("unknown_response_fields")
+        if not isinstance(missing_fields, list) or not missing_fields:
+            return None
+        if not self._message_is_vague_navigation_limitation(message):
+            return None
+        return self._unknown_navigation_structure_message(
+            [str(field) for field in missing_fields],
+            action,
+        )
+
+    def _active_route_final_destination_id(self) -> str | None:
+        state = self.scratchpad.get("entities", {}).get("navigation_state")
+        if not isinstance(state, dict) or state.get("navigation_active") is not True:
+            return None
+        destination_id = state.get("final_destination_id") or state.get("destination_id")
+        return destination_id if isinstance(destination_id, str) and destination_id else None
+
+    def _is_requested_final_destination_replacement(self, destination_id: Any) -> bool:
+        if self._navigation_edit_action_from_user_request() != "change the destination":
+            return False
+        if not isinstance(destination_id, str) or not destination_id:
+            return False
+        current_destination_id = self._active_route_final_destination_id()
+        if current_destination_id is None:
+            return False
+        return destination_id != current_destination_id
+
+    def _destination_replacement_surface_blocker(
+        self,
+        gate_name: str,
+        destination_id: Any,
+    ) -> dict[str, Any] | None:
+        if not self._is_requested_final_destination_replacement(destination_id):
+            return None
+        return self._require_tool_surface_for_calls(
+            gate_name,
+            "change the destination",
+            [
+                (
+                    "navigation_replace_final_destination",
+                    {"new_destination_id": str(destination_id)},
+                )
+            ],
+        )
+
+    @staticmethod
+    def _message_presents_route_choice(message: str) -> bool:
+        text = message.lower()
+        if "route" not in text:
+            return False
+        return (
+            "which route" in text
+            or "what route" in text
+            or "would you like to take" in text
+            or "which one" in text
+            or "route alternatives" in text
+            or "other route" in text
+        )
+
+    def _missing_destination_replacement_response(self, message: str) -> str | None:
+        if not self._message_presents_route_choice(message):
+            return None
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        route_options = entities.get("last_route_options")
+        if not isinstance(route_options, dict):
+            return None
+        destination_id = route_options.get("destination_id")
+        if not self._is_requested_final_destination_replacement(destination_id):
+            return None
+        missing_tools, missing_arguments = self._missing_tool_surface_for_calls(
+            [
+                (
+                    "navigation_replace_final_destination",
+                    {"new_destination_id": str(destination_id)},
+                )
+            ]
+        )
+        if not missing_tools and not missing_arguments:
+            return None
+        report = self._record_tool_surface_limitation(
+            "destination_replacement_surface",
+            "change the destination",
+            missing_tools=missing_tools,
+            missing_arguments=missing_arguments,
+        )
+        return str(report.get("message") or "")
+
     def _abort_with_response(self, message: str) -> NoReturn:
         self._respond_locked(message)
         raise ResponseReady()
@@ -1812,6 +2171,20 @@ class CoroutineWorkspace:
         action: str = "complete the requested action",
         gate_name: str = "missing_tool_response",
     ) -> NoReturn:
+        if response_path.startswith("result.get_current_navigation_state."):
+            edit_action = self._navigation_edit_action_from_user_request()
+            if edit_action is not None:
+                missing_fields = [response_path]
+                state = self._current_turn_navigation_state()
+                if isinstance(state, dict):
+                    known_missing = state.get("unknown_response_fields")
+                    if isinstance(known_missing, list) and known_missing:
+                        missing_fields = [str(field) for field in known_missing]
+                self._abort_unknown_navigation_structure(
+                    "navigation_state_unknown",
+                    missing_fields,
+                    edit_action,
+                )
         clean_path = response_path.removeprefix("result.")
         message = (
             f"I acknowledge that I can't {_clean_action_phrase(action)} because the required "
@@ -2808,7 +3181,19 @@ class CoroutineWorkspace:
                 "routes": [],
                 "reason": "start and destination are the same location; no route is needed",
             }
+        blocker = self._destination_replacement_surface_blocker(
+            "destination_replacement_surface",
+            destination,
+        )
+        if blocker:
+            return blocker
         result = self._call_raw_tool_sync("get_routes_from_start_to_destination", kwargs)
+        self._abort_if_route_options_unavailable(
+            "get_routes_guarded",
+            start,
+            destination,
+            result,
+        )
         # When the model fetches routes directly (a presentation, not an internal
         # guard derivation), store the policy-022 narration so respond() informs
         # about fastest + alternatives + tolls even without a navigation edit.
@@ -2826,6 +3211,71 @@ class CoroutineWorkspace:
                 if isinstance(rid, str):
                     self._store_route_narration(routes, rid, stage="search")
         return result
+
+    def _abort_if_route_options_unavailable(
+        self,
+        gate_name: str,
+        start_id: Any,
+        destination_id: Any,
+        result: dict[str, Any],
+    ) -> None:
+        if result.get("status") != "SUCCESS":
+            return
+        payload = result.get("result")
+        if not isinstance(payload, dict):
+            return
+        routes = payload.get("routes")
+        if not isinstance(routes, UnknownToolResponseValue):
+            return
+        start_label = self._route_endpoint_label(start_id)
+        destination_label = self._route_endpoint_label(destination_id)
+        pair_text = (
+            f" from {start_label} to {destination_label}"
+            if start_label and destination_label
+            else ""
+        )
+        message = (
+            "I can't determine whether the current range is enough, because I looked it up "
+            f"and the car system did not provide the route options or distance{pair_text}."
+        )
+        report = {
+            "helper": gate_name,
+            "status": "UNAVAILABLE",
+            "missing_response_fields": [routes.response_path],
+            "start_id": start_id,
+            "destination_id": destination_id,
+            "message": message,
+        }
+        self.scratchpad["gates"][gate_name] = {
+            "status": "NO",
+            "missing_response_fields": report["missing_response_fields"],
+            "start_id": start_id,
+            "destination_id": destination_id,
+            "reason": message,
+        }
+        self._store_helper_report(gate_name, report)
+        self._abort_with_response(message)
+
+    def _route_endpoint_label(self, endpoint_id: Any) -> str | None:
+        if not isinstance(endpoint_id, str) or not endpoint_id.strip():
+            return None
+        endpoint_id = endpoint_id.strip()
+        entities = self.scratchpad.get("entities", {})
+        locations_by_id = entities.get("locations_by_id")
+        if isinstance(locations_by_id, dict):
+            record = locations_by_id.get(endpoint_id)
+            if isinstance(record, dict):
+                name = record.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+        pois_by_id = entities.get("pois_by_id")
+        if isinstance(pois_by_id, dict):
+            record = pois_by_id.get(endpoint_id)
+            if isinstance(record, dict):
+                name = record.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+        return endpoint_id
 
     def _normalize_route_endpoint_arguments(
         self,
@@ -3472,6 +3922,13 @@ class CoroutineWorkspace:
         new_id = kwargs.get("new_destination_id")
         if not isinstance(new_id, str):
             return self._call_raw_tool_sync("navigation_replace_final_destination", kwargs)
+        blocker = self._require_tool_surface_for_calls(
+            "destination_replacement_surface",
+            "change the destination",
+            [("navigation_replace_final_destination", {"new_destination_id": new_id})],
+        )
+        if blocker:
+            return blocker
         order = self._fresh_waypoint_order()
         if len(order) >= 2:
             previous_id = order[-2]
@@ -3604,10 +4061,14 @@ class CoroutineWorkspace:
                 summary = self._summarize_navigation(payload)
                 summary["revision"] = int(entities.get("navigation_revision") or 0)
                 entities["navigation_state"] = summary
+                self.remember("last_navigation_state_turn", self.last_user_message)
             elif name == "get_temperature_inside_car":
                 entities["last_temperature_state"] = copy.deepcopy(payload)
             elif name == "get_seat_heating_level":
                 entities["last_seat_heating_state"] = copy.deepcopy(payload)
+            elif name == "get_climate_settings":
+                entities["last_climate_settings"] = copy.deepcopy(payload)
+                self.remember("last_climate_settings_turn", self.last_user_message)
             elif name == "get_location_id_by_location_name":
                 location_id = payload.get("location_id") or payload.get("id")
                 location_name = arguments.get("location") or payload.get("name")
@@ -3784,6 +4245,10 @@ class CoroutineWorkspace:
             summary["route_ids"] = [
                 item for item in route_ids if isinstance(item, str)
             ]
+        unknown_fields = self._navigation_state_unknown_fields(payload)
+        if unknown_fields:
+            summary["unknown_response_fields"] = unknown_fields
+            summary["route_structure_available"] = False
         return summary
 
     def _summarize_pois(
@@ -4511,7 +4976,9 @@ class CoroutineWorkspace:
             "confirmation_prompt": prompt,
             "confirmation_retry_prompt": "Please confirm with yes if you want me to proceed.",
             "response_on_cancel": "Okay, I won't do it.",
-            "response_on_success": "Confirmed, I completed it.",
+            "response_on_success": self._confirmation_success_message_for_calls(
+                confirmation_calls
+            ),
         }
         self.remember("pending_confirmation", pending)
         self.scratchpad["gates"]["tool_confirmation"] = {
@@ -4702,13 +5169,85 @@ class CoroutineWorkspace:
     def _confirmation_prompt_for_calls(calls: list[dict[str, Any]]) -> str:
         if len(calls) == 1:
             call = calls[0]
-            args = ", ".join(f"{key}={value!r}" for key, value in call["arguments"].items())
+            summary = CoroutineWorkspace._confirmation_action_summary_for_call(call)
             return (
-                "This action requires confirmation. I intend to call "
-                f"{call['tool_name']}({args}). Please confirm with yes."
+                "This action requires confirmation. I will "
+                f"{summary}. Please confirm with yes."
             )
-        names = ", ".join(call["tool_name"] for call in calls)
-        return f"These actions require confirmation: {names}. Please confirm with yes."
+        summaries = [
+            CoroutineWorkspace._confirmation_action_summary_for_call(call)
+            for call in calls
+        ]
+        return (
+            "These actions require confirmation: "
+            f"{_human_join(summaries)}. Please confirm with yes."
+        )
+
+    @staticmethod
+    def _confirmation_action_summary_for_call(call: dict[str, Any]) -> str:
+        tool_name = call["tool_name"]
+        arguments = call["arguments"]
+        if tool_name == "set_head_lights_high_beams":
+            if arguments.get("on") is True:
+                return "turn the high beam headlights on (on=True)"
+            if arguments.get("on") is False:
+                return "turn the high beam headlights off (on=False)"
+        if tool_name == "open_close_trunk_door":
+            action = arguments.get("action")
+            if action == "OPEN":
+                return "open the trunk door (action=OPEN)"
+            if action == "CLOSE":
+                return "close the trunk door (action=CLOSE)"
+        if tool_name == "send_email":
+            recipients = arguments.get("email_addresses")
+            recipient_text = ""
+            if isinstance(recipients, list):
+                recipient_text = _human_join(
+                    [item for item in recipients if isinstance(item, str) and item.strip()]
+                )
+            content = arguments.get("content_message")
+            content_text = content.strip() if isinstance(content, str) else ""
+            if recipient_text and content_text:
+                return f"send an email to {recipient_text} saying: {content_text}"
+            if recipient_text:
+                return f"send an email to {recipient_text}"
+            return "send the email"
+
+        args = ", ".join(f"{key}={value!r}" for key, value in arguments.items())
+        if args:
+            return f"perform {tool_name} with {args}"
+        return f"perform {tool_name}"
+
+
+    @staticmethod
+    def _confirmation_success_message_for_calls(calls: list[dict[str, Any]]) -> str:
+        if len(calls) != 1:
+            return "Confirmed, I completed the requested actions."
+
+        call = calls[0]
+        tool_name = call["tool_name"]
+        arguments = call["arguments"]
+        if tool_name == "set_head_lights_high_beams":
+            if arguments.get("on") is True:
+                return "High beams turned on."
+            if arguments.get("on") is False:
+                return "High beams turned off."
+        if tool_name == "open_close_trunk_door":
+            action = arguments.get("action")
+            if action == "OPEN":
+                return "Trunk door opened."
+            if action == "CLOSE":
+                return "Trunk door closed."
+        if tool_name == "send_email":
+            recipients = arguments.get("email_addresses")
+            if isinstance(recipients, list):
+                recipient_text = _human_join(
+                    [item for item in recipients if isinstance(item, str) and item.strip()]
+                )
+                if recipient_text:
+                    return f"Email sent to {recipient_text}."
+            return "Email sent."
+        return "Confirmed, I completed it."
 
     @staticmethod
     def _confirmation_intent(text: str) -> str:
@@ -4803,7 +5342,10 @@ class CoroutineWorkspace:
                 "results": results,
             },
         )
-        message = str(pending.get("response_on_success") or "Confirmed, I completed it.")
+        message = str(
+            pending.get("response_on_success")
+            or self._confirmation_success_message_for_calls(calls)
+        )
         report["message"] = message
         self._respond_locked(message)
         return {"status": "SUCCESS", "actions": results, "report": report, "message": message}
@@ -5349,22 +5891,26 @@ class CoroutineWorkspace:
                 "turn on the high beams safely",
                 reason="the exterior-light result had an unexpected shape",
             )
-        self._require_known_response_fields(
-            gate_name,
-            "turn on the high beams safely",
-            "get_exterior_lights_status",
-            lights,
-            ["fog_lights", "head_lights_high_beams"],
-        )
-        fog_on = lights["fog_lights"]
-        high_on = lights["head_lights_high_beams"]
-        if not isinstance(fog_on, bool) or not isinstance(high_on, bool):
+        unknown_response_fields: list[str] = []
+        fog_on = lights.get("fog_lights")
+        high_on = lights.get("head_lights_high_beams")
+        if isinstance(fog_on, UnknownToolResponseValue) or "fog_lights" not in lights:
+            unknown_response_fields.append("result.get_exterior_lights_status.fog_lights")
+        elif not isinstance(fog_on, bool):
             return self._limitation_response(
                 gate_name,
                 "turn on the high beams safely",
-                reason="the exterior-light states were not boolean values",
+                reason="the fog-light state was not a boolean value",
             )
-        if fog_on:
+        if isinstance(high_on, UnknownToolResponseValue) or "head_lights_high_beams" not in lights:
+            unknown_response_fields.append("result.get_exterior_lights_status.head_lights_high_beams")
+        elif not isinstance(high_on, bool):
+            return self._limitation_response(
+                gate_name,
+                "turn on the high beams safely",
+                reason="the high-beam state was not a boolean value",
+            )
+        if fog_on is True:
             message = (
                 "I can't turn on the high beams while the fog lights are on because policy 014 "
                 "prohibits that combination."
@@ -5382,11 +5928,17 @@ class CoroutineWorkspace:
             }
             self._store_helper_report(gate_name, report)
             self._abort_with_response(message)
-        if high_on:
+        if high_on is True:
             message = "The high beams are already on."
             self._store_helper_report(
                 gate_name,
-                {"helper": gate_name, "status": "SUCCESS", "message": message, "actions": []},
+                {
+                    "helper": gate_name,
+                    "status": "SUCCESS",
+                    "message": message,
+                    "actions": [],
+                    "unknown_response_fields": unknown_response_fields,
+                },
             )
             self._helper_message(message)
             return {"status": "SUCCESS", "actions": [], "message": message}
@@ -5399,6 +5951,44 @@ class CoroutineWorkspace:
         )
         if blocker:
             return blocker
+        if self._tool_requires_confirmation("set_head_lights_high_beams"):
+            prompt = self._high_beam_confirmation_prompt(
+                fog_on=fog_on,
+                high_on=high_on,
+            )
+            pending = {
+                "type": "high_beams_confirmation",
+                "gate_name": gate_name,
+                "policy": "004_014",
+                "action": "turn on the high beams safely",
+                "on_confirm_calls": [action_call],
+                "confirmation_prompt": prompt,
+                "confirmation_retry_prompt": (
+                    "Please confirm with yes if you want me to turn on the high beams."
+                ),
+                "response_on_cancel": "Okay, I won't turn on the high beams.",
+                "response_on_success": "High beams turned on.",
+                "unknown_response_fields": unknown_response_fields,
+            }
+            self.remember("pending_confirmation", pending)
+            report = {
+                "helper": gate_name,
+                "status": "WAITING_CONFIRMATION",
+                "policy": "004_014",
+                "actions": ["set_head_lights_high_beams"],
+                "arguments": [{"on": True}],
+                "unknown_response_fields": unknown_response_fields,
+                "message": prompt,
+            }
+            self.scratchpad["gates"][gate_name] = {
+                "status": "WAITING_CONFIRMATION",
+                "policy": "004_014",
+                "actions": report["actions"],
+                "arguments": report["arguments"],
+                "unknown_response_fields": unknown_response_fields,
+            }
+            self._store_helper_report(gate_name, report)
+            self._abort_with_response(prompt)
         action_result = self._call_raw_tool_sync(*action_call)
         if action_result.get("status") != "SUCCESS":
             return self._failed_tool_response(
@@ -5413,6 +6003,7 @@ class CoroutineWorkspace:
             "policy": "014",
             "actions": ["set_head_lights_high_beams"],
             "results": [action_result],
+            "unknown_response_fields": unknown_response_fields,
             "message": message,
         }
         self._store_helper_report(gate_name, report)
@@ -5423,6 +6014,28 @@ class CoroutineWorkspace:
             "report": report,
             "message": message,
         }
+
+    @staticmethod
+    def _high_beam_confirmation_prompt(*, fog_on: Any, high_on: Any) -> str:
+        if fog_on is True:
+            fog_text = "fog lights are on"
+        elif fog_on is False:
+            fog_text = "fog lights are off"
+        else:
+            fog_text = "fog-light status is unavailable"
+
+        if high_on is True:
+            high_text = "high beams are already on"
+        elif high_on is False:
+            high_text = "high beams are currently off"
+        else:
+            high_text = "current high-beam status is unavailable"
+
+        return (
+            "This action requires confirmation. I checked the exterior lights: "
+            f"{fog_text}, and {high_text}. I will turn the high beam headlights "
+            "on (on=True). Please confirm with yes."
+        )
 
     def open_sunroof_safe(self, percentage: int | float) -> dict[str, Any]:
         """Set sunroof position while applying policies 005 and 008/009."""
@@ -6158,6 +6771,29 @@ class CoroutineWorkspace:
     def decrease_fan_speed(self, steps: int = 1) -> dict[str, Any]:
         return self._adjust_fan_speed(-abs(int(steps or 1)))
 
+    def _abort_unknown_fan_speed_for_relative_change(
+        self,
+        gate_name: str,
+        delta: int,
+    ) -> NoReturn:
+        self._ensure_scratchpad_shape()
+        message = self._unknown_fan_speed_relative_message(delta)
+        report = {
+            "helper": gate_name,
+            "status": "UNAVAILABLE",
+            "missing_response_fields": ["result.get_climate_settings.fan_speed"],
+            "delta": delta,
+            "reason": "current fan_speed was unavailable",
+            "message": message,
+        }
+        self.scratchpad["gates"][gate_name] = {
+            "status": "NO",
+            "missing_response_fields": ["result.get_climate_settings.fan_speed"],
+            "reason": report["reason"],
+        }
+        self._store_helper_report(gate_name, report)
+        self._abort_with_response(message)
+
     def _adjust_fan_speed(self, delta: int) -> dict[str, Any]:
         gate_name = "increase_fan_speed" if delta > 0 else "decrease_fan_speed"
         if delta == 0:
@@ -6179,7 +6815,7 @@ class CoroutineWorkspace:
         climate_result = self._call_raw_tool_sync("get_climate_settings", {})
         if climate_result.get("status") != "SUCCESS":
             return self._failed_tool_response(gate_name, "read climate settings", climate_result)
-        climate = result_value(climate_result)
+        climate = climate_result.get("result")
         if not isinstance(climate, dict):
             return self._limitation_response(
                 gate_name,
@@ -6187,6 +6823,8 @@ class CoroutineWorkspace:
                 reason="the climate settings result had an unexpected shape",
             )
         current = climate.get("fan_speed")
+        if self._fan_speed_value_unavailable(climate):
+            self._abort_unknown_fan_speed_for_relative_change(gate_name, delta)
         if not isinstance(current, (int, float)):
             return self._limitation_response(
                 gate_name,
@@ -6382,6 +7020,12 @@ class CoroutineWorkspace:
                 "shortest": None,
                 "reason": "start and destination are the same location; no route is needed",
             }
+        replacement_blocker = self._destination_replacement_surface_blocker(
+            "destination_replacement_surface",
+            destination_id,
+        )
+        if replacement_blocker:
+            return replacement_blocker
         call = (
             "get_routes_from_start_to_destination",
             {"start_id": start_id, "destination_id": destination_id},
@@ -6392,6 +7036,12 @@ class CoroutineWorkspace:
         result = self._call_raw_tool_sync(*call)
         if result.get("status") != "SUCCESS":
             return {"status": "FAILED_TOOL_RESULT", "result": result}
+        self._abort_if_route_options_unavailable(
+            "get_route_options",
+            start_id,
+            destination_id,
+            result,
+        )
         raw = result_value(result)
         routes = self._extract_routes(raw)
         normalized = [self._normalize_route(route) for route in routes]

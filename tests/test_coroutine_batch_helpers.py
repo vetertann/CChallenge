@@ -1,4 +1,5 @@
 import json
+import copy
 import unittest
 
 from track_1_agent_coroutine_under_test.coroutine_repl import (
@@ -258,6 +259,17 @@ batch([(custom_call, {})])
                 "get_routes_from_start_to_destination.routes is unavailable."
             ),
         )
+
+    def test_unknown_response_value_can_be_deepcopied_for_read_cache(self) -> None:
+        workspace, _ = self.make_workspace()
+        unknown = UnknownToolResponseValue(
+            workspace,
+            "result.get_exterior_lights_status.fog_lights",
+        )
+
+        copied = copy.deepcopy({"fog_lights": unknown})
+
+        self.assertIs(copied["fog_lights"], unknown)
 
     def test_result_value_stops_when_success_payload_is_entirely_unavailable(self) -> None:
         workspace, _ = self.make_workspace()

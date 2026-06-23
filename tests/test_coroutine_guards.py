@@ -12,6 +12,7 @@ import unittest
 from track_1_agent_coroutine_under_test.coroutine_repl import (
     BlockingPythonExecutor,
     CoroutineWorkspace,
+    ResponseReady,
 )
 
 
@@ -127,6 +128,129 @@ class GuardTests(unittest.TestCase):
         result = ex.run("set_fan_speed(level=3)\nrespond('Fan set to 3.')")
         self.assertEqual(result.response_text, "Fan set to 3.")
 
+    def test_high_beam_helper_attempts_setter_when_fog_state_unknown(self):
+        ws, _ = self.make(
+            {
+                "get_exterior_lights_status": (
+                    "SUCCESS",
+                    {
+                        "fog_lights": "unknown",
+                        "head_lights_high_beams": False,
+                        "head_lights_low_beams": True,
+                    },
+                ),
+                "set_head_lights_high_beams": (
+                    "SUCCESS",
+                    {"head_lights_high_beams": True},
+                ),
+            },
+            {
+                "get_exterior_lights_status": tool_schema("get_exterior_lights_status", {}),
+                "set_head_lights_high_beams": tool_schema(
+                    "set_head_lights_high_beams",
+                    {"on": {"type": "boolean"}},
+                ),
+            },
+        )
+
+        result = ws.set_high_beams_on_safe()
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["message"], "High beams turned on.")
+        self.assertEqual(
+            [[call["tool_name"] for call in request] for request in ws.bridge.requests],
+            [["get_exterior_lights_status"], ["set_head_lights_high_beams"]],
+        )
+        self.assertEqual(
+            ws.bridge.requests[-1][0]["arguments"],
+            {"on": True},
+        )
+        self.assertIn(
+            "result.get_exterior_lights_status.fog_lights",
+            ws.scratchpad["facts"]["last_helper_report"]["unknown_response_fields"],
+        )
+
+    def test_high_beam_helper_confirmation_mentions_unknown_fog_state(self):
+        ws, ex = self.make(
+            {
+                "get_exterior_lights_status": (
+                    "SUCCESS",
+                    {
+                        "fog_lights": "unknown",
+                        "head_lights_high_beams": False,
+                        "head_lights_low_beams": True,
+                    },
+                ),
+                "set_head_lights_high_beams": (
+                    "SUCCESS",
+                    {"head_lights_high_beams": True},
+                ),
+            },
+            {
+                "get_exterior_lights_status": tool_schema("get_exterior_lights_status", {}),
+                "set_head_lights_high_beams": tool_schema(
+                    "set_head_lights_high_beams",
+                    {"on": {"type": "boolean"}},
+                    required=["on"],
+                    description="REQUIRES_CONFIRMATION, turns high beams on or off.",
+                ),
+            },
+        )
+
+        with self.assertRaises(ResponseReady):
+            ws.set_high_beams_on_safe()
+
+        self.assertIn("fog-light status is unavailable", ws._response_text or "")
+        self.assertIn("high beams are currently off", ws._response_text or "")
+        self.assertIn("on=True", ws._response_text or "")
+        self.assertEqual(
+            [[call["tool_name"] for call in request] for request in ws.bridge.requests],
+            [["get_exterior_lights_status"]],
+        )
+        pending = ws.scratchpad["facts"]["pending_confirmation"]
+        self.assertEqual(pending["response_on_success"], "High beams turned on.")
+        self.assertIn(
+            "result.get_exterior_lights_status.fog_lights",
+            pending["unknown_response_fields"],
+        )
+
+        ws.observe_user("Yes, proceed.")
+        result = ex.run("handle_pending_confirmation()")
+
+        self.assertEqual(result.response_text, "High beams turned on.")
+        self.assertEqual(
+            self._emitted(ws, "set_head_lights_high_beams"),
+            {"on": True},
+        )
+
+    def test_high_beam_helper_blocks_when_fog_lights_known_on(self):
+        ws, _ = self.make(
+            {
+                "get_exterior_lights_status": (
+                    "SUCCESS",
+                    {
+                        "fog_lights": True,
+                        "head_lights_high_beams": False,
+                    },
+                ),
+            },
+            {
+                "get_exterior_lights_status": tool_schema("get_exterior_lights_status", {}),
+                "set_head_lights_high_beams": tool_schema(
+                    "set_head_lights_high_beams",
+                    {"on": {"type": "boolean"}},
+                ),
+            },
+        )
+
+        with self.assertRaises(ResponseReady):
+            ws.set_high_beams_on_safe()
+        self.assertEqual(
+            [[call["tool_name"] for call in request] for request in ws.bridge.requests],
+            [["get_exterior_lights_status"]],
+        )
+        self.assertIn("policy 014", ws._response_text or "")
+
     # --- 2. active-navigation guard --------------------------------------
 
     def _nav_schema(self):
@@ -229,6 +353,91 @@ class GuardTests(unittest.TestCase):
             "respond(routes['routes'][0]['display'])"
         )
         self.assertIn("includes toll roads", result.response_text)
+
+    def test_unknown_route_options_abort_with_lookup_limitation(self):
+        ws, ex = self.make(
+            {
+                "get_location_id_by_location_name": (
+                    "SUCCESS",
+                    {"id": "loc_mil_253463"},
+                ),
+                "get_routes_from_start_to_destination": (
+                    "SUCCESS",
+                    {"routes": "unknown"},
+                ),
+            },
+            {
+                "get_location_id_by_location_name": tool_schema(
+                    "get_location_id_by_location_name",
+                    {"location": {"type": "string"}},
+                    required=["location"],
+                ),
+                "get_routes_from_start_to_destination": tool_schema(
+                    "get_routes_from_start_to_destination",
+                    {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+                    required=["start_id", "destination_id"],
+                ),
+            },
+        )
+
+        ex.run("get_location_id_by_location_name(location='Milan')")
+        ws.remember_entity(
+            "locations_by_id",
+            {
+                "loc_mil_253463": {"id": "loc_mil_253463", "name": "Milan"},
+                "loc_pra_198238": {"id": "loc_pra_198238", "name": "Prague"},
+            },
+        )
+        result = ex.run(
+            "get_routes_from_start_to_destination("
+            "start_id='loc_mil_253463', destination_id='loc_pra_198238')"
+        )
+
+        self.assertIsNone(result.error)
+        self.assertIn("I can't determine whether the current range is enough", result.response_text)
+        self.assertIn("I looked it up", result.response_text)
+        self.assertIn("route options or distance from Milan to Prague", result.response_text)
+        self.assertEqual(
+            [
+                call["tool_name"]
+                for request in ws.bridge.requests
+                for call in request
+                if call["tool_name"] == "get_routes_from_start_to_destination"
+            ],
+            ["get_routes_from_start_to_destination"],
+        )
+
+    def test_get_route_options_unknown_routes_abort_with_lookup_limitation(self):
+        ws, ex = self.make(
+            {
+                "get_routes_from_start_to_destination": (
+                    "SUCCESS",
+                    {"routes": "unknown"},
+                ),
+            },
+            {
+                "get_routes_from_start_to_destination": tool_schema(
+                    "get_routes_from_start_to_destination",
+                    {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+                    required=["start_id", "destination_id"],
+                ),
+            },
+        )
+        ws.remember_entity(
+            "locations_by_id",
+            {
+                "loc_mil_253463": {"id": "loc_mil_253463", "name": "Milan"},
+                "loc_pra_198238": {"id": "loc_pra_198238", "name": "Prague"},
+            },
+        )
+
+        result = ex.run(
+            "get_route_options("
+            "start_id='loc_mil_253463', destination_id='loc_pra_198238')"
+        )
+
+        self.assertIsNone(result.error)
+        self.assertIn("route options or distance from Milan to Prague", result.response_text)
 
     def test_get_weather_at_route_arrival_uses_route_duration(self):
         ws, ex = self.make(
@@ -1043,6 +1252,15 @@ class GuardTests(unittest.TestCase):
             "routes": [{"route_id": "R_old"}],
         },
     }
+    UNKNOWN_NAV_STRUCTURE = {
+        "navigation_active": True,
+        "waypoints_id": "unknown",
+        "routes_to_final_destination_id": "unknown",
+        "details": {
+            "waypoints": "unknown",
+            "routes": "unknown",
+        },
+    }
     REPLACEMENT_ROUTES = [
         {
             "route_id": "R_fast",
@@ -1183,6 +1401,71 @@ class GuardTests(unittest.TestCase):
         self.assertIsNone(self._emitted(ws, "navigation_delete_waypoint"))  # never emitted
         self.assertEqual(result.response_text, "ok")
 
+    def test_get_navigation_state_unknown_structure_aborts_with_edit_limitation(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+        }
+        ws, ex = self.make(
+            {"get_current_navigation_state": ("SUCCESS", self.UNKNOWN_NAV_STRUCTURE)},
+            tools,
+        )
+        ws.observe_user("Can you remove the intermediate stop and take me straight to Paris?")
+
+        result = ex.run("get_navigation_state()")
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("can't remove the intermediate stop", result.response_text)
+        self.assertIn("looked up the current navigation state", result.response_text)
+        self.assertIn("did not provide the current waypoint order", result.response_text)
+        self.assertIn("route information", result.response_text)
+
+    def test_raw_unknown_navigation_field_access_uses_edit_limitation(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+        }
+        ws, ex = self.make(
+            {"get_current_navigation_state": ("SUCCESS", self.UNKNOWN_NAV_STRUCTURE)},
+            tools,
+        )
+        ws.observe_user("Please skip the intermediate stop on my route.")
+
+        result = ex.run(
+            "state = result_value(get_current_navigation_state(detailed_information=True))\n"
+            "len(state['waypoints_id'])"
+        )
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("can't remove the intermediate stop", result.response_text)
+        self.assertIn("route structure", result.response_text)
+
+    def test_unknown_navigation_structure_replaces_internal_response(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+        }
+        ws, ex = self.make(
+            {"get_current_navigation_state": ("SUCCESS", self.UNKNOWN_NAV_STRUCTURE)},
+            tools,
+        )
+        ws.observe_user("Remove the intermediate stop from my route.")
+
+        result = ex.run(
+            "get_current_navigation_state(detailed_information=True)\n"
+            "respond('I hit an internal issue while deciding the next step.')"
+        )
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("can't remove the intermediate stop", result.response_text)
+        self.assertNotIn("internal issue", result.response_text)
+
     def test_insert_after_final_destination_leaves_args_untouched(self):
         ws, ex = self._nav_edit_ws(
             "navigation_add_one_waypoint",
@@ -1246,6 +1529,153 @@ class GuardTests(unittest.TestCase):
         ex.run("navigation_replace_final_destination(new_destination_id='loc_new')")
         args = self._emitted(ws, "navigation_replace_final_destination")
         self.assertEqual(args["route_id_leading_to_new_destination"], "R_fast")
+
+    def test_missing_destination_replacement_tool_blocks_route_lookup_for_requested_edit(self):
+        tools = {
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": {"type": "string"},
+                    "destination_id": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {"routes": self.REPLACEMENT_ROUTES},
+            ),
+        }
+        ws, ex = self.make(responses, tools)
+        ws.observe_user("Change my destination to New City.")
+        ws.remember_entity(
+            "navigation_state",
+            {
+                "navigation_active": True,
+                "waypoint_order": ["loc_a", "loc_old"],
+                "destination_id": "loc_old",
+                "final_destination_id": "loc_old",
+            },
+        )
+
+        result = ex.run(
+            "get_routes_from_start_to_destination("
+            "start_id='loc_a', destination_id='loc_new')"
+        )
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("can't change the destination", result.response_text)
+        self.assertIn("navigation_replace_final_destination", result.response_text)
+        self.assertIsNone(self._emitted(ws, "get_routes_from_start_to_destination"))
+
+    def test_read_only_route_lookup_not_blocked_by_missing_destination_replacement(self):
+        tools = {
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": {"type": "string"},
+                    "destination_id": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {"routes": self.REPLACEMENT_ROUTES},
+            ),
+        }
+        ws, ex = self.make(responses, tools)
+        ws.observe_user("Show me routes to New City.")
+        ws.remember_entity(
+            "navigation_state",
+            {
+                "navigation_active": True,
+                "waypoint_order": ["loc_a", "loc_old"],
+                "destination_id": "loc_old",
+                "final_destination_id": "loc_old",
+            },
+        )
+
+        result = ex.run(
+            "get_routes_from_start_to_destination("
+            "start_id='loc_a', destination_id='loc_new')"
+        )
+
+        self.assertIsNone(result.response_text)
+        self.assertEqual(
+            self._emitted(ws, "get_routes_from_start_to_destination"),
+            {"start_id": "loc_a", "destination_id": "loc_new"},
+        )
+
+    def test_missing_destination_replacement_tool_blocks_wrapper_before_route_derivation(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": {"type": "string"},
+                    "destination_id": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": ("SUCCESS", self.NAV_2WP),
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {"routes": self.REPLACEMENT_ROUTES},
+            ),
+        }
+        ws, ex = self.make(responses, tools)
+        ws.observe_user("Change my destination to New City.")
+
+        result = ex.run("navigation_replace_final_destination(new_destination_id='loc_new')")
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("can't change the destination", result.response_text)
+        self.assertIsNone(self._emitted(ws, "navigation_replace_final_destination"))
+        self.assertIsNone(self._emitted(ws, "get_routes_from_start_to_destination"))
+
+    def test_route_choice_response_for_unavailable_replacement_is_rewritten(self):
+        tools = {
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": {"type": "string"},
+                    "destination_id": {"type": "string"},
+                },
+            ),
+        }
+        ws, ex = self.make({}, tools)
+        ws.observe_user("Change my destination to New City.")
+        ws.remember_entity(
+            "navigation_state",
+            {
+                "navigation_active": True,
+                "waypoint_order": ["loc_a", "loc_old"],
+                "destination_id": "loc_old",
+                "final_destination_id": "loc_old",
+            },
+        )
+        ws.remember_entity(
+            "last_route_options",
+            {
+                "start_id": "loc_a",
+                "destination_id": "loc_new",
+                "routes": self.REPLACEMENT_ROUTES,
+            },
+        )
+
+        result = ex.run(
+            "respond('Fastest route: R_fast. There are 2 other route alternatives. "
+            "Which route would you like to take?')"
+        )
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("can't change the destination", result.response_text)
+        self.assertNotIn("Which route", result.response_text)
 
     def test_replace_final_destination_fills_only_route(self):
         ws, ex = self._nav_edit_ws(
@@ -1952,6 +2382,57 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(emitted_tools, ["get_climate_settings", "set_fan_speed"])
         self.assertEqual(self._emitted(ws, "set_fan_speed"), {"level": 3})
 
+    def test_increase_fan_speed_unknown_current_aborts_with_lookup_limitation(self):
+        tools = {
+            "get_climate_settings": tool_schema("get_climate_settings", {}),
+            "set_fan_speed": tool_schema(
+                "set_fan_speed",
+                {"level": {"type": "integer"}},
+            ),
+        }
+        responses = {
+            "get_climate_settings": ("SUCCESS", {"fan_speed": "unknown"}),
+            "set_fan_speed": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+        result = ex.run("increase_fan_speed(steps=2)")
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("can't increase the fan speed by 2 levels", result.response_text)
+        self.assertIn("looked it up", result.response_text)
+        self.assertIn("did not provide the current fan speed", result.response_text)
+        emitted_tools = [
+            call["tool_name"] for batch in ws.bridge.requests for call in batch
+        ]
+        self.assertEqual(emitted_tools, ["get_climate_settings"])
+
+    def test_manual_climate_read_unknown_fan_speed_blocks_user_question(self):
+        tools = {
+            "get_climate_settings": tool_schema("get_climate_settings", {}),
+            "set_fan_speed": tool_schema(
+                "set_fan_speed",
+                {"level": {"type": "integer"}},
+            ),
+        }
+        responses = {
+            "get_climate_settings": ("SUCCESS", {"fan_speed": "unknown"}),
+            "set_fan_speed": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+        ws.observe_user("Increase the fan speed by two levels.")
+
+        result = ex.run(
+            "get_climate_settings()\n"
+            "respond('Sure, could you tell me the current fan speed level?')"
+        )
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn(
+            "can't increase the fan speed by the requested number of levels",
+            result.response_text,
+        )
+        self.assertIn("did not provide the current fan speed", result.response_text)
+
     def test_decrease_fan_speed_clamps_at_zero(self):
         tools = {
             "get_climate_settings": tool_schema("get_climate_settings", {}),
@@ -1991,6 +2472,39 @@ class GuardTests(unittest.TestCase):
             "respond('This should not replace the confirmation result.')"
         )
         self.assertEqual(result.response_text, "Confirmed, fan speed is set.")
+
+    def test_default_confirmation_success_names_high_beam_action(self):
+        tools = {
+            "set_head_lights_high_beams": tool_schema(
+                "set_head_lights_high_beams",
+                {"on": {"type": "boolean"}},
+                required=["on"],
+                description="REQUIRES_CONFIRMATION, turns high beams on or off.",
+            ),
+        }
+        ws, ex = self.make(
+            {"set_head_lights_high_beams": ("SUCCESS", {"head_lights_high_beams": True})},
+            tools,
+        )
+
+        with self.assertRaises(ResponseReady):
+            ws._call_raw_tool_sync("set_head_lights_high_beams", {"on": True})
+
+        pending = ws.scratchpad["facts"]["pending_confirmation"]
+        self.assertEqual(pending["response_on_success"], "High beams turned on.")
+        self.assertIn(
+            "turn the high beam headlights on (on=True)",
+            ws._response_text or "",
+        )
+
+        ws.observe_user("Yes, proceed.")
+        result = ex.run("handle_pending_confirmation()")
+
+        self.assertEqual(result.response_text, "High beams turned on.")
+        self.assertEqual(
+            self._emitted(ws, "set_head_lights_high_beams"),
+            {"on": True},
+        )
 
     def test_identical_read_is_cached_until_successful_mutation(self):
         tools = {

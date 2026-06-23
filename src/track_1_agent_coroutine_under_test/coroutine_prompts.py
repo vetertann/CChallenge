@@ -426,7 +426,7 @@ def render_workspace_helpers() -> str:
         "- `set_fog_lights_on_safe()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Activates fog lights under policies 008/009 and 013: checks weather and exterior-light state, obtains explicit confirmation when required, turns low beams on and high beams off when needed, and directly reports missing capabilities or response fields.\n"
         "- `set_high_beams_on_safe()`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Activates high beams under policy 014: checks that fog lights are off, blocks the prohibited combination, and routes the high-beam setter through explicit confirmation.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Activates high beams under policy 014: reads fog-light state, blocks only when fog lights are known on, records unknown fog state internally without surfacing it after success, and routes the high-beam setter through explicit confirmation.\n"
         "- `set_air_conditioning_on_safe()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Turns AC on under policy 011 by checking climate/window state, closing each known window that is open more than 20%, setting fan speed to 1 if currently 0, remembering which windows it adjusted, and then turning AC on. If required evaluator tools are missing, it responds with a short missing-capability limitation.\n"
         "- `close_known_windows_for_blocked_ac(window=None)`\n"

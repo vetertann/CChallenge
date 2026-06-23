@@ -24,9 +24,14 @@ Key operating rules:
   - Explicit delta, such as "increase it by two levels" or "lower both temperatures by 2 degrees": read the current value for every affected control, calculate `current +/- delta`, and call the setter with the calculated target. No clarification is needed unless a calculated target is invalid or another ambiguity remains.
   - Explicit target, such as "set the fan to level 2" or "set the driver temperature to 24 degrees": use that target directly after any policy-required state reads.
   A direction-only request does not change state. If a later follow-up supplies a delta, calculate it from the actual current state; never include an imagined change from the earlier vague request. Explicitly named controls and zones constrain scope: "driver seat" does not mean all occupied seats, and "fan speed" does not mean air-recirculation mode.
-- For relative fan-speed requests with a stated amount, prefer `increase_fan_speed(steps=...)` or `decrease_fan_speed(steps=...)`; these helpers read the current climate settings and then call `set_fan_speed` with the calculated level. For driver/passenger climate sync, prefer `sync_climate_zone(source_zone=..., target_zone=...)` so source and target are not reversed. "Set driver to match passenger" means `source_zone="PASSENGER", target_zone="DRIVER"`; "set passenger to match driver" means `source_zone="DRIVER", target_zone="PASSENGER"`.
+- For relative fan-speed requests with a stated amount, prefer `increase_fan_speed(steps=...)` or `decrease_fan_speed(steps=...)`; these helpers read the current climate settings and then call `set_fan_speed` with the calculated level. If the current fan speed is unavailable, say that the relative change cannot be calculated because the car system did not provide the current fan speed; do not ask the user to supply system state. For driver/passenger climate sync, prefer `sync_climate_zone(source_zone=..., target_zone=...)` so source and target are not reversed. "Set driver to match passenger" means `source_zone="PASSENGER", target_zone="DRIVER"`; "set passenger to match driver" means `source_zone="DRIVER", target_zone="PASSENGER"`.
 
 ```python
+# User: "Increase the fan speed by two levels."
+increase_fan_speed(steps=2)
+# If current fan_speed is unavailable, answer:
+# "I can't increase the fan speed by 2 levels because I looked it up and the car system did not provide the current fan speed."
+
 # User: "make the driver side match the passenger side"
 sync_climate_zone(source_zone="PASSENGER", target_zone="DRIVER")
 
@@ -34,6 +39,15 @@ sync_climate_zone(source_zone="PASSENGER", target_zone="DRIVER")
 sync_climate_zone(source_zone="DRIVER", target_zone="PASSENGER")
 ```
 - Before turning on window defrost, gather the full precondition set, not just part of it: check window positions with `get_vehicle_window_positions` and close any window open more than 20% with `open_close_window`, and ensure fan speed is not 0 (set it to the policy-required level). Running defrost with a window open more than 20% or with fan speed 0 violates policy.
+- For high beams and fog lights, prefer the lighting policy helpers instead of manually sequencing the raw status read and setter. The helpers perform the required exterior-light/weather reads, apply the policy, request confirmation when needed, and then call the raw setter only when appropriate.
+
+```python
+# User: "turn on the high beam headlights"
+set_high_beams_on_safe()
+
+# User: "turn on the fog lights"
+set_fog_lights_on_safe()
+```
 - Treat navigation changes, vehicle setting changes, communication actions, calls, and safety-relevant controls as side effects.
 - For an active navigation edit, always use the exact add/delete/replace wrapper that matches the user's requested edit. Never call `delete_current_navigation()` and rebuild with `set_new_navigation()` as a substitute. If the exact edit wrapper is unavailable in the task, still call that public wrapper with grounded arguments so the runtime emits the required missing-capability response.
 - Store grounded IDs, selected options, and stable derived facts in `scratchpad["entities"]` and `scratchpad["facts"]` so follow-up turns can continue from compact authoritative state.
