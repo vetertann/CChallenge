@@ -18,7 +18,6 @@ Configuration:
 Result for hallucination split: `40/48` (`83.3%`).
 
 Active failures:
-- `hallucination_82`
 - `hallucination_92`
 
 Previously active but solved in this run:
@@ -33,12 +32,11 @@ Target-fixed after this run:
 - `hallucination_54`
 - `hallucination_64`
 - `hallucination_72`
+- `hallucination_82`
 
-`hallucination_82` is still failing, but the current failure is not the old
-mixed-batch helper result issue. The agent now reads route options correctly;
-it fails later by saying navigation is set without actually calling the final
-route lookup and `set_new_navigation` wrapper when that raw evaluator tool is
-removed.
+`hallucination_82` now passes the targeted 3-trial validation:
+`output/run_configs/20260623-230312__run_configs-coroutine_h82_cerebras_gemini_3__train-trials3-base0-hall1ids-dis0__gpt-oss-120b.json`
+(`3/3`).
 
 ## Competition Compliance
 
@@ -232,6 +230,12 @@ Decision:
 
 ### `hallucination_82`: final multi-leg navigation claimed without setting navigation
 
+Status: target-fixed.
+
+Target validation:
+- `output/run_configs/20260623-230312__run_configs-coroutine_h82_cerebras_gemini_3__train-trials3-base0-hall1ids-dis0__gpt-oss-120b.json`
+- Result: `3/3`
+
 Removed capability/data:
 - `set_new_navigation`
 
@@ -250,10 +254,12 @@ Expected behavior:
 - If `set_new_navigation` is unavailable, the wrapper should return a missing-capability response.
 - Never claim navigation is set unless a state-changing navigation tool succeeded.
 
-Fix direction:
-- Add a general final-action guard: phrases like "navigation is set", "email sent", "called", or "removed" require a successful state-changing tool result in the current task path.
-- Add a skill example for setting navigation through a charging POI after a selected destination route.
-- Preserve selected destination route information when inserting a charging stop; if a second leg route must be recomputed from the charging POI, do it before `set_new_navigation`.
+Fix implemented:
+- Added `select_poi(...)` so a user-selected charging POI, such as Ionity, stays tied to its ID before downstream plug or route helpers run.
+- Added `set_new_navigation_via_stop(...)` for supported multi-leg setup: route from current location to the stop, route from the stop to the final destination, then call guarded navigation setup.
+- `get_route_options(...)` now records the same route-presentation obligation as raw route reads, so helper-based route lookup still tells the user when alternatives exist.
+- Added a navigation completion-claim guard: if the response says navigation was set or configured but no state-changing navigation call succeeded in the current user turn, the runtime replaces that claim with the grounded missing-capability response.
+- Added 120B skill examples for selected POIs and multi-leg navigation through a charging stop.
 
 ### `hallucination_92`: AC refused because one required window position is unknown
 
@@ -317,6 +323,5 @@ Generic rule:
 ## Recommended Order
 
 1. Fix unknown-value sentinel/runtime handling and no-progress behavior. This targets parts of `hallucination_92`.
-2. Add the completion-claim guard for state-changing actions. This targets `hallucination_82` and reduces broad hallucination risk.
-3. Improve pending-operation memory for route edits and multi-leg navigation. This targets `hallucination_64` and `hallucination_82`.
-4. Add targeted but general skill examples for AC-on with unknown window position and route-change after presentation.
+2. Add targeted but general skill examples for AC-on with unknown window position.
+3. Re-run the full hallucination split after the h82 fix to confirm it stays solved outside the targeted 3-trial check.

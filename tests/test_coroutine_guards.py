@@ -38,13 +38,20 @@ class ScriptedBridge:
     def __init__(self, responses: dict) -> None:
         self.responses = responses
         self.requests: list[list[dict]] = []
+        self._call_counts: dict[str, int] = {}
 
     def request_tool_calls(self, calls: list[dict]) -> list[dict]:
         self.requests.append(calls)
         out = []
         for index, call in enumerate(calls):
             name = call["tool_name"]
-            status, result = self.responses.get(name, ("SUCCESS", {}))
+            configured = self.responses.get(name, ("SUCCESS", {}))
+            if isinstance(configured, list):
+                count = self._call_counts.get(name, 0)
+                self._call_counts[name] = count + 1
+                status, result = configured[min(count, len(configured) - 1)]
+            else:
+                status, result = configured
             out.append(
                 {
                     "tool_name": name,
@@ -119,6 +126,36 @@ class GuardTests(unittest.TestCase):
         ws.observe_user("What time is it?")
         result = ex.run("respond('It is 2:30 PM.')")
         self.assertEqual(result.response_text, "It is 2:30 PM.")
+
+    def test_navigation_set_claim_without_mutation_reports_missing_control(self):
+        ws, ex = self.make({}, {})
+        result = ex.run("respond('Navigation set: first to the charger, then Hamburg.')")
+
+        self.assertIn("set_new_navigation", result.response_text)
+        self.assertNotIn("Navigation set", result.response_text)
+
+    def test_navigation_set_claim_with_descriptive_phrase_requires_mutation(self):
+        ws, ex = self.make({}, {})
+        result = ex.run(
+            "respond(\"I've set a two-leg navigation: first to the charger, then Hamburg.\")"
+        )
+
+        self.assertIn("set_new_navigation", result.response_text)
+        self.assertNotIn("two-leg navigation", result.response_text)
+
+    def test_navigation_set_claim_allowed_after_successful_navigation_mutation(self):
+        ws, ex = self.make(
+            {"set_new_navigation": ("SUCCESS", {})},
+            {"set_new_navigation": self._nav_schema()},
+        )
+        ws.scratchpad["entities"]["navigation_state"] = {"navigation_active": False}
+
+        result = ex.run(
+            "set_new_navigation(route_ids=['route_1'])\n"
+            "respond('Navigation set.')"
+        )
+
+        self.assertEqual(result.response_text, "Navigation set.")
 
     def test_clean_mutation_allows_success_text(self):
         ws, ex = self.make(
@@ -438,6 +475,166 @@ class GuardTests(unittest.TestCase):
 
         self.assertIsNone(result.error)
         self.assertIn("route options or distance from Milan to Prague", result.response_text)
+
+    def test_get_route_options_adds_route_presentation_obligation(self):
+        ws, ex = self.make(
+            {
+                "get_routes_from_start_to_destination": (
+                    "SUCCESS",
+                    {
+                        "routes": [
+                            {
+                                "route_id": "R_fast",
+                                "start_id": "loc_start",
+                                "destination_id": "loc_dest",
+                                "name_via": "A1",
+                                "distance_km": 10,
+                                "duration_hours": 0,
+                                "duration_minutes": 10,
+                                "alias": ["fastest", "first"],
+                            },
+                            {
+                                "route_id": "R_short",
+                                "start_id": "loc_start",
+                                "destination_id": "loc_dest",
+                                "name_via": "B2",
+                                "distance_km": 8,
+                                "duration_hours": 0,
+                                "duration_minutes": 12,
+                                "alias": ["shortest", "second"],
+                            },
+                        ],
+                    },
+                )
+            },
+            {
+                "get_routes_from_start_to_destination": tool_schema(
+                    "get_routes_from_start_to_destination",
+                    {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+                    required=["start_id", "destination_id"],
+                ),
+            },
+        )
+
+        result = ex.run(
+            "get_route_options(start_id='loc_start', destination_id='loc_dest')\n"
+            "respond('Route information ready.')"
+        )
+
+        self.assertIn("Route information ready.", result.response_text)
+        self.assertIn("The fastest route", result.response_text)
+        self.assertIn("other option", result.response_text)
+        self.assertIn("Would you like details", result.response_text)
+
+    def test_select_poi_keeps_explicit_named_station_for_plug_selection(self):
+        ws, ex = self.make({}, {})
+
+        result = ex.run(
+            "pois = [\n"
+            "    {'id': 'poi_ionity', 'name': 'Ionity', 'category': 'charging_stations',\n"
+            "     'charging_plugs': [{'plug_id': 'plug_ionity', 'power_type': 'DC', 'power_kw': 100, 'availability': 'available'}]},\n"
+            "    {'id': 'poi_tesla', 'name': 'Tesla Supercharger', 'category': 'charging_stations',\n"
+            "     'charging_plugs': [{'plug_id': 'plug_tesla', 'power_type': 'DC', 'power_kw': 350, 'availability': 'available'}]},\n"
+            "]\n"
+            "selected = select_poi(pois, name='Ionity')\n"
+            "plug = select_charging_plug(pois=[selected['poi']])\n"
+            "respond(plug['charging_station_id'] + '|' + plug['charging_station_plug_id'])"
+        )
+
+        self.assertEqual(result.response_text, "poi_ionity|plug_ionity")
+        self.assertEqual(
+            ws.scratchpad["entities"]["selected_charging_poi"]["poi_id"],
+            "poi_ionity",
+        )
+
+    def test_set_new_navigation_via_stop_selects_each_leg_and_calls_guard(self):
+        ws, ex = self.make(
+            {
+                "get_routes_from_start_to_destination": [
+                    (
+                        "SUCCESS",
+                        {
+                            "routes": [
+                                {
+                                    "route_id": "R_start_stop_fast",
+                                    "start_id": "loc_home_1",
+                                    "destination_id": "poi_stop",
+                                    "name_via": "A1",
+                                    "distance_km": 4,
+                                    "duration_hours": 0,
+                                    "duration_minutes": 5,
+                                    "alias": ["fastest", "first"],
+                                },
+                                {
+                                    "route_id": "R_start_stop_second",
+                                    "start_id": "loc_home_1",
+                                    "destination_id": "poi_stop",
+                                    "name_via": "B2",
+                                    "distance_km": 3,
+                                    "duration_hours": 0,
+                                    "duration_minutes": 6,
+                                    "alias": ["second", "shortest"],
+                                },
+                            ],
+                        },
+                    ),
+                    (
+                        "SUCCESS",
+                        {
+                            "routes": [
+                                {
+                                    "route_id": "R_stop_dest_fast",
+                                    "start_id": "poi_stop",
+                                    "destination_id": "loc_dest",
+                                    "name_via": "A9",
+                                    "distance_km": 100,
+                                    "duration_hours": 1,
+                                    "duration_minutes": 20,
+                                    "alias": ["fastest", "first"],
+                                },
+                                {
+                                    "route_id": "R_stop_dest_second",
+                                    "start_id": "poi_stop",
+                                    "destination_id": "loc_dest",
+                                    "name_via": "B432, B132",
+                                    "distance_km": 102,
+                                    "duration_hours": 1,
+                                    "duration_minutes": 25,
+                                    "alias": ["second"],
+                                },
+                            ],
+                        },
+                    ),
+                ],
+                "set_new_navigation": ("SUCCESS", {}),
+            },
+            {
+                "get_routes_from_start_to_destination": tool_schema(
+                    "get_routes_from_start_to_destination",
+                    {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+                    required=["start_id", "destination_id"],
+                ),
+                "set_new_navigation": self._nav_schema(),
+            },
+        )
+        ws.scratchpad["entities"]["navigation_state"] = {"navigation_active": False}
+
+        result = ex.run(
+            "r = set_new_navigation_via_stop(\n"
+            "    stop_id='poi_stop',\n"
+            "    final_destination_id='loc_dest',\n"
+            "    route_to_stop_prefer='fastest',\n"
+            "    route_to_final_alias='second',\n"
+            ")\n"
+            "respond('|'.join(r['route_ids']))"
+        )
+
+        args = self._emitted(ws, "set_new_navigation")
+        self.assertEqual(
+            args["route_ids"],
+            ["R_start_stop_fast", "R_stop_dest_second"],
+        )
+        self.assertIn("R_start_stop_fast|R_stop_dest_second", result.response_text)
 
     def test_get_weather_at_route_arrival_uses_route_duration(self):
         ws, ex = self.make(
@@ -2748,7 +2945,7 @@ class GuardTests(unittest.TestCase):
             "ws.entities['last_route_options']['shortest_route_id'] + '|' + "
             "ws.entities['selected_route']['destination_id'])"
         )
-        self.assertEqual(result.response_text, "route_fast|route_short|loc_b")
+        self.assertTrue(result.response_text.startswith("route_fast|route_short|loc_b"))
         self.assertEqual(
             ws.entities["last_route_options"]["routes"][0]["road_types"],
             ["urban"],

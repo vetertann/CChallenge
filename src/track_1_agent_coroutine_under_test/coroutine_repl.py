@@ -91,8 +91,10 @@ WORKSPACE_HELPER_NAMES = (
     "set_occupied_seat_heating",
     "get_route_options",
     "select_route",
+    "select_poi",
     "get_weather_at_route_arrival",
     "select_charging_plug",
+    "set_new_navigation_via_stop",
     "plan_charging_for_next_meeting",
     "call_selected_charging_provider",
     "get_preferred_ambient_light_color",
@@ -723,6 +725,7 @@ class CoroutineWorkspace:
         # Mutation failures and read results live for the complete user turn,
         # not merely one model-written Python block.
         self._failed_mutations: dict[str, dict[str, Any]] = {}
+        self._successful_mutations: list[dict[str, Any]] = []
         self._read_cache: dict[str, dict[str, Any]] = {}
         self._read_repeat_counts: dict[str, int] = {}
         self._state_revision = 0
@@ -957,12 +960,21 @@ class CoroutineWorkspace:
                 "select_route(routes, route_id=None, alias=None, name_via=None, "
                 "prefer=None, record_selection=True)"
             ),
+            "select_poi": (
+                "select_poi(pois=None, poi_id=None, name=None, category=None, "
+                "record_selection=True)"
+            ),
             "get_weather_at_route_arrival": (
                 "get_weather_at_route_arrival(location_or_poi_id, route=None, route_id=None, "
                 "routes=None, start_id=None)"
             ),
             "select_charging_plug": (
                 "select_charging_plug(pois=None, require_available=False)"
+            ),
+            "set_new_navigation_via_stop": (
+                "set_new_navigation_via_stop(stop_id, final_destination_id, "
+                "route_to_stop_prefer='fastest', route_to_final_alias=None, "
+                "route_to_final_prefer='fastest')"
             ),
             "plan_charging_for_next_meeting": (
                 "plan_charging_for_next_meeting(range_buffer_km=40, arrival_buffer_minutes=5)"
@@ -1372,6 +1384,41 @@ class CoroutineWorkspace:
                     "record_selection": "Whether to persist revision-bound selection provenance.",
                 },
             }
+        if tool_name == "select_poi":
+            return {
+                "name": "select_poi",
+                "signature": (
+                    "select_poi(pois=None, poi_id=None, name=None, category=None, "
+                    "record_selection=True)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in selector over POI search results. It returns SUCCESS only when "
+                    "a POI id/navigation_id or normalized POI name uniquely identifies one "
+                    "candidate. Use it when the user explicitly chooses a named POI, then pass "
+                    "the returned `poi` or `navigation_id` to charging, routing, or calling helpers."
+                ),
+                "required_arguments": [],
+                "optional_arguments": ["pois", "poi_id", "name", "category", "record_selection"],
+                "schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "pois": {"type": ["array", "object", "null"]},
+                        "poi_id": {"type": ["string", "null"]},
+                        "name": {"type": ["string", "null"]},
+                        "category": {"type": ["string", "null"]},
+                        "record_selection": {"type": "boolean", "default": True},
+                    },
+                },
+                "argument_descriptions": {
+                    "pois": "POI list or search_poi_at_location/search_poi_along_the_route result; defaults to last_pois.",
+                    "poi_id": "Exact POI id or navigation_id to select.",
+                    "name": "POI name the user selected, such as Ionity.",
+                    "category": "Optional category constraint, such as charging_stations.",
+                    "record_selection": "Whether to persist the selected POI for follow-up turns.",
+                },
+            }
         if tool_name == "get_weather_at_route_arrival":
             return {
                 "name": "get_weather_at_route_arrival",
@@ -1432,6 +1479,57 @@ class CoroutineWorkspace:
                 "argument_descriptions": {
                     "pois": "POI list or search_poi_at_location/search_poi_along_the_route result.",
                     "require_available": "If true, ignore occupied/maintenance plugs.",
+                },
+            }
+        if tool_name == "set_new_navigation_via_stop":
+            return {
+                "name": "set_new_navigation_via_stop",
+                "signature": (
+                    "set_new_navigation_via_stop(stop_id, final_destination_id, "
+                    "route_to_stop_prefer='fastest', route_to_final_alias=None, "
+                    "route_to_final_prefer='fastest')"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in navigation helper for inactive-navigation requests that set a "
+                    "new two-leg route through one stop. It looks up routes from current "
+                    "location to the stop and from the stop to the final destination, selects "
+                    "each leg by explicit selectors, then calls set_new_navigation through the "
+                    "normal guarded wrapper. If set_new_navigation is unavailable, the normal "
+                    "missing-capability response is returned."
+                ),
+                "required_arguments": ["stop_id", "final_destination_id"],
+                "optional_arguments": [
+                    "route_to_stop_route_id",
+                    "route_to_stop_alias",
+                    "route_to_stop_name_via",
+                    "route_to_stop_prefer",
+                    "route_to_final_route_id",
+                    "route_to_final_alias",
+                    "route_to_final_name_via",
+                    "route_to_final_prefer",
+                ],
+                "schema": {
+                    "type": "object",
+                    "required": ["stop_id", "final_destination_id"],
+                    "properties": {
+                        "stop_id": {"type": "string"},
+                        "final_destination_id": {"type": "string"},
+                        "route_to_stop_route_id": {"type": ["string", "null"]},
+                        "route_to_stop_alias": {"type": ["string", "null"]},
+                        "route_to_stop_name_via": {"type": ["string", "null"]},
+                        "route_to_stop_prefer": {"type": ["string", "null"], "default": "fastest"},
+                        "route_to_final_route_id": {"type": ["string", "null"]},
+                        "route_to_final_alias": {"type": ["string", "null"]},
+                        "route_to_final_name_via": {"type": ["string", "null"]},
+                        "route_to_final_prefer": {"type": ["string", "null"], "default": "fastest"},
+                    },
+                },
+                "argument_descriptions": {
+                    "stop_id": "Grounded POI or location id for the intermediate stop.",
+                    "final_destination_id": "Grounded final destination location or POI id.",
+                    "route_to_stop_*": "Explicit selector for the current-location-to-stop leg.",
+                    "route_to_final_*": "Explicit selector for the stop-to-destination leg.",
                 },
             }
         if tool_name == "plan_charging_for_next_meeting":
@@ -1651,6 +1749,7 @@ class CoroutineWorkspace:
         self.last_user_message = text
         self.messages.append({"source": "user", "content": text})
         self._failed_mutations.clear()
+        self._successful_mutations.clear()
         self._read_cache.clear()
         self._read_repeat_counts.clear()
         navigation_state = self.scratchpad.get("entities", {}).get("navigation_state")
@@ -1705,6 +1804,10 @@ class CoroutineWorkspace:
         replacement_blocker = self._missing_destination_replacement_response(message)
         if replacement_blocker is not None:
             self._respond_locked(replacement_blocker)
+            return
+        navigation_claim_blocker = self._ungrounded_navigation_completion_response(message)
+        if navigation_claim_blocker is not None:
+            self._respond_locked(navigation_claim_blocker)
             return
         message = self._append_response_obligations(message)
         message = self._append_pending_route_narration(message)
@@ -2496,6 +2599,13 @@ class CoroutineWorkspace:
             if str(status or "").upper() == "SUCCESS":
                 # A successful (re)try clears ONLY the same target's failure.
                 self._failed_mutations.pop(key, None)
+                self._successful_mutations.append(
+                    {
+                        "tool_name": name,
+                        "arguments": dict(arguments),
+                        "status": "SUCCESS",
+                    }
+                )
             elif self._is_mutation_failure_status(status):
                 self._failed_mutations[key] = {
                     "tool_name": name,
@@ -2544,6 +2654,43 @@ class CoroutineWorkspace:
         return (
             f"I couldn't complete that — the {joined} call didn't succeed, so I "
             "haven't made those changes. Want me to try again?"
+        )
+
+    def _has_successful_navigation_mutation(self) -> bool:
+        return any(
+            isinstance(item, dict)
+            and item.get("tool_name") in NAVIGATION_ACTIVATING_MUTATIONS
+            and str(item.get("status") or "").upper() == "SUCCESS"
+            for item in self._successful_mutations
+        )
+
+    @staticmethod
+    def _claims_navigation_completed(message: str) -> bool:
+        lowered = message.lower()
+        patterns = (
+            r"\bnavigation\s+set\b",
+            r"\bnavigation\s+(?:is\s+|has\s+been\s+|was\s+)?(?:set|started|updated|configured)\b",
+            r"\b(?:i|i['’]ve|i have)\s+(?:set|started|updated|configured)\s+(?:up\s+)?(?:the\s+)?navigation\b",
+            r"\b(?:i|i['’]ve|i have)\s+(?:set|started|updated|configured)\s+(?:up\s+)?(?:(?![.!?]).){0,80}\bnavigation\b",
+            r"\broute\s+(?:is\s+|has\s+been\s+|was\s+)?set\b",
+        )
+        return any(re.search(pattern, lowered) for pattern in patterns)
+
+    def _ungrounded_navigation_completion_response(self, message: str) -> str | None:
+        if not self._claims_navigation_completed(message):
+            return None
+        if self._has_successful_navigation_mutation():
+            return None
+        if not self.tool_available("set_new_navigation"):
+            report = self._record_tool_surface_limitation(
+                "navigation_completion_claim",
+                "set navigation",
+                missing_tools=["set_new_navigation"],
+            )
+            return str(report.get("message") or "")
+        return (
+            "I haven't set the navigation yet because the navigation control "
+            "call has not completed."
         )
 
     # ------------------------------------------------------------------
@@ -2670,6 +2817,112 @@ class CoroutineWorkspace:
         # set still informs about fastest/alternatives/tolls.
         self._narrate_from_route_ids(kwargs.get("route_ids"))
         return self._call_raw_tool_sync("set_new_navigation", kwargs)
+
+    def _select_route_for_navigation_leg(
+        self,
+        route_options: dict[str, Any],
+        *,
+        segment_name: str,
+        route_id: str | None = None,
+        alias: str | None = None,
+        name_via: str | None = None,
+        prefer: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(route_options, dict) or route_options.get("status") != "SUCCESS":
+            return {
+                "status": "ROUTE_OPTIONS_UNAVAILABLE",
+                "segment": segment_name,
+                "route_options": copy.deepcopy(route_options),
+            }
+        selector = {
+            "route_id": route_id,
+            "alias": alias,
+            "name_via": name_via,
+            "prefer": prefer,
+        }
+        if not any(isinstance(value, str) and value.strip() for value in selector.values()):
+            selector["prefer"] = "fastest"
+        selected = self.select_route(route_options.get("routes"), **selector)
+        if selected.get("status") == "SUCCESS":
+            return selected
+        return {
+            "status": "ROUTE_SELECTION_FAILED",
+            "segment": segment_name,
+            "selection": selected,
+            "route_options": copy.deepcopy(route_options),
+        }
+
+    def set_new_navigation_via_stop(
+        self,
+        stop_id: str,
+        final_destination_id: str,
+        route_to_stop_route_id: str | None = None,
+        route_to_stop_alias: str | None = None,
+        route_to_stop_name_via: str | None = None,
+        route_to_stop_prefer: str | None = "fastest",
+        route_to_final_route_id: str | None = None,
+        route_to_final_alias: str | None = None,
+        route_to_final_name_via: str | None = None,
+        route_to_final_prefer: str | None = "fastest",
+    ) -> dict[str, Any]:
+        """Set a new inactive-navigation route through one grounded stop."""
+
+        current_id = self.policy_location_id()
+        stop_id = self._resolve_preloaded_argument_value(stop_id)
+        final_destination_id = self._resolve_preloaded_argument_value(final_destination_id)
+        if not all(isinstance(value, str) and value for value in (current_id, stop_id, final_destination_id)):
+            return {
+                "status": "INVALID_ARGUMENTS",
+                "reason": "current location, stop_id, and final_destination_id must be grounded ids",
+                "current_location_id": current_id,
+                "stop_id": stop_id,
+                "final_destination_id": final_destination_id,
+            }
+
+        to_stop_options = self.get_route_options(
+            start_id=current_id,
+            destination_id=stop_id,
+        )
+        to_stop = self._select_route_for_navigation_leg(
+            to_stop_options,
+            segment_name="current_location_to_stop",
+            route_id=route_to_stop_route_id,
+            alias=route_to_stop_alias,
+            name_via=route_to_stop_name_via,
+            prefer=route_to_stop_prefer,
+        )
+        if to_stop.get("status") != "SUCCESS":
+            return to_stop
+
+        to_final_options = self.get_route_options(
+            start_id=stop_id,
+            destination_id=final_destination_id,
+        )
+        to_final = self._select_route_for_navigation_leg(
+            to_final_options,
+            segment_name="stop_to_final_destination",
+            route_id=route_to_final_route_id,
+            alias=route_to_final_alias,
+            name_via=route_to_final_name_via,
+            prefer=route_to_final_prefer,
+        )
+        if to_final.get("status") != "SUCCESS":
+            return to_final
+
+        route_ids = [to_stop["selected_route_id"], to_final["selected_route_id"]]
+        result = self.set_new_navigation_guarded(route_ids=route_ids)
+        report = {
+            "status": result.get("status") if isinstance(result, dict) else "UNKNOWN",
+            "result": result,
+            "route_ids": route_ids,
+            "to_stop": to_stop,
+            "to_final": to_final,
+            "stop_id": stop_id,
+            "final_destination_id": final_destination_id,
+        }
+        if isinstance(result, dict) and result.get("status") == "SUCCESS":
+            self._helper_message("Navigation is set with the requested stop and final route.")
+        return report
 
     def _repair_or_block_charging_plan_route(self, route_ids: Any) -> dict[str, Any]:
         if not isinstance(route_ids, list) or not route_ids:
@@ -7086,6 +7339,10 @@ class CoroutineWorkspace:
                 },
             },
         )
+        if len(normalized) > 1 and isinstance(fastest_route, dict):
+            fastest_id = fastest_route.get("route_id") or fastest_route.get("id")
+            if isinstance(fastest_id, str):
+                self._store_route_narration(normalized, fastest_id, stage="search")
         return route_options
 
     def select_route(
@@ -7174,6 +7431,109 @@ class CoroutineWorkspace:
         if not matches:
             return {"status": "NOT_FOUND", "matches": [], "reason": "selector matched no route"}
         return {"status": "AMBIGUOUS", "matches": matches, "reason": "selector matched multiple routes"}
+
+    @staticmethod
+    def _normalize_poi_selector_text(value: Any) -> str:
+        text = _clean_string(value) or ""
+        text = re.sub(r"[^a-zA-Z0-9]+", " ", text).lower()
+        return " ".join(text.split())
+
+    def select_poi(
+        self,
+        pois: Any = None,
+        poi_id: str | None = None,
+        name: str | None = None,
+        category: str | None = None,
+        record_selection: bool = True,
+    ) -> dict[str, Any]:
+        """Select exactly one POI from grounded search results without guessing."""
+
+        if pois is None:
+            pois = self.scratchpad.get("entities", {}).get("last_pois")
+        if isinstance(pois, list):
+            poi_list = [poi for poi in pois if isinstance(poi, dict)]
+        elif isinstance(pois, dict) and any(
+            key in pois for key in ("poi_id", "id", "navigation_id", "name")
+        ) and not any(key in pois for key in ("pois", "pois_found", "pois_found_along_route")):
+            poi_list = [pois]
+        else:
+            poi_list = [poi for poi in pois_value(pois) if isinstance(poi, dict)]
+
+        if category:
+            wanted_category = str(category).strip().lower()
+            poi_list = [
+                poi
+                for poi in poi_list
+                if str(poi.get("category") or "").strip().lower() == wanted_category
+            ]
+
+        matches = poi_list
+        if poi_id:
+            wanted_id = str(poi_id).strip()
+            matches = [
+                poi
+                for poi in matches
+                if wanted_id
+                in {
+                    str(poi.get("poi_id") or "").strip(),
+                    str(poi.get("id") or "").strip(),
+                    str(poi.get("navigation_id") or "").strip(),
+                }
+            ]
+        if name:
+            wanted_name = self._normalize_poi_selector_text(name)
+            exact = [
+                poi
+                for poi in matches
+                if self._normalize_poi_selector_text(poi.get("name")) == wanted_name
+            ]
+            if exact:
+                matches = exact
+            else:
+                matches = [
+                    poi
+                    for poi in matches
+                    if wanted_name
+                    and (
+                        wanted_name in self._normalize_poi_selector_text(poi.get("name"))
+                        or self._normalize_poi_selector_text(poi.get("name")) in wanted_name
+                    )
+                ]
+
+        if len(matches) == 1:
+            selected = copy.deepcopy(matches[0])
+            poi_identifier = (
+                selected.get("poi_id")
+                or selected.get("id")
+                or selected.get("navigation_id")
+            )
+            if "poi_id" not in selected and isinstance(poi_identifier, str):
+                selected["poi_id"] = poi_identifier
+            if "navigation_id" not in selected and isinstance(poi_identifier, str):
+                selected["navigation_id"] = poi_identifier
+            result = {
+                "status": "SUCCESS",
+                "poi": selected,
+                "selected": selected,
+                "result": selected,
+                "poi_id": selected.get("poi_id"),
+                "id": selected.get("poi_id"),
+                "navigation_id": selected.get("navigation_id"),
+                "name": selected.get("name"),
+            }
+            if record_selection:
+                self.remember_entity("selected_poi", copy.deepcopy(result))
+                category_value = str(selected.get("category") or "").lower()
+                if "charging" in category_value or self._is_charging_poi_id(selected.get("poi_id")):
+                    self.remember_entity("selected_charging_poi", copy.deepcopy(result))
+            return result
+        if not matches:
+            return {"status": "NOT_FOUND", "matches": [], "reason": "selector matched no POI"}
+        return {
+            "status": "AMBIGUOUS",
+            "matches": copy.deepcopy(matches),
+            "reason": "selector matched multiple POIs",
+        }
 
     def _remember_route_selection(
         self,
@@ -8593,8 +8953,10 @@ class BlockingPythonExecutor:
             "set_occupied_seat_heating": ws.set_occupied_seat_heating,
             "get_route_options": ws.get_route_options,
             "select_route": ws.select_route,
+            "select_poi": ws.select_poi,
             "get_weather_at_route_arrival": ws.get_weather_at_route_arrival,
             "select_charging_plug": ws.select_charging_plug,
+            "set_new_navigation_via_stop": ws.set_new_navigation_via_stop,
             "plan_charging_for_next_meeting": ws.plan_charging_for_next_meeting,
             "call_selected_charging_provider": ws.call_selected_charging_provider,
             "get_preferred_ambient_light_color": ws.get_preferred_ambient_light_color,

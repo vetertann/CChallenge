@@ -76,6 +76,7 @@ set_fog_lights_on_safe()
 - If two contact searches express two known constraints, intersect their `contact_ids`. Prefer `unique_id_intersection(last_name_lookup, first_name_lookup)`, which returns the one shared grounded ID and rejects empty or ambiguous intersections. The second normalized lookup also exposes `unique_intersection_with_previous_contact_id` when the overlap with the immediately previous lookup is exactly one ID.
 - Charging status exposes numeric `remaining_range_km`; use it instead of comparing the formatted `remaining_range` string to a distance.
 - For "fastest charger" and charging-time calculations, prefer `select_charging_plug(pois)` after a charging-station search. It selects the highest-power plug and keeps station id, plug id, power, availability, phone number, and navigation id together. Use `require_available=True` only when current availability is a hard user constraint; for time calculation, an occupied high-power plug can still be the fastest charger if the user allows it.
+- If the user explicitly chooses a named POI from search results, first resolve that exact POI with `select_poi(...)`, then pass only that POI to downstream helpers. Do not call `select_charging_plug(pois=all_results)` after the user picked a specific station, because that helper chooses the highest-power plug across everything it receives.
 - If navigation depends on weather at the destination, check weather at route-arrival time rather than current time at the remote destination. Use `get_weather_at_route_arrival(location_or_poi_id=destination_id)` instead of raw `get_weather(...)` with `policy_now()`, because the helper gets/uses route duration and then calls `get_weather` for the destination at the computed arrival hour/minute.
 - For charging on a later segment of an active multi-stop route, account for energy/range consumed before that segment. A current-location range must not be treated as the range still available at the intermediate waypoint. Derive the range or SOC expected on arrival at that waypoint, then calculate the kilometer on the following segment where the requested reserve is reached.
 - For linear range arithmetic on a later segment: derive full-range distance from grounded current SOC and remaining range, subtract the distance traveled before the segment from current remaining range, convert that arrival range back to arrival SOC, then calculate the distance from the segment start until the requested reserve SOC. Use those derived values only to choose parameters for official charging and POI tools.
@@ -172,6 +173,25 @@ option on one leg, record that exact leg selection; do not let the default
 fastest rule overwrite it.
 
 ```python
+# User selected a named charging stop, then asks for navigation through it.
+selected_stop = select_poi(scratchpad["entities"]["last_pois"], name="Ionity")
+plug = select_charging_plug(pois=[selected_stop["poi"]])
+charging_time = calculate_charging_time_by_soc(
+    charging_station_id=plug["charging_station_id"],
+    charging_station_plug_id=plug["charging_station_plug_id"],
+    start_state_of_charge=current_soc,
+    target_state_of_charge=95,
+)
+set_new_navigation_via_stop(
+    stop_id=selected_stop["navigation_id"],
+    final_destination_id=destination_id,
+    route_to_stop_prefer="fastest",
+    route_to_final_alias="second",
+)
+```
+
+```python
+# Manual equivalent when more than one stop or more custom logic is needed.
 to_stop = get_route_options(start_id=current_id, destination_id=charger_id)
 to_stop_route_id = select_route(to_stop["routes"], prefer="fastest")["selected_route_id"]
 
