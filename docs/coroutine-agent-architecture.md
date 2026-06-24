@@ -656,7 +656,9 @@ Current helpers:
 | Helper | Main behavior |
 | --- | --- |
 | `defrost_front_window()` | Applies front-defrost climate and window policies. |
+| `set_window_defrost_safe(defrost_window='FRONT')` | Applies front/all defrost climate and window policies; rear defrost passes through. |
 | `open_sunroof_safe(percentage)` | Applies sunshade, weather, and confirmation rules. |
+| `open_close_window_safe(window, percentage)` | Applies AC/energy confirmation policy before opening windows above 25%. |
 | `set_air_conditioning_on_safe()` | Closes known windows over 20%, fixes fan speed, then enables AC. |
 | `close_known_windows_for_blocked_ac(window=None)` | Handles a narrow follow-up after incomplete window data blocked AC. |
 | `set_climate_temperature_safe(...)` | Applies the cross-zone temperature warning policy. |
@@ -682,6 +684,12 @@ helpers. Currently:
 - `set_fog_lights(on=True)` delegates to `set_fog_lights_on_safe()`.
 - `set_head_lights_high_beams(on=True)` delegates to
   `set_high_beams_on_safe()`.
+- `set_air_conditioning(on=True)` delegates to
+  `set_air_conditioning_on_safe()`.
+- `set_window_defrost(on=True, defrost_window=FRONT|ALL)` delegates to
+  `set_window_defrost_safe(...)`.
+- `open_close_sunroof(...)` delegates to `open_sunroof_safe(...)`.
+- `open_close_window(...)` delegates to `open_close_window_safe(...)`.
 - `set_new_navigation(...)` delegates to `set_new_navigation_guarded(...)`.
 - `get_routes_from_start_to_destination(...)` delegates to
   `get_routes_guarded(...)`.
@@ -699,11 +707,12 @@ helpers. Currently:
 - `navigation_replace_final_destination(...)` delegates to
   `navigation_replace_final_destination_guarded(...)`.
 
-These eleven public wrappers have one canonical execution path whether called
-directly or through `batch(...)`. The internal guarded names are not separately
-advertised to the model. Other true policy multitools, including AC, defrost,
-sunroof, and climate-temperature helpers, are still model-selected; their raw
-component paths are not yet universally redirected.
+These public wrappers have one canonical execution path whether called directly
+or through `batch(...)`. The internal guarded names are not separately
+advertised to the model. Climate-temperature policy still remains
+model-selected through `set_climate_temperature_safe(...)` because raw
+temperature changes can be valid only when the model has resolved the requested
+zone/target.
 
 The final-destination wrapper does not determine whether user wording authorizes
 a route choice. It validates a supplied route ID against retrieved alternatives,

@@ -4,158 +4,211 @@
 
 Final-submission judge: Gemini 2.5 Flash.
 
-Run:
-`output/run_configs/20260620-180604__run_configs-coroutine_disambiguation_gemini_1__train-trials1-base0-hall0-disall__openai-gpt-oss-120b-fast.json`
+Latest full train run:
+`output/run_configs/20260624-121323__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
 
 Configuration:
-- Agent: `openai/gpt-oss-120b-fast`
+- Agent provider: Cerebras
+- Agent model: `gpt-oss-120b`
 - Skill: `car_domain_120b.md`
 - User simulator: `gemini/gemini-2.5-flash`
 - Policy evaluator: `gemini/gemini-2.5-flash`
 - Trials: `1`
 
-Result: `9/31` (`29.0%`).
+Result for disambiguation split: `10/31` (`32.3%`) raw.
 
-Note: this run predates the 2026-06-20 runtime changes (dynamic-key distance/
-charging normalization, route narration on presentations/new-route sets,
-active-nav refuse→redirect, idempotent nav delete). Those are global, so re-run
-the disambiguation split to refresh these numbers before acting.
+One raw failure is not behaviorally analyzable:
+- `disambiguation_2`: no trajectory. Gemini policy evaluation returned HTTP
+  503 before any assistant action was recorded. Treat as infrastructure/rerun,
+  not as an agent bug.
 
-Active failures:
+Behavior-measured result excluding that no-trace 503: `10/30` (`33.3%`).
+
+Latest passes:
+- `disambiguation_6`
+- `disambiguation_14`
+- `disambiguation_16`
+- `disambiguation_24`
+- `disambiguation_32`
+- `disambiguation_36`
+- `disambiguation_40`
+- `disambiguation_46`
+- `disambiguation_48`
+- `disambiguation_51`
+
+Active behavior failures:
 - `disambiguation_0`
-- `disambiguation_2`
+- `disambiguation_4`
 - `disambiguation_8`
 - `disambiguation_10`
 - `disambiguation_12`
 - `disambiguation_18`
+- `disambiguation_20`
 - `disambiguation_22`
 - `disambiguation_26`
+- `disambiguation_28`
 - `disambiguation_30`
-- `disambiguation_32`
 - `disambiguation_34`
 - `disambiguation_38`
-- `disambiguation_40`
 - `disambiguation_42`
 - `disambiguation_44`
-- `disambiguation_46`
-- `disambiguation_48`
 - `disambiguation_50`
 - `disambiguation_52`
 - `disambiguation_53`
 - `disambiguation_54`
 - `disambiguation_55`
 
+## Current Failure Notes
+
+- `disambiguation_0`: stored sunroof preference was not applied. The agent
+  asked confirmation for opening sunroof to `100%` and then did it; expected was
+  preference-driven percentage.
+- `disambiguation_4`: ambient-light color should have been resolved from stored
+  preferences. The agent asked "Which ambient light color would you like?" and
+  never called `set_ambient_lights`.
+- `disambiguation_8`: the agent asked a broad lights clarification and stopped.
+  Expected flow still required exterior-light/weather grounding and fog-light
+  action after resolving the ambiguity.
+- `disambiguation_10`: "headlights" was resolved to high beams off; expected
+  low-beam handling. Missing expected `set_head_lights_low_beams`.
+- `disambiguation_12`: "too warm" was narrowed to a temperature question, but
+  expected climate/seat-heating disambiguation and `set_seat_heating`.
+- `disambiguation_18`: the agent increased fan speed, then asked for airflow
+  direction instead of using the stored FEET airflow preference.
+- `disambiguation_20`: "headlights for better visibility" resulted in low beams
+  only. Expected state-aware high-beam path after recognizing low beams were
+  already on.
+- `disambiguation_22`: defrost flow executed, but the earlier window-close turn
+  and compatible preference handling made the final action sequence mismatch.
+- `disambiguation_26`: charging-time request should have used stored target SOC
+  and searched candidates. The agent asked the user what charge target they
+  wanted.
+- `disambiguation_28`: user wanted fan speed increased by two while leaving
+  other climate/AC settings unchanged. The agent turned AC on first, then later
+  changed fan speed.
+- `disambiguation_30`: user wanted fresh-air circulation. The agent used AC
+  helper behavior and set circulation to AUTO.
+- `disambiguation_34`: tool actions passed, but policy failed because final
+  response said `22 degrees` instead of `22 degrees Celsius`.
+- `disambiguation_38`: heating preference was not resolved internally. The agent
+  asked what heating level to set and never applied temperature, seat heating,
+  or steering-wheel heating.
+- `disambiguation_42`: route, charging, contact, and email flow executed
+  partially, but final actions mismatched; the plan was not validated as one
+  complete route/charging/email bundle before sending.
+- `disambiguation_44`: calendar/weather facts were read, but contact
+  disambiguation fell back to asking for Tina instead of resolving attendee
+  contact details and sending the weather email.
+- `disambiguation_50`: the agent stopped after saying outside temperature was
+  unavailable and never checked sunroof/sunshade state or asked for the
+  remaining disambiguation.
+- `disambiguation_52`: route preferences were fetched only after presenting
+  route options; navigation was never set.
+- `disambiguation_53`: conditional Mannheim/Cologne navigation selected Cologne
+  and set fastest route, but final expected action still failed; this mirrors
+  the base route-preference issue where explicit shortest/default rules are not
+  carried through the selected branch.
+- `disambiguation_54`: route preferences were fetched and Belgrade routes were
+  presented, but the required supermarket search and `set_new_navigation` never
+  happened.
+- `disambiguation_55`: correction handling remains unstable. The agent retried
+  invalid Ordino lookup, then after correction to Andorra la Vella repeatedly
+  asked for kilometer information instead of using route/POI tools; it also
+  omitted toll information when presenting routes.
+
 ## Active Root Causes
 
-### Stored preferences are ignored or incompletely applied
+### Stored preferences are ignored or fetched too late
 
 Affected tasks:
-- `disambiguation_0`: stored sunroof preference was 50% and never fully open;
-  the model opened it to 100%.
-- `disambiguation_18`: asked for airflow direction instead of retrieving the
-  stored FEET preference.
-- `disambiguation_22`: defrost default ignored the compatible FEET airflow
-  preference.
-- `disambiguation_26`: asked for target SOC and charger instead of using the
-  stored 80% preference and searching candidates.
-- `disambiguation_38`: changed temperature before resolving the linked preferred
-  heating level.
-- `disambiguation_52`: started navigation without applying route preferences or
-  handling toll requirements.
+- `disambiguation_0`
+- `disambiguation_4`
+- `disambiguation_18`
+- `disambiguation_22`
+- `disambiguation_26`
+- `disambiguation_38`
+- `disambiguation_52`
+- `disambiguation_54`
 
 Fix direction:
-- Resolve relevant preferences before asking a question or mutating state.
-- Apply all compatible preferences in one plan.
-- Ask only for unresolved choices that materially affect execution.
+- Before asking the user for a missing vehicle setting, route-selection choice,
+  charging target, or ambient-light color, retrieve the relevant preference
+  category if the policy says preferences can resolve the ambiguity.
+- Apply compatible preferences before mutation, not after presenting options.
+- Keep this as a general preference-before-question habit, not task-specific
+  preference values.
 
-### Ambiguous requests trigger premature mutations
+### Broad nouns are resolved with the wrong tool or a premature question
 
 Affected tasks:
-- `disambiguation_2`: opened windows to 100% before clarifying percentage.
-- `disambiguation_12`: narrowed "too warm" to target temperature before
-  determining which climate control the user meant.
-- `disambiguation_34`: activated occupied-seat heating before clarification.
-- `disambiguation_46`: selected Berlin as destination before route choice.
-- `disambiguation_50`: invented a 100% sunroof setting instead of asking for the
-  percentage after the condition was satisfied.
-- `disambiguation_53`: guessed a conditional branch and omitted toll handling.
+- `disambiguation_8`
+- `disambiguation_10`
+- `disambiguation_12`
+- `disambiguation_20`
+- `disambiguation_28`
+- `disambiguation_30`
 
 Fix direction:
-- Separate read-only grounding from mutation.
-- Do not execute irreversible or user-visible changes while a required
-  disambiguation remains unresolved.
-- Store the pending intent and consume the clarification once.
+- For broad words like "lights", "headlights", "too warm", "air circulation",
+  and "airflow", first gather the relevant current state and preference facts.
+- Choose a single tool only when policy, explicit wording, preference, or state
+  makes it unique.
+- Ask the user only after those facts still leave multiple valid options.
 
-### Compound actions are split, contradicted, or partially completed
+### Compound requests are not planned atomically
 
 Affected tasks:
-- `disambiguation_30`: used an AC helper instead of circulation control and later
-  claimed AUTO mode; expected result was fresh air.
-- `disambiguation_32`: eventually set fresh air but first reported
-  recirculation, so the compound request was not atomic.
-- `disambiguation_34`: produced an incomplete temperature/heating plan.
-- `disambiguation_38`: split temperature and preferred heating actions.
-- `disambiguation_40`: window/defrost synchronization was incomplete; the
-  required all-window target was 5%.
-- `disambiguation_42`: route, charging, contact, and email facts were not planned
-  together; the email also reported an incorrect four-minute duration.
+- `disambiguation_22`
+- `disambiguation_28`
+- `disambiguation_30`
+- `disambiguation_34`
+- `disambiguation_42`
 
 Fix direction:
-- Build and validate a complete structured plan before executing compound
-  mutations.
-- Preserve grounded values across helper calls.
-- Generate the final response from actual executed results, not an intermediate
-  plan.
+- Build a complete intended action set before the first side-effect call.
+- Preserve "leave everything else unchanged" constraints across helper calls.
+- Generate the final response from executed tool results and required units,
+  not from an intermediate plan. Temperature confirmations must say
+  `degrees Celsius`.
 
-### Clarifications and corrections are not consumed reliably
+### Route, charging, and contact state is not carried through multi-turn plans
 
 Affected tasks:
-- `disambiguation_48`: a resolved waypoint was not consumed once; stale
-  clarification caused repeated replacement and loss of plug/route data.
-- `disambiguation_55`: corrected Ordino reappeared, irrelevant preferences were
-  requested, direct navigation started before the charging stop, and tool errors
-  did not produce a stable corrected plan.
+- `disambiguation_42`
+- `disambiguation_44`
+- `disambiguation_50`
+- `disambiguation_52`
+- `disambiguation_53`
+- `disambiguation_54`
+- `disambiguation_55`
 
 Fix direction:
-- Add a pending-slot state machine with `unresolved`, `resolved`, `executed`, and
-  `superseded` states.
-- Remove resolved alternatives from subsequent prompts.
-- Invalidate stale route and charging options after corrections.
+- Keep pending route, charging, POI, calendar, and contact choices as structured
+  facts until they are executed or superseded.
+- When the user corrects a location or route, invalidate stale alternatives and
+  consume the corrected value once.
+- Do not ask the user for internal IDs or route kilometer marks when a lookup or
+  search tool can ground the missing value.
 
-### Tool selection and grounded-state reuse are weak
+### Infrastructure/no-trace failures
 
 Affected tasks:
-- `disambiguation_10`: selected high beams and manual confirmation for
-  "exterior lights" instead of resolving the current lighting state.
-- `disambiguation_44`: failed to reuse calendar facts, contradicted the meeting,
-  used the wrong weather parameter, and asked for Tina's raw ID.
-- `disambiguation_54`: claimed a preferred Belgrade plan but failed to find the
-  required open supermarket for the second segment.
+- `disambiguation_2`
 
 Fix direction:
-- Retrieve current state before resolving broad control nouns.
-- Keep calendar, weather, contact, and route facts in normalized structured
-  state.
-- Never ask the user for an internal identifier when a lookup tool exists.
-
-### `disambiguation_8`: apparently correct clarification still failed
-
-The agent asked the expected lighting clarification, but the Gemini simulator
-stopped and assigned `DISAMBIGUATION_ERROR`.
-
-Fix direction:
-- Keep this in the active Gemini backlog because it is a judged failure.
-- Reinspect the exact wording for avoidable ambiguity.
-- Do not add task-specific behavior solely to satisfy a simulator stop.
+- Rerun this task or the whole split before drawing conclusions. The latest
+  artifact contains no assistant trajectory because Gemini returned 503 during
+  policy evaluation.
 
 ## Recommended Order
 
-1. Implement consume-once pending-intent state and correction invalidation
-   (`disambiguation_48`, `_55`, plus several premature-mutation cases).
-2. Resolve stored preferences before mutation (`_0`, `_18`, `_22`, `_26`,
-   `_38`, `_52`).
-3. Add complete compound-plan validation (`_30`, `_32`, `_34`, `_40`, `_42`).
-4. Tighten broad-noun state resolution and grounded-value reuse (`_10`, `_44`,
-   `_54`).
-5. Re-run Gemini after the general fixes before changing behavior for
-   `disambiguation_8`.
+1. Add preference-before-question guidance/examples for common vehicle,
+   lighting, charging, and route-selection ambiguities.
+2. Add broad-control examples for "lights/headlights", "too warm", and
+   "air circulation/airflow" that show state/preference grounding before
+   mutation or clarification.
+3. Tighten compound-plan handling so helpers do not violate "leave other
+   settings unchanged" and final responses include required units.
+4. Strengthen multi-turn structured pending state for route/charging/contact
+   plans and correction consumption.
+5. Rerun `disambiguation_2` or the full split to replace the no-trace 503.

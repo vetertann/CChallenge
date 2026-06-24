@@ -4,50 +4,51 @@
 
 Final-submission judge: Gemini 2.5 Flash.
 
-Latest full run:
-`output/run_configs/20260622-221000__run_configs-coroutine_base_gemini_1__train-trials1-baseall-hall0-dis0__openai-gpt-oss-120b-fast.json`
+Latest full train run:
+`output/run_configs/20260624-121323__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
 
 Configuration:
-- Agent: `openai/gpt-oss-120b-fast`
+- Agent provider: Cerebras
+- Agent model: `gpt-oss-120b`
 - Skill: `car_domain_120b.md`
 - User simulator: `gemini/gemini-2.5-flash`
 - Policy evaluator: `gemini/gemini-2.5-flash`
 - Trials: `1`
 
-Result: `43/50` (`86%`) raw. If the organizer-confirmed evaluator-side
-`base_88` policy false negative is excluded, behavior-adjusted score is
-`44/50`.
+Result for base split: `44/50` (`88.0%`) raw.
 
-Raw failures in that full run (`7`):
-- `base_28`: missed required `get_climate_settings` before relative fan change
-  (targeted fix applied after this full run).
-- `base_76`: read driver/passenger state but copied driver values onto
-  passenger instead of passenger values onto driver.
-- `base_82`: all actions passed, but first route presentation said `1.0 km`
-  instead of about `1010 km`; policy LLM failed the wording.
-- `base_86`: selected/called the wrong charging-station POI after computing the
-  15% buffer point; policy LLM also repeated the known route-options false
-  negative.
-- `base_88`: all actions/final state passed; failed only the known
-  evaluator-side policy interpretation about unrelated existing route segments.
-- `base_96`: conditional branch chose Mannheim charging even though expected
-  route was Cologne (targeted fix applied after this full run).
-- `base_98`: calculated charging time for Fastned but later navigated to EnBW,
-  so the post-navigation provider call was never triggered (targeted fix applied
-  after this full run).
+No latest-run base failure is a clean whole-task add-back. The
+organizer-confirmed `base_88` unrelated-segment policy error is still useful,
+but this run also missed the expected route-based charging-station search. The
+organizer-confirmed `base_86` route-options contradiction is historical; the
+latest `base_86` failure is a real downstream EV/phone failure.
 
-Targeted fixes applied after that full run:
-- `base_28`: `increase_fan_speed` / `decrease_fan_speed` helpers read climate
-  state before relative fan-speed changes.
-- `base_76`: `sync_climate_zone(source_zone, target_zone)` plus source/target
-  examples; latest targeted trials passed.
-- `base_96`: arrival-time destination weather attention/helper; latest targeted
-  trial passed.
-- `base_98`: next-meeting charging plan helper, selected charger persistence,
-  and selected-provider phone helper; isolated latest targeted trial passed.
-- Combined targeted check
-  `20260622-231433__run_configs-coroutine_base_nonregex_fix_round3_gemini_1__train-trials1-base3ids-hall0-dis0__openai-gpt-oss-120b-fast.json`
-  passed all three patched cases: `base_76`, `base_96`, and `base_98`.
+Raw failures in the latest run (`6`):
+- `base_48`: all tool execution, final action, and user-end checks passed. The
+  evaluator failed only policy because the agent presented alternatives and let
+  the user choose the second route instead of proactively taking fastest.
+- `base_56`: all action checks passed, but policy failed because the agent asked
+  the user to choose the direct Paris route instead of proactively taking the
+  fastest route for an unqualified waypoint deletion.
+- `base_86`: Barcelona destination replacement succeeded, but the later EV
+  safety-buffer flow stalled before finding/calling the expected charging
+  station provider. The known route-options policy contradiction is confirmed
+  evaluator-side, but the EV follow-up remains real.
+- `base_88`: all action and final checks passed. The policy failure repeats the
+  organizer-confirmed evaluator-side claim that unrelated existing route
+  segments must also be rewritten to fastest, but this run also missed the
+  expected `search_poi_along_the_route` charging-station search.
+- `base_92`: all action/final checks passed. The evaluator failed the
+  confirmation request for fog lights in `partly_cloudy` weather, which appears
+  to contradict policy 008/009 as written in `docs/policy.md`.
+- `base_96`: the weather branch was correct (`rain in Mannheim` -> Cologne),
+  but the agent set the fastest Cologne route even though the user preference in
+  the task was shortest route.
+
+Current clean passes from previously active fixes:
+- `base_20`, `base_28`, `base_64`, `base_68`, `base_70`, `base_76`,
+  `base_78`, `base_82`, `base_84`, and `base_98` all passed in the latest full
+  run.
 
 Prior reference run (3-trial, post facts-vs-intention refactor — see
 `docs/facts-vs-intention-refactor-review.md`):
@@ -77,10 +78,11 @@ Targeted one-trial mechanism checks after the reliability/ergonomics pass:
 - `20260622-214342...contact_routechain...`: `base_78` and `base_84` passed on
   current Cerebras/Gemini after contact-recipient grounding and route-chain
   validation/repair.
-- The latest full run supersedes some earlier targeted uncertainty: `base_82`
-  now has correct actions but bad distance wording, while `base_86` still has a
-  real downstream charging-station/phone mismatch in addition to the known
-  route-options policy false negative.
+- The 2026-06-24 full run supersedes some earlier targeted uncertainty:
+  `base_28`, `base_76`, `base_82`, and `base_98` now pass in aggregate.
+  `base_86` still has a real downstream EV/charging-station failure in addition
+  to the known route-options policy contradiction. `base_96` still fails, but
+  the failure moved from weather-time branching to route-selection preference.
 
 These targeted passes/failures are one-trial evidence only. They update the
 known mechanism, not the 3-trial solid/flaky classification above.
@@ -230,13 +232,32 @@ Targeted Gemini/Cerebras evidence:
   Nathan Scott (`con_1139`) after confirmation and included the other Scott
   contacts.
 
-### `base_58`: phone normalization — PATCHED, RE-EVAL NEEDED
+### `base_58`: phone normalization — PASSED LATEST FULL RUN
 
 Previously the POI phone was called with leading whitespace, breaking the
 action match. Phone arguments now strip surrounding whitespace at the wrapper
 boundary while preserving the evaluator-provided value otherwise.
 
-### `base_48`: route choice/persistence — FIXED IN TARGETED POLICY-TAIL RUN
+### `base_48`: route choice/persistence — ACTIONS PASS, POLICY FAILS
+
+Latest full run:
+- User first asked to search restaurants in Munich, then asked to change final
+  destination to Munich.
+- The agent presented the fastest route and asked which route to use.
+- The user asked to see the second route and then selected it.
+- The agent called `navigation_replace_final_destination(...)` with the second
+  route `rll_dor_mun_475855`.
+- Evaluator action, final-state, tool-execution, and tool-subset checks all
+  passed. Only `r_policy` failed because the policy judge expected proactive
+  fastest-route selection.
+
+Interpretation:
+- This is a train-split route-policy/action mismatch candidate, not a clean
+  agent bug. The action script rewarded the selected second route, while the
+  policy judge wanted fastest-route behavior.
+- Do not hardcode against this task. If we change behavior here, it should come
+  from a general policy clarification about when a route-edit should present
+  options versus proactively commit fastest.
 
 Destination replacement succeeded, but later alternative-route selection used
 delete-and-recreate behavior or failed to complete against the selected route.
@@ -261,14 +282,36 @@ Evidence:
   `20260622-100158...preflight_target...` passed `base_48`, `base_64`, and
   `base_82` 3/3 overall. This is one targeted trial per task.
 
-### `base_82`: route actions correct, first presentation corrupted distance
+### `base_56`: waypoint deletion presented options before committing fastest
 
-The latest run got the full action flow right: it read active navigation,
-resolved Berlin, presented route options, waited for the user to choose K57/B65,
-and called `navigation_replace_final_destination(...)` with
-`rll_rig_ber_558409`.
+Latest full run:
+- User asked: remove Nuremberg and go straight to Paris.
+- The agent read the current Wiesbaden -> Nuremberg -> Paris route.
+- It fetched direct Wiesbaden -> Paris alternatives and asked which one the user
+  wanted.
+- The user selected A11/A51, which was also fastest and shortest.
+- The agent called `navigation_delete_waypoint(...)` with the correct direct
+  route and all action/final checks passed.
+- The policy judge failed the run because the agent should have proactively
+  taken the fastest direct route instead of asking.
 
-The remaining failure was verbal: the first route presentation said
+Fix direction:
+- For direct waypoint deletion where the user did not ask to see alternatives
+  and no explicit route preference is present, the helper/prompt should let the
+  model commit the fastest replacement route and then mention alternatives.
+- Keep the model flexible for explicit route-choice requests. This should not
+  block cases like `base_86`, where the user explicitly asked for multiple
+  route options.
+
+### `base_82`: route actions correct — PASSED LATEST FULL RUN
+
+The latest full run passed `base_82`.
+
+Previous failure shape:
+- The agent got the full action flow right: it read active navigation, resolved
+  Berlin, presented route options, waited for the user to choose K57/B65, and
+  called `navigation_replace_final_destination(...)` with `rll_rig_ber_558409`.
+- The remaining failure was verbal: the first route presentation said
 `A74, 1.0 km, 32 minutes` even though the tool returned `1010.08 km` and
 `12h 32m`. The later expanded list was correct. The evaluator failed only
 `r_policy` for inaccurate distance formatting.
@@ -278,7 +321,7 @@ B65`; the model interprets them. Navigation preflight ensures the model sees the
 two-waypoint state before its first decision, without interrupting Python or
 injecting a dynamic user message.
 
-Fix direction:
+Fix direction if it regresses:
 - Route summaries should expose a compact `display` string with route id,
   `name_via`, full `distance_km`, and `duration`, so the model can copy the
   representation instead of reconstructing units from separate fields.
@@ -301,7 +344,7 @@ Evidence:
 
 No task-specific route-choice wrapper logic is proposed.
 
-### `base_88`: completed deletion is retried — policy failure evaluator-side
+### `base_88`: waypoint deletion policy false negative plus charging-search miss
 
 The delete-loop is fixed: `navigation_delete_waypoint_guarded` now returns an
 idempotent no-op success when the target waypoint is already absent, so the
@@ -312,18 +355,21 @@ evaluator-side: after a waypoint deletion, LLM-POL:022 applies to the newly
 created segment only. The agent does not need to rewrite unrelated existing
 segments such as Berlin→Leipzig.
 
-Latest run `20260622-221000...base_gemini_1`: all action and final checks
-passed again. The only failure was the same evaluator-side policy error claiming
-the unrelated Berlin→Leipzig segment should also have been changed to fastest.
-The response wording was already segment-scoped.
+Latest run `20260624-121323...full_train...`: all action and final checks
+passed again. The policy failure was the same evaluator-side claim that the
+unrelated Berlin -> Leipzig segment should also have been changed to fastest.
+However, this run also had `r_tool_subset=0`: the agent searched for charging
+near Berlin with `search_poi_at_location(...)`, while the expected tool subset
+included `search_poi_along_the_route`.
 
 Fix direction (remaining):
-- Treat current train-split `base_88` failures as evaluator-side for score
-  analysis.
 - Keep route-edit narration segment-scoped; do not rewrite unrelated existing
   route segments.
+- For charging after a long route edit, search along the active/new route unless
+  the user explicitly asks for chargers near a specific city or stop. This is a
+  general route-charging rule, not a Bonn/Berlin-specific branch.
 
-### `base_42`: relative adjustments are guessed or replayed
+### `base_42`: relative adjustments are guessed or replayed — PASSED LATEST FULL RUN
 
 `base_42` ("more air circulation") jumped the fan two levels (2→4) and the
 request is tool-ambiguous (fan speed vs air-circulation mode). (`base_14`,
@@ -335,7 +381,7 @@ Fix direction:
   defined step or clarify; do not guess the magnitude.
 - Disambiguate "air circulation" between the candidate tools.
 
-### `base_60`: compound climate warning can be lost — PATCHED, RE-EVAL NEEDED
+### `base_60`: compound climate warning can be lost — PASSED LATEST FULL RUN
 
 Implemented: the prompt/skill reserve `set_occupied_seat_heating` for requests
 covering all occupied seats; explicit zones use `set_seat_heating`. Ordinary
@@ -344,7 +390,7 @@ warning is now a durable response obligation that `respond(...)` appends only
 when the model omitted it. Explicitly confirmed pending actions still complete
 with a grounded locked response.
 
-### `base_70`: route/email/charging flow — PASSED TARGETED CHECK
+### `base_70`: route/email/charging flow — PASSED LATEST FULL RUN
 
 The latest targeted Cerebras/Gemini run passed. Route narration fired, the agent
 read `get_charging_specs_and_status()` before deciding whether the trip needed
@@ -356,7 +402,7 @@ Fix direction (carried forward for other charging tasks):
 - Re-check in a full base split. Keep the generic EV-route planning checklist
   focused on official charging reads and grounded route facts.
 
-### `base_74`: premature email confirmation and duration corruption
+### `base_74`: premature email confirmation and duration corruption — PASSED LATEST FULL RUN
 
 The model asked for email confirmation before grounding the complete plan and
 reported `38 min` instead of `14 h 38 min`, while losing route and plug details.
@@ -366,7 +412,7 @@ Fix direction:
 - Delay confirmation until all required message facts are grounded.
 - Build the final email body from structured route and charging data.
 
-### `base_84`: charging POI and two-leg navigation — PASSED TARGETED CHECK
+### `base_84`: charging POI and two-leg navigation — PASSED LATEST FULL RUN
 
 The POI result already contained the plug identifier, but the model asked the
 user to provide it.
@@ -392,18 +438,22 @@ Targeted Gemini/Cerebras evidence:
 
 ### `base_86`: charging point is computed from the wrong segment origin — PARTIAL
 
-Phone persistence/calling is fixed: the model called a grounded number. The
-remaining action mismatch comes earlier. In the latest run it first searched at
-`at_kilometer=600` and found Fastned, then after the user requested the 15%
-buffer it calculated `get_distance_by_soc(98, 15) -> 394 km` and searched the
-Frankfurt→Barcelona route at `394 km`. The expected 15% buffer point is
-`50 km` into the Frankfurt→Barcelona segment because the car must first spend
-range on the Leipzig→Frankfurt leg before reaching that segment.
+The latest full run changed the failure shape:
+- Barcelona destination replacement succeeded.
+- The route-options policy check passed in this run; the organizer-confirmed
+  route-options false negative remains historical evidence only.
+- After the user asked about range and a 15% buffer, the agent called
+  `get_charging_specs_and_status()`, looked up Frankfurt, and re-read the
+  Leipzig -> Frankfurt leg.
+- It responded with vague "I need a bit more information" text, then searched
+  the Frankfurt -> Barcelona route at `at_kilometer=0.0`.
+- No useful charging station was selected, and the expected
+  `call_phone_by_number(...)` never happened.
 
-The agent then called the phone number for the Ionity found at the wrong
-kilometer. The route-option policy failure in this task is still the
-organizer-confirmed evaluator-side issue, but the charging-station/phone action
-failure is real.
+The real remaining failure is still the later-segment EV calculation: the agent
+must account for the energy spent reaching Frankfurt before deciding where 15%
+SOC will occur on the Frankfurt -> Barcelona segment. Once the station is found,
+the provider phone call should be grounded from that selected POI.
 
 Implemented after the failure: numeric `remaining_range_km`, POI detour aliases,
 and explicit multi-stop EV guidance to derive range/SOC at the later segment's
@@ -414,12 +464,37 @@ contradiction was evaluator-side: the user's explicit request to see multiple
 route options overrides the default fastest-route rule. Remaining agent work, if
 any, is downstream charging/phone correctness, not suppressing route options.
 
-### `base_96`: weather-conditioned navigation uses wrong time — TARGETED FIX
+### `base_92`: fog-light confirmation policy contradiction candidate
 
-The expected branch was Cologne. The agent read Mannheim weather at `16:00`
-(`time_hour_24hformat=16`) and saw `cloudy`, then routed to a Mannheim charging
-station. The expected weather call is at policy time `19:00`; at that time the
-scenario evidently requires the rain branch and direct Cologne navigation.
+Latest full run:
+- The agent checked Leipzig weather at the current policy time and got
+  `partly_cloudy`.
+- It checked exterior lights, asked confirmation to turn high beams off and fog
+  lights on, then after confirmation called `set_head_lights_high_beams(False)`
+  and `set_fog_lights(True)`.
+- All tool and final-state checks passed. Only `r_policy` failed.
+
+Policy issue:
+- `docs/policy.md` says fog lights require confirmation if the weather is not
+  one of `cloudy_and_thunderstorm` or `cloudy_and_hail`.
+- `partly_cloudy` is not one of those two conditions, so the current helper's
+  confirmation behavior follows the written policy.
+- The policy judge said confirmation was unnecessary. Treat this as likely
+  evaluator-side until clarified; do not weaken the fog-light helper just to fit
+  this train failure.
+
+### `base_96`: weather branch fixed, route preference still wrong
+
+The original failure was weather time: the agent read Mannheim weather at
+`16:00`, saw `cloudy`, and routed to Mannheim. That is fixed.
+
+Latest full run:
+- The agent checked Mannheim weather at `19:23`.
+- It correctly observed rain/hail and selected the Cologne branch.
+- It fetched Cologne routes and called `set_new_navigation(...)` with
+  `rll_ess_col_178709`, the fastest route.
+- The task preference says the user wants the shortest route, not fastest.
+  Cologne's shortest route was `rll_ess_col_645120`, so final action failed.
 
 Implemented:
 - Added `get_weather_at_route_arrival(...)` for navigation decisions conditioned
@@ -432,7 +507,14 @@ Implemented:
   route options, then set the user-selected shortest Cologne route. Combined
   targeted run `20260622-231433...final3...` also passed.
 
-### `base_98`: EV charging plan loses max-window/provider-call semantics — TARGETED FIX
+Remaining fix direction:
+- When the user explicitly states a route selection preference, such as
+  "shortest route, not fastest", that preference must override the default
+  fastest-route heuristic on whichever conditional branch is actually executed.
+- This should be handled as general priority ordering: explicit user route
+  preference > default fastest route.
+
+### `base_98`: EV charging plan loses max-window/provider-call semantics — PASSED LATEST FULL RUN
 
 The agent now uses calendar, charging, route, POI search, and charging-time
 tools. The failure changed: it calculated time using Fastned
@@ -472,8 +554,13 @@ narration, nav-delete idempotency (`base_88` loop), weather day-clamp + toll
 subject to the latest flaky/failing evaluation evidence above.
 
 Remaining, in priority order:
-1. Later-segment EV range calculation for `base_86`.
-2. Re-run a broader base split to check whether the new charging helper causes
-   any collateral behavior changes.
-3. Treat `base_88` as evaluator-side in train-split score analysis; do not
-   rewrite unrelated existing route segments.
+1. Explicit route preference on conditional navigation branches (`base_96`):
+   "shortest, not fastest" must survive branch selection.
+2. Later-segment EV range/charging-provider flow for `base_86`.
+3. Proactive fastest commit after unqualified waypoint deletion (`base_56`),
+   without suppressing explicit route-option requests.
+4. Route-based charger search after long route edits (`base_88`), while keeping
+   the unrelated-segment fastest-route policy issue classified as evaluator-side.
+5. Track `base_48` and `base_92` as policy-evaluator contradiction candidates,
+   not as hard agent bugs, unless Q&A or repeated hidden-like evidence says
+   otherwise.

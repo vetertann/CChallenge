@@ -79,7 +79,9 @@ WORKSPACE_HELPER_NAMES = (
     "get_contact_details",
     "get_next_calendar_entry",
     "defrost_front_window",
+    "set_window_defrost_safe",
     "open_sunroof_safe",
+    "open_close_window_safe",
     "set_fog_lights_on_safe",
     "set_high_beams_on_safe",
     "set_air_conditioning_on_safe",
@@ -822,8 +824,30 @@ class CoroutineWorkspace:
                         }
                     )
             else:
-                unknown.append({"key": key, "label": label, "value": value})
+                unknown.append(
+                    {
+                        "key": key,
+                        "label": label,
+                        "tool_window": tool_window,
+                    }
+                )
         return closable, unknown
+
+    @staticmethod
+    def _unknown_window_close_note(
+        unknown_windows: list[dict[str, Any]],
+        *,
+        action: str = "air conditioning",
+    ) -> str:
+        labels = [str(item.get("label", "a window")) for item in unknown_windows]
+        if not labels:
+            return ""
+        verb = "was" if len(labels) == 1 else "were"
+        target = "that window" if len(labels) == 1 else "those windows"
+        return (
+            f"The current position for {_human_join(labels)} {verb} unavailable, "
+            f"so I closed {target} before turning {action} on."
+        )
 
     def _store_helper_report(self, name: str, report: dict[str, Any]) -> dict[str, Any]:
         self.remember(f"helper_report:{name}", report)
@@ -1110,13 +1134,45 @@ class CoroutineWorkspace:
                     "Built-in workspace helper for front windshield defrost. "
                     "It checks required evaluator tools, reads climate/window state, "
                     "applies CAR-bench policy 010/011 through evaluator tools, remembers which "
-                    "windows it adjusted, and responds with a limitation if any conditionally "
-                    "required tool is missing."
+                    "windows it adjusted, closes controllable windows whose current position is "
+                    "unknown when AC must be enabled, and responds with a limitation if any "
+                    "conditionally required tool is missing."
                 ),
                 "required_arguments": [],
                 "optional_arguments": [],
                 "schema": {"type": "object", "required": [], "properties": {}},
                 "argument_descriptions": {},
+            }
+        if tool_name == "set_window_defrost_safe":
+            return {
+                "name": "set_window_defrost_safe",
+                "signature": "set_window_defrost_safe(defrost_window='FRONT')",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper for window defrost. For FRONT or ALL "
+                    "defrost it checks required evaluator tools, reads climate/window "
+                    "state, applies CAR-bench policy 010/011 through evaluator tools, "
+                    "closes known windows open more than 20%, closes controllable "
+                    "windows whose current position is unknown when AC must be enabled, "
+                    "and reports missing required tools directly. REAR defrost is sent "
+                    "to the raw defrost tool without the front/all policy additions."
+                ),
+                "required_arguments": [],
+                "optional_arguments": ["defrost_window"],
+                "schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "defrost_window": {
+                            "type": "string",
+                            "enum": ["FRONT", "ALL", "REAR"],
+                            "default": "FRONT",
+                        }
+                    },
+                },
+                "argument_descriptions": {
+                    "defrost_window": "FRONT, ALL, or REAR. Policy 010 applies to FRONT and ALL.",
+                },
             }
         if tool_name == "handle_pending_confirmation":
             return {
@@ -1165,6 +1221,48 @@ class CoroutineWorkspace:
                     "percentage": "Target absolute sunroof position percentage from 0 to 100.",
                 },
             }
+        if tool_name == "open_close_window_safe":
+            return {
+                "name": "open_close_window_safe",
+                "signature": "open_close_window_safe(window, percentage)",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper for moving a window under policy 007. "
+                    "For target positions above 25%, it reads AC state first. If AC is "
+                    "known on, or if AC state was checked but unavailable, it asks for "
+                    "explicit confirmation with the intended window and percentage "
+                    "before moving the window. Otherwise it calls open_close_window."
+                ),
+                "required_arguments": ["window", "percentage"],
+                "optional_arguments": [],
+                "schema": {
+                    "type": "object",
+                    "required": ["window", "percentage"],
+                    "properties": {
+                        "window": {
+                            "type": "string",
+                            "enum": [
+                                "ALL",
+                                "DRIVER",
+                                "PASSENGER",
+                                "DRIVER_REAR",
+                                "PASSENGER_REAR",
+                                "RIGHT_REAR",
+                                "LEFT_REAR",
+                            ],
+                        },
+                        "percentage": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                    },
+                },
+                "argument_descriptions": {
+                    "window": "Window enum or normalized window label.",
+                    "percentage": "Target absolute window position from 0 to 100.",
+                },
+            }
         if tool_name == "set_fog_lights_on_safe":
             return {
                 "name": "set_fog_lights_on_safe",
@@ -1205,9 +1303,10 @@ class CoroutineWorkspace:
                 "description": (
                     "Built-in workspace helper for turning AC on under CAR-bench policy 011. "
                     "It checks climate/window state, closes each known window that is open more "
-                    "than 20%, sets fan speed to 1 if currently 0, turns AC on, remembers which "
-                    "windows it adjusted, and emits a limitation response if required evaluator "
-                    "tools are missing."
+                    "than 20%, closes each controllable window whose current position is unknown, "
+                    "sets fan speed to 1 if currently 0, turns AC on, remembers which windows it "
+                    "adjusted, and emits a limitation response if required evaluator tools are "
+                    "missing."
                 ),
                 "required_arguments": [],
                 "optional_arguments": [],
@@ -5641,7 +5740,11 @@ class CoroutineWorkspace:
         if isinstance(current_slot, dict):
             candidates.extend([current_slot.get("condition"), current_slot.get("weather")])
         for candidate in candidates:
-            if isinstance(candidate, str) and candidate.strip():
+            if (
+                isinstance(candidate, str)
+                and not isinstance(candidate, UnknownToolResponseValue)
+                and candidate.strip()
+            ):
                 return candidate.strip().lower()
         for inner in value.values():
             if isinstance(inner, dict):
@@ -5984,50 +6087,68 @@ class CoroutineWorkspace:
         for result in (weather_result, lights_result):
             if result.get("status") != "SUCCESS":
                 return self._failed_tool_response(gate_name, "turn on the fog lights safely", result)
-        weather = result_value(weather_result)
-        lights = result_value(lights_result)
+        weather = weather_result.get("result")
+        lights = lights_result.get("result")
         if not isinstance(weather, dict) or not isinstance(lights, dict):
             return self._limitation_response(
                 gate_name,
                 "turn on the fog lights safely",
                 reason="the weather or exterior-light result had an unexpected shape",
             )
-        self._require_known_response_fields(
-            gate_name,
-            "turn on the fog lights safely",
-            "get_exterior_lights_status",
-            lights,
-            ["fog_lights", "head_lights_low_beams", "head_lights_high_beams"],
-        )
         condition = self._weather_condition(weather)
-        if not condition:
-            self._abort_missing_tool_response(
-                "result.get_weather.current_slot.condition",
-                "turn on the fog lights safely",
-                gate_name,
-            )
-        fog_on = lights["fog_lights"]
-        low_on = lights["head_lights_low_beams"]
-        high_on = lights["head_lights_high_beams"]
-        if not all(isinstance(value, bool) for value in (fog_on, low_on, high_on)):
+        weather_unknown = not condition
+
+        unknown_response_fields: list[str] = []
+        fog_on = lights.get("fog_lights")
+        low_on = lights.get("head_lights_low_beams")
+        high_on = lights.get("head_lights_high_beams")
+        if isinstance(fog_on, UnknownToolResponseValue) or "fog_lights" not in lights:
+            unknown_response_fields.append("result.get_exterior_lights_status.fog_lights")
+        elif not isinstance(fog_on, bool):
             return self._limitation_response(
                 gate_name,
                 "turn on the fog lights safely",
-                reason="the exterior-light states were not boolean values",
+                reason="the fog-light state was not a boolean value",
             )
-        if fog_on:
+        if isinstance(low_on, UnknownToolResponseValue) or "head_lights_low_beams" not in lights:
+            unknown_response_fields.append(
+                "result.get_exterior_lights_status.head_lights_low_beams"
+            )
+        elif not isinstance(low_on, bool):
+            return self._limitation_response(
+                gate_name,
+                "turn on the fog lights safely",
+                reason="the low-beam state was not a boolean value",
+            )
+        if isinstance(high_on, UnknownToolResponseValue) or "head_lights_high_beams" not in lights:
+            unknown_response_fields.append(
+                "result.get_exterior_lights_status.head_lights_high_beams"
+            )
+        elif not isinstance(high_on, bool):
+            return self._limitation_response(
+                gate_name,
+                "turn on the fog lights safely",
+                reason="the high-beam state was not a boolean value",
+            )
+        if fog_on is True:
             message = "The fog lights are already on."
             self._store_helper_report(
                 gate_name,
-                {"helper": gate_name, "status": "SUCCESS", "message": message, "actions": []},
+                {
+                    "helper": gate_name,
+                    "status": "SUCCESS",
+                    "message": message,
+                    "actions": [],
+                    "unknown_response_fields": unknown_response_fields,
+                },
             )
             self._helper_message(message)
             return {"status": "SUCCESS", "actions": [], "message": message}
 
         action_calls: list[tuple[str, dict[str, Any]]] = []
-        if not low_on:
+        if low_on is not True:
             action_calls.append(("set_head_lights_low_beams", {"on": True}))
-        if high_on:
+        if high_on is not False:
             action_calls.append(("set_head_lights_high_beams", {"on": False}))
         action_calls.append(("set_fog_lights", {"on": True}))
         blocker = self._require_tool_surface_for_calls(
@@ -6038,23 +6159,41 @@ class CoroutineWorkspace:
         if blocker:
             return blocker
 
-        needs_weather_confirmation = condition not in {
+        needs_weather_confirmation = weather_unknown or condition not in {
             "cloudy_and_thunderstorm",
             "cloudy_and_hail",
         }
-        needs_tool_confirmation = high_on and self._tool_requires_confirmation(
+        needs_tool_confirmation = any(
+            name == "set_head_lights_high_beams"
+            for name, _ in action_calls
+        ) and self._tool_requires_confirmation(
             "set_head_lights_high_beams"
         )
         if needs_weather_confirmation or needs_tool_confirmation:
             changes: list[str] = []
-            if not low_on:
+            if low_on is not True:
                 changes.append("turn on the low beams")
-            if high_on:
+            if high_on is not False:
                 changes.append("turn off the high beams")
             changes.append("turn on the fog lights")
+            weather_text = (
+                "the current weather condition is unavailable"
+                if weather_unknown
+                else f"the current weather is {condition}"
+            )
+            unknown_notes = []
+            if isinstance(low_on, UnknownToolResponseValue) or "head_lights_low_beams" not in lights:
+                unknown_notes.append("low-beam status is unavailable")
+            if isinstance(high_on, UnknownToolResponseValue) or "head_lights_high_beams" not in lights:
+                unknown_notes.append("high-beam status is unavailable")
+            if isinstance(fog_on, UnknownToolResponseValue) or "fog_lights" not in lights:
+                unknown_notes.append("fog-light status is unavailable")
+            unknown_text = ""
+            if unknown_notes:
+                unknown_text = " I also found that " + _human_join(unknown_notes) + "."
             prompt = (
-                f"The current weather is {condition}. Before I {', '.join(changes)}, "
-                "please explicitly confirm with yes."
+                f"I checked the weather, and {weather_text}.{unknown_text} "
+                f"Before I {', '.join(changes)}, please explicitly confirm with yes."
             )
             pending = {
                 "type": "fog_lights_confirmation",
@@ -6071,6 +6210,7 @@ class CoroutineWorkspace:
                 "response_on_success": (
                     "Confirmed. I applied the required lighting changes and turned on the fog lights."
                 ),
+                "unknown_response_fields": unknown_response_fields,
             }
             self.remember("pending_confirmation", pending)
             report = {
@@ -6078,14 +6218,18 @@ class CoroutineWorkspace:
                 "status": "WAITING_CONFIRMATION",
                 "policy": "008_009_013",
                 "weather_condition": condition,
+                "weather_condition_unknown": weather_unknown,
                 "actions": [name for name, _ in action_calls],
+                "unknown_response_fields": unknown_response_fields,
                 "message": prompt,
             }
             self.scratchpad["gates"][gate_name] = {
                 "status": "WAITING_CONFIRMATION",
                 "policy": "008_009_013",
                 "weather_condition": condition,
+                "weather_condition_unknown": weather_unknown,
                 "actions": report["actions"],
+                "unknown_response_fields": unknown_response_fields,
             }
             self._store_helper_report(gate_name, report)
             self._abort_with_response(prompt)
@@ -6095,9 +6239,9 @@ class CoroutineWorkspace:
             if result.get("status") != "SUCCESS":
                 return self._failed_tool_response(gate_name, "turn on the fog lights safely", result)
         adjusted = []
-        if not low_on:
+        if low_on is not True:
             adjusted.append("low beams turned on")
-        if high_on:
+        if high_on is not False:
             adjusted.append("high beams turned off")
         message = "Fog lights turned on"
         if adjusted:
@@ -6108,15 +6252,19 @@ class CoroutineWorkspace:
             "status": "SUCCESS",
             "policy": "008_009_013",
             "weather_condition": condition,
+            "weather_condition_unknown": weather_unknown,
             "actions": [name for name, _ in action_calls],
             "results": results,
+            "unknown_response_fields": unknown_response_fields,
             "message": message,
         }
         self.scratchpad["gates"][gate_name] = {
             "status": "YES",
             "policy": "008_009_013",
             "weather_condition": condition,
+            "weather_condition_unknown": weather_unknown,
             "actions": report["actions"],
+            "unknown_response_fields": unknown_response_fields,
         }
         self._store_helper_report(gate_name, report)
         self._helper_message(message)
@@ -6367,26 +6515,32 @@ class CoroutineWorkspace:
             weather_result = self._call_raw_tool_sync(*weather_call)
             if weather_result.get("status") != "SUCCESS":
                 return self._failed_tool_response(gate_name, "check weather before opening the sunroof", weather_result)
-            weather_condition = self._weather_condition(result_value(weather_result))
-            if not weather_condition:
-                return self._limitation_response(
-                    gate_name,
-                    "open the sunroof safely",
-                    reason="the current weather condition was unavailable",
-                )
+            weather_payload = weather_result.get("result")
+            weather_condition = self._weather_condition(weather_payload)
+            weather_unknown = not weather_condition
             safe_weather = weather_condition in {"sunny", "cloudy", "partly_cloudy"}
-            if not safe_weather:
+            if weather_unknown or not safe_weather:
+                weather_text = (
+                    "the current weather condition is unavailable"
+                    if weather_unknown
+                    else f"the current weather is {weather_condition}"
+                )
                 prompt = (
-                    f"Opening the sunroof in {weather_condition} weather needs your confirmation. "
-                    f"Should I open the sunroof to {target_arg:g}%"
-                    + (" and open the sunshade fully first?" if adjusted_sunshade else "?")
+                    f"I checked the weather, and {weather_text}. Opening the sunroof needs "
+                    f"your confirmation. I will open the sunroof to {target_arg:g}%"
+                    + (" and open the sunshade fully first." if adjusted_sunshade else ".")
+                    + " Please confirm with yes."
                 )
                 pending = {
                     "type": "sunroof_weather_confirmation",
                     "gate_name": gate_name,
                     "policy": "005_008_009",
                     "action": "open the sunroof safely",
-                    "reason": f"weather condition {weather_condition}",
+                    "reason": (
+                        "weather condition unavailable"
+                        if weather_unknown
+                        else f"weather condition {weather_condition}"
+                    ),
                     "on_confirm_calls": action_calls,
                     "confirmation_prompt": prompt,
                     "confirmation_retry_prompt": "Please confirm with yes if you want me to open the sunroof.",
@@ -6446,10 +6600,190 @@ class CoroutineWorkspace:
             self._helper_message(f"Sunroof set to {target_arg:g}%.")
         return {"status": "SUCCESS", "actions": results, "report": report}
 
+    def open_close_window_safe(self, window: str, percentage: int | float) -> dict[str, Any]:
+        """Move a window while applying CAR-bench policy 007."""
+
+        gate_name = "open_close_window_safe"
+        try:
+            target = float(percentage)
+        except (TypeError, ValueError):
+            return self._limitation_response(
+                gate_name,
+                "move the window",
+                reason="the requested window percentage was not a number",
+            )
+        if not 0 <= target <= 100:
+            return self._limitation_response(
+                gate_name,
+                "move the window",
+                reason="the requested window percentage is outside the supported 0 to 100 range",
+            )
+        target_arg: int | float = int(target) if target.is_integer() else target
+        action_args = {"window": window, "percentage": target_arg}
+        if self.tool_available("open_close_window"):
+            action_args = self._normalize_tool_arguments("open_close_window", action_args)
+        action_call = ("open_close_window", action_args)
+
+        required_calls: list[tuple[str, dict[str, Any]]] = [action_call]
+        if target > 25:
+            required_calls.append(("get_climate_settings", {}))
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "move the window safely under policy 007",
+            required_calls,
+        )
+        if blocker:
+            return blocker
+
+        needs_confirmation = False
+        ac_unknown = False
+        if target > 25:
+            climate_result = self._call_raw_tool_sync("get_climate_settings", {})
+            if climate_result.get("status") != "SUCCESS":
+                return self._failed_tool_response(
+                    gate_name,
+                    "read climate settings before opening the window",
+                    climate_result,
+                )
+            climate = climate_result.get("result")
+            if not isinstance(climate, dict):
+                return self._limitation_response(
+                    gate_name,
+                    "move the window safely under policy 007",
+                    reason="the climate settings result had an unexpected shape",
+                )
+            ac_state = climate.get("air_conditioning")
+            if isinstance(ac_state, UnknownToolResponseValue) or "air_conditioning" not in climate:
+                needs_confirmation = True
+                ac_unknown = True
+            elif isinstance(ac_state, bool):
+                needs_confirmation = ac_state is True
+            else:
+                return self._limitation_response(
+                    gate_name,
+                    "move the window safely under policy 007",
+                    reason="the air conditioning state was not a boolean value",
+                )
+
+        if needs_confirmation:
+            window_label = str(action_args.get("window") or window)
+            weathering = (
+                "the AC status is unavailable"
+                if ac_unknown
+                else "air conditioning is on"
+            )
+            prompt = (
+                f"I checked the climate settings, and {weathering}. Opening a window "
+                f"above 25% can waste energy. I will set window={window_label} "
+                f"to percentage={target_arg:g}. Please confirm with yes."
+            )
+            pending = {
+                "type": "window_policy_007_confirmation",
+                "gate_name": gate_name,
+                "policy": "007",
+                "action": "move the window safely under policy 007",
+                "on_confirm_calls": [action_call],
+                "confirmation_prompt": prompt,
+                "confirmation_retry_prompt": (
+                    "Please confirm with yes if you want me to move the window."
+                ),
+                "response_on_cancel": "Okay, I won't move the window.",
+                "response_on_success": (
+                    f"Window {window_label} set to {target_arg:g}%."
+                ),
+                "ac_state_unknown": ac_unknown,
+            }
+            self.remember("pending_confirmation", pending)
+            self.scratchpad["gates"][gate_name] = {
+                "status": "WAITING_CONFIRMATION",
+                "policy": "007",
+                "window": action_args.get("window"),
+                "percentage": target_arg,
+                "ac_state_unknown": ac_unknown,
+            }
+            self._store_helper_report(
+                gate_name,
+                {
+                    "helper": gate_name,
+                    "status": "WAITING_CONFIRMATION",
+                    "policy": "007",
+                    "window": action_args.get("window"),
+                    "percentage": target_arg,
+                    "ac_state_unknown": ac_unknown,
+                    "message": prompt,
+                },
+            )
+            self._abort_with_response(prompt)
+
+        result = self._call_raw_tool_sync(*action_call)
+        if result.get("status") != "SUCCESS":
+            return self._failed_tool_response(gate_name, "move the window", result)
+        message = f"Window {action_args.get('window')} set to {target_arg:g}%."
+        report = self._store_helper_report(
+            gate_name,
+            {
+                "helper": gate_name,
+                "status": "SUCCESS",
+                "policy": "007" if target > 25 else "none",
+                "window": action_args.get("window"),
+                "percentage": target_arg,
+                "message": message,
+            },
+        )
+        self._helper_message(message)
+        return {"status": "SUCCESS", "action": result, "report": report, "message": message}
+
     def defrost_front_window(self) -> dict[str, Any]:
         """Apply the CAR-bench front-defrost policy as one workspace helper."""
 
-        gate_name = "defrost_front_window"
+        return self._set_window_defrost_safe("FRONT", gate_name="defrost_front_window")
+
+    def set_window_defrost_safe(self, defrost_window: str = "FRONT") -> dict[str, Any]:
+        """Apply the CAR-bench defrost policy for FRONT/ALL defrost."""
+
+        return self._set_window_defrost_safe(defrost_window, gate_name="set_window_defrost_safe")
+
+    def _set_window_defrost_safe(
+        self,
+        defrost_window: str,
+        *,
+        gate_name: str,
+    ) -> dict[str, Any]:
+        normalized_window = str(defrost_window or "FRONT").upper()
+        if normalized_window not in {"FRONT", "ALL", "REAR"}:
+            return self._limitation_response(
+                gate_name,
+                "turn on window defrost",
+                reason="defrost_window must be FRONT, ALL, or REAR",
+            )
+        defrost_label = (
+            "front defrost"
+            if normalized_window == "FRONT"
+            else "all-window defrost"
+            if normalized_window == "ALL"
+            else "rear defrost"
+        )
+        if normalized_window == "REAR":
+            call = ("set_window_defrost", {"on": True, "defrost_window": "REAR"})
+            blocker = self._require_tool_surface_for_calls(gate_name, "turn on rear defrost", [call])
+            if blocker:
+                return blocker
+            result = self._call_raw_tool_sync(*call)
+            if result.get("status") != "SUCCESS":
+                return self._failed_tool_response(gate_name, "turn on rear defrost", result)
+            message = "Rear defrost is on."
+            report = self._store_helper_report(
+                gate_name,
+                {
+                    "helper": gate_name,
+                    "status": "SUCCESS",
+                    "policy": "none",
+                    "actions": ["set_window_defrost"],
+                    "message": message,
+                },
+            )
+            self._helper_message(message)
+            return {"status": "SUCCESS", "actions": [result], "report": report, "message": message}
 
         def failed_result(result: dict[str, Any]) -> dict[str, Any] | None:
             if result.get("status") == "SUCCESS":
@@ -6457,7 +6791,7 @@ class CoroutineWorkspace:
             tool_name = str(result.get("tool_name") or "")
             label = _tool_label(tool_name) if tool_name else "required tool"
             message = (
-                "I can't safely turn on front defrost because I couldn't get a usable "
+                f"I can't safely turn on {defrost_label} because I couldn't get a usable "
                 f"result from the {label}."
                 + (f" The failed tool was {tool_name}." if tool_name else "")
             )
@@ -6472,7 +6806,7 @@ class CoroutineWorkspace:
         has_window_reader = self.tool_available("get_vehicle_window_positions")
         if has_window_reader:
             read_calls.append(("get_vehicle_window_positions", {}))
-        blocker = self._require_tool_surface_for_calls(gate_name, "turn on front defrost", read_calls)
+        blocker = self._require_tool_surface_for_calls(gate_name, f"turn on {defrost_label}", read_calls)
         if blocker:
             return blocker
 
@@ -6488,12 +6822,12 @@ class CoroutineWorkspace:
             blocked = failed_result(windows_result)
             if blocked:
                 return blocked
-            raw_windows = result_value(windows_result)
+            raw_windows = windows_result.get("result")
             if isinstance(raw_windows, dict):
                 windows = raw_windows
 
         action_calls: list[tuple[str, dict[str, Any]]] = [
-            ("set_window_defrost", {"on": True, "defrost_window": "FRONT"})
+            ("set_window_defrost", {"on": True, "defrost_window": normalized_window})
         ]
         adjusted_windows: list[dict[str, Any]] = []
         unknown_windows: list[dict[str, Any]] = []
@@ -6504,37 +6838,31 @@ class CoroutineWorkspace:
         if "WINDSHIELD" not in str(climate.get("fan_airflow_direction", "")):
             action_calls.append(("set_fan_airflow_direction", {"direction": "WINDSHIELD"}))
 
-        if not climate.get("air_conditioning", False):
+        ac_state = climate.get("air_conditioning")
+        ac_must_enable = ac_state is not True
+        if ac_must_enable:
             if not has_window_reader:
                 return self._limitation_response(
                     gate_name,
-                    "safely turn on front defrost under policy 010/011",
+                    f"safely turn on {defrost_label} under policy 010/011",
                     missing_tools=["get_vehicle_window_positions"],
                 )
             else:
                 windows_to_close, unknown_windows = self._windows_over_position(windows, 20)
-                if unknown_windows:
-                    return self._window_policy_limitation(
-                        gate_name,
-                        "safely turn on front defrost",
-                        "010/011",
-                        unknown_windows,
-                        windows_to_close,
-                    )
-                if windows_to_close:
-                    for window_info in windows_to_close:
-                        action_calls.append(
-                            (
-                                "open_close_window",
-                                {"window": window_info["tool_window"], "percentage": 0},
-                            )
+                windows_to_close = [*windows_to_close, *unknown_windows]
+                for window_info in windows_to_close:
+                    action_calls.append(
+                        (
+                            "open_close_window",
+                            {"window": window_info["tool_window"], "percentage": 0},
                         )
-                        adjusted_windows.append(window_info)
+                    )
+                    adjusted_windows.append(window_info)
                 action_calls.append(("set_air_conditioning", {"on": True}))
 
         blocker = self._require_tool_surface_for_calls(
             gate_name,
-            "safely turn on front defrost under policy 010/011",
+            f"safely turn on {defrost_label} under policy 010/011",
             action_calls,
         )
         if blocker:
@@ -6561,7 +6889,26 @@ class CoroutineWorkspace:
                 "actions": [name for name, _ in action_calls],
             },
         )
-        self._helper_message("Front defrost is on, with the required fan, AC, and window safety settings handled.")
+        unknown_note = self._unknown_window_close_note(unknown_windows, action=defrost_label)
+        if unknown_note:
+            self._add_response_obligation(
+                "unknown_window_closed_for_defrost",
+                unknown_note,
+                satisfied_patterns=(
+                    r"\bunknown\b",
+                    r"\bunavailable\b",
+                    r"\bclosed\b.*\bwindow\b",
+                ),
+            )
+            self._helper_message(
+                f"{defrost_label.capitalize()} is on, and I closed windows with unavailable "
+                "position data before turning it on."
+            )
+        else:
+            self._helper_message(
+                f"{defrost_label.capitalize()} is on, with the required fan, AC, "
+                "and window safety settings handled."
+            )
         return {"status": "SUCCESS", "actions": action_results, "report": report}
 
     def set_air_conditioning_on_safe(self) -> dict[str, Any]:
@@ -6585,7 +6932,7 @@ class CoroutineWorkspace:
             return self._failed_tool_response(gate_name, "turn on AC safely", windows_result)
 
         climate = result_value(climate_result)
-        windows = result_value(windows_result)
+        windows = windows_result.get("result")
         if not isinstance(climate, dict) or not isinstance(windows, dict):
             return self._limitation_response(
                 gate_name,
@@ -6606,23 +6953,15 @@ class CoroutineWorkspace:
         action_calls: list[tuple[str, dict[str, Any]]] = []
         adjusted_windows: list[dict[str, Any]] = []
         windows_to_close, unknown_windows = self._windows_over_position(windows, 20)
-        if unknown_windows:
-            return self._window_policy_limitation(
-                gate_name,
-                "turn on the air conditioning",
-                "011",
-                unknown_windows,
-                windows_to_close,
-            )
-        if windows_to_close:
-            for window_info in windows_to_close:
-                action_calls.append(
-                    (
-                        "open_close_window",
-                        {"window": window_info["tool_window"], "percentage": 0},
-                    )
+        windows_to_close = [*windows_to_close, *unknown_windows]
+        for window_info in windows_to_close:
+            action_calls.append(
+                (
+                    "open_close_window",
+                    {"window": window_info["tool_window"], "percentage": 0},
                 )
-                adjusted_windows.append(window_info)
+            )
+            adjusted_windows.append(window_info)
         if climate.get("fan_speed", 0) == 0:
             action_calls.append(("set_fan_speed", {"level": 1}))
         action_calls.append(("set_air_conditioning", {"on": True}))
@@ -6654,7 +6993,23 @@ class CoroutineWorkspace:
                 "actions": [name for name, _ in action_calls],
             },
         )
-        self._helper_message("AC is on, and I handled the required fan and window safety settings.")
+        unknown_note = self._unknown_window_close_note(unknown_windows)
+        if unknown_note:
+            self._add_response_obligation(
+                "unknown_window_closed_for_ac",
+                unknown_note,
+                satisfied_patterns=(
+                    r"\bunknown\b",
+                    r"\bunavailable\b",
+                    r"\bclosed\b.*\bwindow\b",
+                ),
+            )
+            self._helper_message(
+                "AC is on, and I closed windows with unavailable position data "
+                "before turning it on."
+            )
+        else:
+            self._helper_message("AC is on, and I handled the required fan and window safety settings.")
         return {"status": "SUCCESS", "actions": action_results, "report": report}
 
     def close_known_windows_for_blocked_ac(self, window: str | None = None) -> dict[str, Any]:
@@ -8310,6 +8665,23 @@ class CoroutineWorkspace:
     def _delegate_policy_sensitive_call(call: dict[str, Any]) -> dict[str, Any]:
         tool_name = call["tool_name"]
         arguments = call["arguments"]
+        if tool_name == "set_air_conditioning" and arguments.get("on") is True:
+            return {"tool_name": "set_air_conditioning_on_safe", "arguments": {}}
+        if (
+            tool_name == "set_window_defrost"
+            and arguments.get("on") is True
+            and str(arguments.get("defrost_window") or "").upper() in {"FRONT", "ALL"}
+        ):
+            return {
+                "tool_name": "set_window_defrost_safe",
+                "arguments": {
+                    "defrost_window": str(arguments.get("defrost_window") or "FRONT").upper()
+                },
+            }
+        if tool_name == "open_close_sunroof":
+            return {"tool_name": "open_sunroof_safe", "arguments": dict(arguments)}
+        if tool_name == "open_close_window":
+            return {"tool_name": "open_close_window_safe", "arguments": dict(arguments)}
         if tool_name == "set_fog_lights" and arguments.get("on") is True:
             return {"tool_name": "set_fog_lights_on_safe", "arguments": {}}
         if tool_name == "set_head_lights_high_beams" and arguments.get("on") is True:

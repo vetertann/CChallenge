@@ -288,6 +288,460 @@ class GuardTests(unittest.TestCase):
         )
         self.assertIn("policy 014", ws._response_text or "")
 
+    def test_fog_lights_helper_confirms_when_weather_and_light_state_unknown(self):
+        ws, ex = self.make(
+            {
+                "get_weather": ("SUCCESS", {"current_slot": {"condition": "unknown"}}),
+                "get_exterior_lights_status": (
+                    "SUCCESS",
+                    {
+                        "fog_lights": False,
+                        "head_lights_low_beams": "unknown",
+                        "head_lights_high_beams": "unknown",
+                    },
+                ),
+                "set_head_lights_low_beams": ("SUCCESS", {}),
+                "set_head_lights_high_beams": ("SUCCESS", {}),
+                "set_fog_lights": ("SUCCESS", {}),
+            },
+            {
+                "get_weather": tool_schema(
+                    "get_weather",
+                    {
+                        "location_or_poi_id": {"type": "string"},
+                        "month": {"type": "number"},
+                        "day": {"type": "number"},
+                        "time_hour_24hformat": {"type": "number"},
+                        "time_minutes": {"type": "number"},
+                    },
+                ),
+                "get_exterior_lights_status": tool_schema("get_exterior_lights_status", {}),
+                "set_head_lights_low_beams": tool_schema(
+                    "set_head_lights_low_beams",
+                    {"on": {"type": "boolean"}},
+                ),
+                "set_head_lights_high_beams": tool_schema(
+                    "set_head_lights_high_beams",
+                    {"on": {"type": "boolean"}},
+                    required=["on"],
+                    description="REQUIRES_CONFIRMATION, turns high beams on or off.",
+                ),
+                "set_fog_lights": tool_schema("set_fog_lights", {"on": {"type": "boolean"}}),
+            },
+        )
+
+        with self.assertRaises(ResponseReady):
+            ws.set_fog_lights_on_safe()
+
+        self.assertIn("weather condition is unavailable", ws._response_text or "")
+        self.assertIn("low-beam status is unavailable", ws._response_text or "")
+        self.assertIn("high-beam status is unavailable", ws._response_text or "")
+        pending = ws.scratchpad["facts"]["pending_confirmation"]
+        self.assertEqual(
+            [call[0] for call in pending["on_confirm_calls"]],
+            ["set_head_lights_low_beams", "set_head_lights_high_beams", "set_fog_lights"],
+        )
+
+        ws.observe_user("yes")
+        result = ex.run("handle_pending_confirmation()")
+
+        self.assertIn("turned on the fog lights", result.response_text)
+        self.assertEqual(self._emitted(ws, "set_head_lights_low_beams"), {"on": True})
+        self.assertEqual(self._emitted(ws, "set_head_lights_high_beams"), {"on": False})
+        self.assertEqual(self._emitted(ws, "set_fog_lights"), {"on": True})
+
+    def test_raw_sunroof_open_weather_unknown_routes_to_confirmation(self):
+        ws, ex = self.make(
+            {
+                "get_sunroof_and_sunshade_position": (
+                    "SUCCESS",
+                    {"sunroof_position": 0, "sunshade_position": 100},
+                ),
+                "get_weather": ("SUCCESS", {"current_slot": {"condition": "unknown"}}),
+                "open_close_sunroof": ("SUCCESS", {}),
+            },
+            {
+                "get_sunroof_and_sunshade_position": tool_schema(
+                    "get_sunroof_and_sunshade_position",
+                    {},
+                ),
+                "get_weather": tool_schema(
+                    "get_weather",
+                    {
+                        "location_or_poi_id": {"type": "string"},
+                        "month": {"type": "number"},
+                        "day": {"type": "number"},
+                        "time_hour_24hformat": {"type": "number"},
+                        "time_minutes": {"type": "number"},
+                    },
+                ),
+                "open_close_sunroof": tool_schema(
+                    "open_close_sunroof",
+                    {"percentage": {"type": "number"}},
+                ),
+            },
+        )
+
+        result = ex.run("open_close_sunroof(percentage=50)")
+
+        self.assertIn("weather condition is unavailable", result.response_text)
+        self.assertIn("Please confirm with yes", result.response_text)
+        self.assertIsNone(self._emitted(ws, "open_close_sunroof"))
+
+        ws.observe_user("yes")
+        confirmed = ex.run("handle_pending_confirmation()")
+
+        self.assertEqual(confirmed.response_text, "Sunroof opened to 50%.")
+        self.assertEqual(self._emitted(ws, "open_close_sunroof"), {"percentage": 50})
+
+    def test_raw_window_open_above_25_with_unknown_ac_asks_confirmation(self):
+        ws, ex = self.make(
+            {
+                "get_climate_settings": ("SUCCESS", {"air_conditioning": "unknown"}),
+                "open_close_window": ("SUCCESS", {}),
+            },
+            {
+                "get_climate_settings": tool_schema("get_climate_settings", {}),
+                "open_close_window": tool_schema(
+                    "open_close_window",
+                    {"window": {"type": "string"}, "percentage": {"type": "number"}},
+                ),
+            },
+        )
+
+        result = ex.run("open_close_window(window='DRIVER', percentage=50)")
+
+        self.assertIn("AC status is unavailable", result.response_text)
+        self.assertIn("percentage=50", result.response_text)
+        self.assertIsNone(self._emitted(ws, "open_close_window"))
+
+        ws.observe_user("yes")
+        confirmed = ex.run("handle_pending_confirmation()")
+
+        self.assertEqual(confirmed.response_text, "Window DRIVER set to 50%.")
+        self.assertEqual(
+            self._emitted(ws, "open_close_window"),
+            {"window": "DRIVER", "percentage": 50},
+        )
+
+    def test_raw_ac_on_delegates_to_policy_helper(self):
+        ws, ex = self.make(
+            {
+                "get_climate_settings": (
+                    "SUCCESS",
+                    {"air_conditioning": False, "fan_speed": 0},
+                ),
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {"window_driver_position": "unknown"},
+                ),
+                "open_close_window": ("SUCCESS", {}),
+                "set_fan_speed": ("SUCCESS", {}),
+                "set_air_conditioning": ("SUCCESS", {}),
+            },
+            {
+                "get_climate_settings": tool_schema("get_climate_settings", {}),
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "open_close_window": tool_schema(
+                    "open_close_window",
+                    {"window": {"type": "string"}, "percentage": {"type": "number"}},
+                ),
+                "set_fan_speed": tool_schema("set_fan_speed", {"level": {"type": "integer"}}),
+                "set_air_conditioning": tool_schema(
+                    "set_air_conditioning",
+                    {"on": {"type": "boolean"}},
+                ),
+            },
+        )
+
+        result = ex.run("set_air_conditioning(on=True)\nrespond('AC is on.')")
+
+        self.assertEqual(self._emitted(ws, "open_close_window"), {"window": "DRIVER", "percentage": 0})
+        self.assertEqual(self._emitted(ws, "set_fan_speed"), {"level": 1})
+        self.assertEqual(self._emitted(ws, "set_air_conditioning"), {"on": True})
+        self.assertIn("driver window", result.response_text)
+        self.assertIn("unavailable", result.response_text)
+
+    def test_raw_all_defrost_delegates_to_safe_helper(self):
+        ws, ex = self.make(
+            {
+                "get_climate_settings": (
+                    "SUCCESS",
+                    {
+                        "air_conditioning": False,
+                        "fan_speed": 0,
+                        "fan_airflow_direction": "HEAD",
+                    },
+                ),
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {"window_passenger_position": "unknown"},
+                ),
+                "set_window_defrost": ("SUCCESS", {}),
+                "set_fan_speed": ("SUCCESS", {}),
+                "set_fan_airflow_direction": ("SUCCESS", {}),
+                "open_close_window": ("SUCCESS", {}),
+                "set_air_conditioning": ("SUCCESS", {}),
+            },
+            {
+                "get_climate_settings": tool_schema("get_climate_settings", {}),
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "set_window_defrost": tool_schema(
+                    "set_window_defrost",
+                    {"on": {"type": "boolean"}, "defrost_window": {"type": "string"}},
+                ),
+                "set_fan_speed": tool_schema("set_fan_speed", {"level": {"type": "integer"}}),
+                "set_fan_airflow_direction": tool_schema(
+                    "set_fan_airflow_direction",
+                    {"direction": {"type": "string"}},
+                ),
+                "open_close_window": tool_schema(
+                    "open_close_window",
+                    {"window": {"type": "string"}, "percentage": {"type": "number"}},
+                ),
+                "set_air_conditioning": tool_schema(
+                    "set_air_conditioning",
+                    {"on": {"type": "boolean"}},
+                ),
+            },
+        )
+
+        result = ex.run(
+            "set_window_defrost(on=True, defrost_window='ALL')\n"
+            "respond('All-window defrost is now on.')"
+        )
+
+        self.assertEqual(
+            self._emitted(ws, "set_window_defrost"),
+            {"on": True, "defrost_window": "ALL"},
+        )
+        self.assertEqual(
+            self._emitted(ws, "open_close_window"),
+            {"window": "PASSENGER", "percentage": 0},
+        )
+        self.assertEqual(self._emitted(ws, "set_air_conditioning"), {"on": True})
+        self.assertIn("passenger window", result.response_text)
+        self.assertIn("unavailable", result.response_text)
+
+    def test_ac_helper_closes_unknown_controllable_window_then_turns_ac_on(self):
+        ws, ex = self.make(
+            {
+                "get_climate_settings": (
+                    "SUCCESS",
+                    {"air_conditioning": False, "fan_speed": 0},
+                ),
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {
+                        "window_driver_position": 25,
+                        "window_passenger_position": 20,
+                        "window_driver_rear_position": 20,
+                        "window_passenger_rear_position": "unknown",
+                    },
+                ),
+                "open_close_window": ("SUCCESS", {}),
+                "set_fan_speed": ("SUCCESS", {}),
+                "set_air_conditioning": ("SUCCESS", {}),
+            },
+            {
+                "get_climate_settings": tool_schema("get_climate_settings", {}),
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "open_close_window": tool_schema(
+                    "open_close_window",
+                    {"window": {"type": "string"}, "percentage": {"type": "number"}},
+                ),
+                "set_fan_speed": tool_schema("set_fan_speed", {"level": {"type": "integer"}}),
+                "set_air_conditioning": tool_schema(
+                    "set_air_conditioning",
+                    {"on": {"type": "boolean"}},
+                ),
+            },
+        )
+
+        result = ex.run(
+            "set_air_conditioning_on_safe()\n"
+            "respond('Air conditioning is now on.')"
+        )
+
+        emitted = [
+            (call["tool_name"], call["arguments"])
+            for batch in ws.bridge.requests
+            for call in batch
+        ]
+        self.assertIn(("open_close_window", {"window": "DRIVER", "percentage": 0}), emitted)
+        self.assertIn(
+            ("open_close_window", {"window": "PASSENGER_REAR", "percentage": 0}),
+            emitted,
+        )
+        self.assertIn(("set_fan_speed", {"level": 1}), emitted)
+        self.assertIn(("set_air_conditioning", {"on": True}), emitted)
+        self.assertIn("passenger rear window", result.response_text)
+        self.assertIn("unavailable", result.response_text)
+        self.assertEqual(
+            ws.scratchpad["facts"]["last_helper_report"]["unknown_windows"][0]["tool_window"],
+            "PASSENGER_REAR",
+        )
+
+    def test_ac_helper_unknown_window_still_requires_window_control(self):
+        ws, _ = self.make(
+            {
+                "get_climate_settings": (
+                    "SUCCESS",
+                    {"air_conditioning": False, "fan_speed": 0},
+                ),
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {
+                        "window_driver_position": 25,
+                        "window_passenger_position": 20,
+                        "window_driver_rear_position": 20,
+                        "window_passenger_rear_position": "unknown",
+                    },
+                ),
+                "set_fan_speed": ("SUCCESS", {}),
+                "set_air_conditioning": ("SUCCESS", {}),
+            },
+            {
+                "get_climate_settings": tool_schema("get_climate_settings", {}),
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "set_fan_speed": tool_schema("set_fan_speed", {"level": {"type": "integer"}}),
+                "set_air_conditioning": tool_schema(
+                    "set_air_conditioning",
+                    {"on": {"type": "boolean"}},
+                ),
+            },
+        )
+
+        with self.assertRaises(ResponseReady):
+            ws.set_air_conditioning_on_safe()
+
+        self.assertIn("open_close_window", ws._response_text or "")
+        self.assertIsNone(self._emitted(ws, "set_air_conditioning"))
+
+    def test_defrost_helper_closes_unknown_controllable_windows_then_turns_on(self):
+        ws, ex = self.make(
+            {
+                "get_climate_settings": (
+                    "SUCCESS",
+                    {
+                        "air_conditioning": False,
+                        "fan_speed": 0,
+                        "fan_airflow_direction": "HEAD",
+                    },
+                ),
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {
+                        "window_driver_position": "unknown",
+                        "window_passenger_position": "unknown",
+                        "window_driver_rear_position": 25,
+                        "window_passenger_rear_position": 100,
+                    },
+                ),
+                "set_window_defrost": ("SUCCESS", {}),
+                "set_fan_speed": ("SUCCESS", {}),
+                "set_fan_airflow_direction": ("SUCCESS", {}),
+                "open_close_window": ("SUCCESS", {}),
+                "set_air_conditioning": ("SUCCESS", {}),
+            },
+            {
+                "get_climate_settings": tool_schema("get_climate_settings", {}),
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "set_window_defrost": tool_schema(
+                    "set_window_defrost",
+                    {"on": {"type": "boolean"}, "defrost_window": {"type": "string"}},
+                ),
+                "set_fan_speed": tool_schema("set_fan_speed", {"level": {"type": "integer"}}),
+                "set_fan_airflow_direction": tool_schema(
+                    "set_fan_airflow_direction",
+                    {"direction": {"type": "string"}},
+                ),
+                "open_close_window": tool_schema(
+                    "open_close_window",
+                    {"window": {"type": "string"}, "percentage": {"type": "number"}},
+                ),
+                "set_air_conditioning": tool_schema(
+                    "set_air_conditioning",
+                    {"on": {"type": "boolean"}},
+                ),
+            },
+        )
+
+        result = ex.run(
+            "defrost_front_window()\n"
+            "respond('Front window defrost is now on.')"
+        )
+
+        emitted = [
+            (call["tool_name"], call["arguments"])
+            for batch in ws.bridge.requests
+            for call in batch
+        ]
+        self.assertIn(("open_close_window", {"window": "DRIVER", "percentage": 0}), emitted)
+        self.assertIn(("open_close_window", {"window": "PASSENGER", "percentage": 0}), emitted)
+        self.assertIn(("open_close_window", {"window": "DRIVER_REAR", "percentage": 0}), emitted)
+        self.assertIn(("open_close_window", {"window": "PASSENGER_REAR", "percentage": 0}), emitted)
+        self.assertIn(("set_fan_speed", {"level": 2}), emitted)
+        self.assertIn(("set_fan_airflow_direction", {"direction": "WINDSHIELD"}), emitted)
+        self.assertIn(("set_air_conditioning", {"on": True}), emitted)
+        self.assertIn(("set_window_defrost", {"on": True, "defrost_window": "FRONT"}), emitted)
+        self.assertIn("driver window and passenger window", result.response_text)
+        self.assertIn("unavailable", result.response_text)
+        self.assertEqual(
+            [item["tool_window"] for item in ws.scratchpad["facts"]["last_helper_report"]["unknown_windows"]],
+            ["DRIVER", "PASSENGER"],
+        )
+
+    def test_defrost_helper_unknown_window_still_requires_window_control(self):
+        ws, _ = self.make(
+            {
+                "get_climate_settings": (
+                    "SUCCESS",
+                    {
+                        "air_conditioning": False,
+                        "fan_speed": 0,
+                        "fan_airflow_direction": "HEAD",
+                    },
+                ),
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {
+                        "window_driver_position": "unknown",
+                        "window_passenger_position": 20,
+                        "window_driver_rear_position": 20,
+                        "window_passenger_rear_position": 20,
+                    },
+                ),
+                "set_window_defrost": ("SUCCESS", {}),
+                "set_fan_speed": ("SUCCESS", {}),
+                "set_fan_airflow_direction": ("SUCCESS", {}),
+                "set_air_conditioning": ("SUCCESS", {}),
+            },
+            {
+                "get_climate_settings": tool_schema("get_climate_settings", {}),
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "set_window_defrost": tool_schema(
+                    "set_window_defrost",
+                    {"on": {"type": "boolean"}, "defrost_window": {"type": "string"}},
+                ),
+                "set_fan_speed": tool_schema("set_fan_speed", {"level": {"type": "integer"}}),
+                "set_fan_airflow_direction": tool_schema(
+                    "set_fan_airflow_direction",
+                    {"direction": {"type": "string"}},
+                ),
+                "set_air_conditioning": tool_schema(
+                    "set_air_conditioning",
+                    {"on": {"type": "boolean"}},
+                ),
+            },
+        )
+
+        with self.assertRaises(ResponseReady):
+            ws.defrost_front_window()
+
+        self.assertIn("open_close_window", ws._response_text or "")
+        self.assertIsNone(self._emitted(ws, "set_window_defrost"))
+
     # --- 2. active-navigation guard --------------------------------------
 
     def _nav_schema(self):
@@ -3010,7 +3464,7 @@ class GuardTests(unittest.TestCase):
             "set_window_defrost": ("SUCCESS", {}),
         }
         ws, _ = self.make(responses, tools)
-        results = ws.call_batch_sync(
+        results = ws._call_raw_tools_sync(
             [
                 ("set_air_conditioning", {"on": True}),
                 ("open_close_window", {"window": "DRIVER", "percentage": 0}),
