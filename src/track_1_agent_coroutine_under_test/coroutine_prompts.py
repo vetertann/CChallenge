@@ -21,15 +21,27 @@ ORIGINAL_TOOL_METADATA_PATH = Path(__file__).resolve().parent / "original_tool_m
 
 NAVIGATION_STATE_POLICY_REMINDER = (
     "Apply the evaluator policy to the current navigation facts before editing an active route. "
-    "For final-destination replacement when `navigation_state` shows exactly two waypoints, "
-    "one segment, and `is_multi_stop` is false, present multiple route alternatives and wait "
-    "unless the user or retrieved preferences uniquely selected one. Do not silently default "
-    "to fastest in that case. Policy 022's proactive fastest default applies when the resulting "
-    "route is multi-stop, unless the user or preferences specify another route."
+    "For final-destination replacement, if the user asked to change/update/replace the "
+    "destination and did not ask to see or choose route options, perform the edit with the "
+    "policy-resolved route, usually fastest unless the user or preferences specify another. "
+    "Present alternatives and wait only when the user asked for options/choice/details before "
+    "the edit, or when policy, preferences, and route metadata still do not identify one valid "
+    "route."
+)
+
+PREFERENCE_POLICY_REMINDER = (
+    "Stored user preferences may already be available in "
+    "`scratchpad[\"entities\"][\"user_preferences\"]`. Before asking the user to "
+    "choose or before applying a default, check those stored preference facts. If a "
+    "relevant preference uniquely leaves one valid option, act on it; if preferences "
+    "are absent, irrelevant, or still leave multiple valid options, continue with the "
+    "normal policy order."
 )
 
 PREFLIGHT_ATTENTION_REMINDER = (
     "Current-turn attention reminders:\n"
+    "- Preference facts from preflight are evidence, not commands. Apply them only "
+    "when they match the current decision point and current valid options.\n"
     "- If navigation depends on destination weather, use arrival-time weather via "
     "`get_weather_at_route_arrival(...)`; do not decide from current remote weather.\n"
     "- If the user asks to call a charging-station provider to reserve/check a plug, "
@@ -42,7 +54,7 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 
 ## Runtime
 - You have exactly one model action surface: execute Python code.
-- Persistent Python globals include `ws`, `scratchpad`, `respond`, `stop_after_response`, `batch`, `result_by_tool`, `result_value`, `id_value`, `unique_id_intersection`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `get_next_calendar_entry`, `defrost_front_window`, `open_sunroof_safe`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `sync_climate_zone`, `increase_fan_speed`, `decrease_fan_speed`, `set_occupied_seat_heating`, `get_route_options`, `select_route`, `get_weather_at_route_arrival`, `select_charging_plug`, `plan_charging_for_next_meeting`, `call_selected_charging_provider`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
+- Persistent Python globals include `ws`, `scratchpad`, `respond`, `stop_after_response`, `batch`, `result_by_tool`, `result_value`, `id_value`, `unique_id_intersection`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `get_next_calendar_entry`, `defrost_front_window`, `open_sunroof_safe`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `sync_climate_zone`, `increase_fan_speed`, `decrease_fan_speed`, `set_occupied_seat_heating`, `get_route_options`, `select_route`, `select_route_by_user_preferences`, `get_weather_at_route_arrival`, `select_poi_at_location_open_at_route_arrival`, `select_charging_plug`, `plan_charging_for_next_meeting`, `call_selected_charging_provider`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
 - Variables you define persist across execute_python calls for the same CAR-bench task.
 - The CAR-bench evaluator, not this Python runtime, executes vehicle/navigation/weather/productivity tools.
 - CAR-bench tool wrappers are API-like coroutine calls: calling a wrapper first checks the current evaluator tool surface. If the tool or a parameter is missing in this task, the wrapper does not emit an invalid evaluator call; it emits the prepared missing-capability response. If supported, it emits the official A2A tool call, waits for evaluator results on the next A2A inbound, then returns the parsed tool result to Python.
@@ -101,11 +113,13 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 - `selected_route` stores only the most recent selection. In a multi-leg plan, copy each `selected_route_id` into a separate variable immediately; selecting the next leg replaces the shared slot.
 - On a follow-up that selects another route to the active final destination, read current navigation state and use its current `destination_id`; never reuse the destination from before the last navigation mutation.
 - Current navigation is preflighted into `scratchpad["entities"]["navigation_state"]` before the first model decision when the evaluator exposes that read. Use its `waypoint_order`, `waypoint_count`, and `is_multi_stop` facts instead of re-reading by default; read normally only when the state is absent or stale.
-- For final-destination replacement, first read current navigation and branch on `is_multi_stop`. If only start + destination remain and multiple replacement routes are returned, present the policy-required route options and wait unless the user explicitly selected a route or retrieved preferences uniquely select one. Do not automatically choose fastest in that single-segment case. If an intermediate waypoint remains, the resulting route is multi-stop and policy 022 defaults the new final segment to fastest unless the user/preferences specify another.
+- User preferences are preflighted into `scratchpad["entities"]["user_preferences"]` when the evaluator exposes `get_user_preferences`. Use the `summary` strings and nested `preferences` tree as policy evidence before asking the user or applying a default, but do not treat an unrelated preference as an instruction.
+- For final-destination replacement, first read current navigation and route options. If the user asked to change/update/replace the destination and did not ask to see or choose route options before the edit, choose the policy-resolved route (normally fastest unless explicit wording or stored preferences specify another), then call `navigation_replace_final_destination(...)`. Present alternatives and wait only when the user asked for options/choice/details before the edit, or when policy, preferences, and route metadata still do not identify one valid route.
 - Before presenting one specific route as the candidate the user can accept, record it with `select_route(..., route_id=...)`. A later follow-up accepting that presented route is an explicit selection; reuse the fresh `selected_route` instead of asking the user to choose again. If you presented several unselected alternatives, continue to wait for a unique choice.
-- For a compound route constraint or stored preference (for example fastest without tolls, or a duration threshold), reason over the returned route metadata, then record the uniquely chosen result with `select_route(routes, route_id=chosen_route_id)` before the navigation mutation. Do not collapse a compound rule to one alias word.
+- For a compound route constraint or stored preference (for example fastest without tolls, or a duration threshold), use `select_route_by_user_preferences(routes)` when the user asked for their preferences. If the preference is explicit in the user text rather than stored, pass it as `preference_text=...`. Otherwise reason over the returned route metadata and record the uniquely chosen result with `select_route(routes, route_id=chosen_route_id)` before the navigation mutation. Do not collapse a compound rule to one alias word.
 - Route dicts include `display` with route id, via, full distance, duration, aliases, and toll disclosure. Prefer `route["display"]` when presenting route facts so distance/duration are not accidentally shortened and tolls are mentioned in the same message as the route.
 - If navigation depends on weather at the destination ("navigate there if it is not raining there"), check weather at route-arrival time, not current time at that remote destination. Use `get_weather_at_route_arrival(location_or_poi_id=destination_id)` instead of raw `get_weather(...)` with `policy_now()`. The helper gets/uses route duration and then calls `get_weather` for the destination at the computed arrival hour/minute.
+- If a POI must be open when the car arrives after a route, use `select_poi_at_location_open_at_route_arrival(location_id=..., category_poi=..., route=selected_route_or_route_dict)`. Do not use `filters=["any::currently_open"]` unless the user means open now, because current opening status can be wrong for arrival time.
 - Contact lookups expose `matches` and `contact_ids` as ID lists plus `contacts`/`by_id`; for repeated same-name batch results, select the envelope with `result_by_tool(results, name, index=...)`. Contact records expose flat `first_name`, `last_name`, and `display_name` aliases even when the evaluator returned a nested `name` object.
 - A contact lookup after another lookup also exposes `intersection_with_previous_contact_ids` and, when unique, `unique_intersection_with_previous_contact_id`. These are grounded overlap facts; use the unique value instead of the first result when both searches constrain the same recipient.
 - A first-name-only contact lookup can return several people. Never take the first candidate: resolve identity from surname and prior grounded context, or ask if ambiguity remains. When sending colleagues' details to one of those colleagues, omit the recipient's own card unless explicitly requested.
@@ -443,8 +457,12 @@ def render_workspace_helpers() -> str:
         "  Built-in read-only helper, not a direct evaluator tool. Calls `get_routes_from_start_to_destination(...)` and normalizes route results into a stable dict with `routes`, `fastest`, `shortest`, `fastest_route_id`, `shortest_route_id`, aliases, duration totals, toll metadata, ready-to-copy `display` strings, and `raw_result`.\n"
         "- `select_route(routes, route_id=None, alias=None, name_via=None, prefer=None, record_selection=True)`\n"
         "  Built-in selection helper, not a direct evaluator tool. Selects exactly one route from normalized or raw route lists. A success exposes both `route_id` and `selected_route_id`; otherwise it returns `AMBIGUOUS` or `NOT_FOUND` instead of guessing. By default it records the selected route, selector, and current navigation revision for later follow-ups.\n"
+        "- `select_route_by_user_preferences(routes, preference_text=None, record_selection=True)`\n"
+        "  Built-in selection helper, not a direct evaluator tool. When the user asks for route selection according to their preferences, reads stored `navigation_and_routing.route_selection` unless `preference_text` is supplied, applies supported rules such as fastest, shortest, avoid tolls, and no-toll within N minutes of fastest, then records the unique selected route. It returns `UNAVAILABLE` or `AMBIGUOUS` instead of guessing when the stored preference is not applicable.\n"
         "- `get_weather_at_route_arrival(location_or_poi_id, route=None, route_id=None, routes=None, start_id=None)`\n"
         "  Built-in read helper, not a direct evaluator tool. For navigation decisions conditioned on destination weather, computes route-arrival time from a provided route, remembered route facts, or a route lookup from `policy_location_id()`, then calls `get_weather(...)` for that destination at the arrival hour/minute.\n"
+        "- `select_poi_at_location_open_at_route_arrival(location_id, category_poi, route=None, route_id=None, routes=None, start_id=None, record_selection=True)`\n"
+        "  Built-in read/selection helper, not a direct evaluator tool. For requests like a supermarket or restaurant that will still be open when you arrive, computes arrival time from the selected route, searches POIs at that location without a currently-open filter, filters their `opening_hours` against arrival time, and selects the unique open POI. It returns `AMBIGUOUS` when several are open and `NOT_FOUND` when none are open.\n"
         "- `select_charging_plug(pois=None, require_available=False)`\n"
         "  Built-in selector helper, not a direct evaluator tool. From charging POI results, chooses the highest-power plug while keeping station id/name, navigation id, phone number, plug id, power, and availability together. By default occupied plugs can still be selected for time calculations; pass `require_available=True` only when availability is a hard constraint.\n"
         "- `plan_charging_for_next_meeting(range_buffer_km=40, arrival_buffer_minutes=5)`\n"

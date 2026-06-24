@@ -35,6 +35,7 @@ from config import (  # noqa: E402
 )
 from coroutine_prompts import (  # noqa: E402
     NAVIGATION_STATE_POLICY_REMINDER,
+    PREFERENCE_POLICY_REMINDER,
     PREFLIGHT_ATTENTION_REMINDER,
     build_system_prompt,
     environment_message,
@@ -262,6 +263,13 @@ class CoroutineAgentWorker:
             status=result.get("status"),
             navigation_state=result.get("navigation_state"),
         )
+        preference_result = self.workspace.preflight_user_preferences()
+        self.trace.write(
+            "user_preferences_preflight",
+            status=preference_result.get("status"),
+            summary=preference_result.get("summary"),
+            requested_categories=preference_result.get("requested_categories"),
+        )
 
     def _handle_inbound(self, inbound: InboundTurn) -> None:
         ws = self.workspace
@@ -323,6 +331,8 @@ class CoroutineAgentWorker:
                     "Use this as your compact carry-forward memory.\n\n"
                     "Navigation policy reminder:\n"
                     f"{NAVIGATION_STATE_POLICY_REMINDER}\n\n"
+                    "Preference policy reminder:\n"
+                    f"{PREFERENCE_POLICY_REMINDER}\n\n"
                     f"{PREFLIGHT_ATTENTION_REMINDER}"
                 ),
             }

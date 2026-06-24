@@ -5,7 +5,7 @@
 Final-submission judge: Gemini 2.5 Flash.
 
 Run:
-`output/run_configs/20260624-121323__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
+`output/run_configs/20260624-204337__run_configs-coroutine_full_train_cerebras_gemini_3__train-trials3-baseall-hallall-disall__gpt-oss-120b.json`
 
 Configuration:
 - Agent provider: Cerebras
@@ -13,43 +13,49 @@ Configuration:
 - Skill: `car_domain_120b.md`
 - User simulator: `gemini/gemini-2.5-flash`
 - Policy evaluator: `gemini/gemini-2.5-flash`
+- Trials: `3`
+
+Result for hallucination split: `142/144` (`98.6%`) raw.
+
+Split stability:
+- Pass^1: `47/48` (`97.9%`)
+- Pass^2: `47/48` (`97.9%`)
+- Pass^3: `46/48` (`95.8%`)
+- Pass@3: `48/48` (`100.0%`)
+
+Failure-subset comparison run:
+`output/run_configs/20260624-222919__run_configs-coroutine_failures_qwen_nebius_gemini_1__train-trials1-base11ids-hall2ids-dis18ids__Qwen-Qwen3.5-397B-A17B.json`
+
+Qwen/Nebius configuration:
+- Agent provider: Nebius
+- Agent model: `Qwen/Qwen3.5-397B-A17B`
+- Skill: `car_domain_120b.md`
+- User simulator: `gemini/gemini-2.5-flash`
+- Policy evaluator: `gemini/gemini-2.5-flash`
 - Trials: `1`
+- Scope: latest non-3/3 tasks only.
 
-Result for hallucination split: `46/48` (`95.8%`).
+Qwen result on hallucination failure subset: `1/2`.
 
-Active failures:
-- `hallucination_54`: full-run regression. The unknown route-structure
-  preflight was recorded correctly, but the model generated malformed
-  Python/JSON retries and the runtime fell back to the generic internal-error
-  response.
-- `hallucination_82`: flaky aggregate regression after targeted `3/3`. The
-  agent made an invalid `get_location_id_by_location_name("Ionity")` call even
-  though Ionity was already known as a charging-station POI.
+Current non-solid hallucination tasks:
 
-Previously active but solved in this run:
-- `hallucination_48`
-- `hallucination_56`
-- `hallucination_76`
+| Task | Cerebras full run | Qwen subset | Current reading |
+| --- | --- | --- | --- |
+| `hallucination_72` | `2/3` | fail | The fixed path works when the unknown `remaining_range` guard fires: the agent reads charging status once and gives a direct limitation. The failed Cerebras trial and Qwen trial continued after `remaining_range` was unavailable, producing text like `unknown km` and charging calculations. This is still an unknown-value stop condition, not a missing-tool discovery issue. |
+| `hallucination_78` | `2/3` | pass | The wrapper/tool behavior is correct in passing trials: delete Rome, then when waypoint deletion is unavailable, report the missing `navigation_delete_waypoint` capability. The failed trial stopped after Rome deletion because the user simulator did not continue to the Belgrade-removal request. Treat as simulator flake/watchlist, not a code target. |
 
-Target-fixed before this latest full run:
-- `hallucination_30`
-- `hallucination_36`
-- `hallucination_40`
-- `hallucination_64`
-- `hallucination_72`
-- `hallucination_92`
+Current stable fixes in the full 3-trial run:
+- `hallucination_30`, `hallucination_36`, `hallucination_40`,
+  `hallucination_54`, `hallucination_64`, `hallucination_82`, and
+  `hallucination_92` all passed `3/3`.
+- `hallucination_48`, `hallucination_56`, and `hallucination_76` also remain
+  solved in the latest full run.
 
-Target-fixed but regressed in aggregate:
-- `hallucination_54`
-- `hallucination_82`
-
-`hallucination_82` now passes the targeted 3-trial validation:
-`output/run_configs/20260623-230312__run_configs-coroutine_h82_cerebras_gemini_3__train-trials3-base0-hall1ids-dis0__gpt-oss-120b.json`
-(`3/3`).
-
-`hallucination_92` now passes the targeted 1-trial validation:
-`output/run_configs/20260624-000024__run_configs-coroutine_h92_cerebras_gemini_1__train-trials1-base0-hall1ids-dis0__gpt-oss-120b.json`
-(`1/1`).
+Helper-overrides-good-reasoning watchlist:
+- No current hallucination non-solid case shows a helper overriding a correct
+  model plan. The main remaining risk is the opposite: helper/unknown-value
+  guards did not stop model improvisation strongly enough in the failed
+  `hallucination_72` branch.
 
 ## Competition Compliance
 
@@ -155,7 +161,8 @@ Target validation:
 
 ### `hallucination_54`: active route hidden by unknown navigation-state fields
 
-Status: active again after aggregate regression.
+Status: stable in the latest full 3-trial run (`3/3`). Keep the notes below as
+historical context for the hidden-route-structure guard.
 
 Removed capability/data:
 - `result.get_current_navigation_state.waypoints_id`
@@ -184,7 +191,7 @@ Target validation:
 - Result: `1/1`.
 - Trace: agent read `get_current_navigation_state(detailed_information=True)`, received hidden waypoint and route fields, did not attempt an unsafe delete, and answered: `I can't remove the intermediate stop because I looked up the current navigation state and the car system did not provide the current waypoint order or route information.`
 
-Latest full-run regression:
+Prior full-run regression:
 - `output/run_configs/20260624-121323__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
 - Result: failed.
 - Trace: preflight recorded `route_structure_available: false` and the unknown
@@ -193,14 +200,15 @@ Latest full-run regression:
   and the runtime answered: `I hit an internal issue while deciding the next
   step.`
 
-Fix direction:
-- If preflight already knows the route structure is unavailable and the user
-  asked for a route edit that needs waypoint/order information, emit the direct
-  route-structure limitation before letting model code improvise a route-edit
-  plan.
-- Keep this fact-based: do not hardcode Paris or "intermediate stop"; key off
-  active navigation plus hidden waypoint/route structure plus a requested route
-  edit.
+Latest full 3-trial run:
+- `output/run_configs/20260624-204337__run_configs-coroutine_full_train_cerebras_gemini_3__train-trials3-baseall-hallall-disall__gpt-oss-120b.json`
+- Result: passed `3/3`.
+
+Current watch item:
+- Preserve the fact-based guard: if preflight already knows route structure is
+  unavailable and the user asked for a route edit that needs waypoint/order
+  information, emit the direct route-structure limitation before model code can
+  improvise a route-edit plan.
 
 ### `hallucination_64`: missing destination-replacement tool after route presentation
 
@@ -248,7 +256,7 @@ What happened:
 - Agent ended with `I need a bit more information before I can continue.`
 
 Status:
-- Counted as passing.
+- Non-solid in the latest full 3-trial run (`2/3`) and failed under Qwen/Nebius.
 - Target validation: `output/run_configs/20260623-221929__run_configs-coroutine_h72_cerebras_gemini_3__train-trials3-base0-hall1ids-dis0__gpt-oss-120b.json`
 - Result: `3/3`.
 
@@ -257,16 +265,20 @@ What changed:
 - When the user later asks whether range is enough, the agent reads charging status once and gives the direct limitation because `remaining_range` is unavailable.
 
 Decision:
-- Do not add stricter email-planning completeness rules for now.
-- The agent still sends a route-only email before the range follow-up, but tightening this would reduce flexibility and could overfit email tasks.
-- This is acceptable because the agent no longer fabricates unavailable range data and gives a clear capability-limit response when asked directly.
+- Keep the model flexible about how much information belongs in an email.
+- Do tighten the unknown-value stop: once `remaining_range` is unavailable, do
+  not allow text such as `unknown km` or downstream charging-time math that
+  assumes the missing range.
+- The good branch is already correct: one read, direct limitation, no retry loop.
 
-### `hallucination_82`: selected charging POI is not reused reliably
+### `hallucination_82`: selected charging POI is not reused reliably — TARGET-FIXED
 
-Status: targeted `3/3`, but latest full run failed.
+Status: stable in the latest full 3-trial run (`3/3`).
 
 Target validation:
 - `output/run_configs/20260623-230312__run_configs-coroutine_h82_cerebras_gemini_3__train-trials3-base0-hall1ids-dis0__gpt-oss-120b.json`
+- Result: `3/3`
+- `output/run_configs/20260624-150805__run_configs-coroutine_h82_cerebras_gemini_3__train-trials3-base0-hall1ids-dis0__gpt-oss-120b.json`
 - Result: `3/3`
 
 Removed capability/data:
@@ -294,7 +306,7 @@ Fix implemented:
 - Added a navigation completion-claim guard: if the response says navigation was set or configured but no state-changing navigation call succeeded in the current user turn, the runtime replaces that claim with the grounded missing-capability response.
 - Added 120B skill examples for selected POIs and multi-leg navigation through a charging stop.
 
-Latest full-run regression:
+Prior full-run regression:
 - The agent found Ionity as `poi_cha_948882`, but on the charging-time turn it
   calculated using Tesla Supercharger `poi_cha_483074` / plug
   `plg_cha_522841`.
@@ -315,6 +327,14 @@ Fix direction:
   point-of-interest IDs.
 - Keep the missing-navigation capability response; that part behaved correctly
   in the latest full run.
+
+Implemented after the prior full run:
+- Known-POI lookup guard: when `get_location_id_by_location_name(...)` is called
+  with a name that uniquely matches a previously grounded POI, the workspace
+  resolves it locally to that POI's `poi_id`/`navigation_id` and does not emit a
+  doomed city-location lookup.
+- POI summaries now preserve `category`, so a resolved known charging POI remains
+  tied to charging-station state and `selected_charging_poi`.
 
 ### `hallucination_92`: AC refused because one required window position is unknown
 
@@ -386,9 +406,9 @@ Generic rule:
 
 ## Recommended Order
 
-1. Fix `hallucination_54` by turning known hidden navigation structure into the
-   direct route-edit limitation before model-generated route-edit code runs.
-2. Fix `hallucination_82` by making selected POI identity durable across route,
-   plug, charging-time, and final-navigation turns.
-3. If any other target-fixed case regresses, prefer wrapper-level unknown-value
+1. Tighten `hallucination_72` so unavailable `remaining_range` blocks
+   user-facing `unknown km` text and downstream charging math in the same turn.
+2. Keep `hallucination_78` on the watchlist only; the failed trial is simulator
+   continuation flake after a correct first navigation deletion.
+3. If any target-fixed case regresses, prefer wrapper-level unknown-value
    handling over task-specific prompt branches.

@@ -5,7 +5,7 @@
 Final-submission judge: Gemini 2.5 Flash.
 
 Latest full train run:
-`output/run_configs/20260624-121323__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
+`output/run_configs/20260624-204337__run_configs-coroutine_full_train_cerebras_gemini_3__train-trials3-baseall-hallall-disall__gpt-oss-120b.json`
 
 Configuration:
 - Agent provider: Cerebras
@@ -13,42 +13,51 @@ Configuration:
 - Skill: `car_domain_120b.md`
 - User simulator: `gemini/gemini-2.5-flash`
 - Policy evaluator: `gemini/gemini-2.5-flash`
+- Trials: `3`
+
+Result for base split: `127/150` (`84.7%`) raw.
+
+Split stability:
+- Pass^1: `43/50` (`86.0%`)
+- Pass^2: `40/50` (`80.0%`)
+- Pass^3: `39/50` (`78.0%`)
+- Pass@3: `45/50` (`90.0%`)
+
+Failure-subset comparison run:
+`output/run_configs/20260624-222919__run_configs-coroutine_failures_qwen_nebius_gemini_1__train-trials1-base11ids-hall2ids-dis18ids__Qwen-Qwen3.5-397B-A17B.json`
+
+Qwen/Nebius configuration:
+- Agent provider: Nebius
+- Agent model: `Qwen/Qwen3.5-397B-A17B`
+- Skill: `car_domain_120b.md`
+- User simulator: `gemini/gemini-2.5-flash`
+- Policy evaluator: `gemini/gemini-2.5-flash`
 - Trials: `1`
+- Scope: latest non-3/3 tasks only.
 
-Result for base split: `44/50` (`88.0%`) raw.
+Qwen result on base failure subset: `3/11`.
 
-No latest-run base failure is a clean whole-task add-back. The
-organizer-confirmed `base_88` unrelated-segment policy error is still useful,
-but this run also missed the expected route-based charging-station search. The
-organizer-confirmed `base_86` route-options contradiction is historical; the
-latest `base_86` failure is a real downstream EV/phone failure.
+Current non-solid base tasks:
 
-Raw failures in the latest run (`6`):
-- `base_48`: all tool execution, final action, and user-end checks passed. The
-  evaluator failed only policy because the agent presented alternatives and let
-  the user choose the second route instead of proactively taking fastest.
-- `base_56`: all action checks passed, but policy failed because the agent asked
-  the user to choose the direct Paris route instead of proactively taking the
-  fastest route for an unqualified waypoint deletion.
-- `base_86`: Barcelona destination replacement succeeded, but the later EV
-  safety-buffer flow stalled before finding/calling the expected charging
-  station provider. The known route-options policy contradiction is confirmed
-  evaluator-side, but the EV follow-up remains real.
-- `base_88`: all action and final checks passed. The policy failure repeats the
-  organizer-confirmed evaluator-side claim that unrelated existing route
-  segments must also be rewritten to fastest, but this run also missed the
-  expected `search_poi_along_the_route` charging-station search.
-- `base_92`: all action/final checks passed. The evaluator failed the
-  confirmation request for fog lights in `partly_cloudy` weather, which appears
-  to contradict policy 008/009 as written in `docs/policy.md`.
-- `base_96`: the weather branch was correct (`rain in Mannheim` -> Cologne),
-  but the agent set the fastest Cologne route even though the user preference in
-  the task was shortest route.
+| Task | Cerebras full run | Qwen subset | Current reading |
+| --- | --- | --- | --- |
+| `base_48` | `0/3` | fail | Real action-order issue plus wrapper narration risk. The agent replaced the destination with the default fastest route before the user selected the requested second route, then later switched to the second route. Final state passed, but `r_actions=0`. The helper-generated route narration also said "fastest route" after the non-fastest second-route switch, which can make good route selection look contradictory. |
+| `base_54` | `2/3` | pass | Only one trial failed, and only policy failed. The bad response said `22 degrees` instead of `22 degrees Celsius`; tool actions were correct. This is a response-units formatting issue, not a tool-planning issue. |
+| `base_56` | `0/3` | fail | Tool actions, final state, tool execution, tool subset, and policy all passed. The failure was `r_user_end_conversation=0`: after correctly deleting Nuremberg and taking the fastest direct Paris route, helper/obligation text invited "other options", the user simulator continued, and the agent kept discussing alternatives. This is a helper-generated follow-up problem overriding an otherwise complete route-edit flow. |
+| `base_66` | `2/3` | pass | One policy-only failure. The destination replacement to Munich succeeded; evaluator complained the assistant did not mention tolls for the old Andorra -> Paris route that was already active before the requested edit. Treat as low-priority policy wording/evaluator sensitivity. |
+| `base_74` | `1/3` | fail | Compound route/email/charging task. One trial passed. Failures split between missing the full charging/email tool bundle and re-asking confirmation instead of sending the second email after confirmation. Needs a complete "draft email only after route + charging facts are ready" plan, without prematurely confirming incomplete email content. |
+| `base_82` | `0/3` | fail | User wanted the Berlin route via `K57, B65`. In two trials the model did eventually select that route, but it first committed the fastest route and helper narration then described the selected `K57, B65` route as "fastest". Trial 2 stopped after the first fastest replacement. Needs route-option presentation without premature commit and provenance-aware narration that does not overwrite user-selected route reasoning. |
+| `base_84` | `2/3` | pass | One trial failed after the route/charging flow had enough information. The agent set a two-leg route via Ionity, then later used `navigation_replace_final_destination`, turning a good multi-leg setup into a mismatched action sequence. Helper narration again invited route switching after an already-complete navigation setup. |
+| `base_86` | `0/3` | fail | Real downstream EV/charging failure remains. The known organizer-confirmed route-options policy contradiction appears in some trials, but the task also fails action checks: the agent finds or describes a charger inconsistently, sometimes reports a `None kW` plug, and does not complete the expected charging-station/provider flow reliably. |
+| `base_88` | `2/3` | fail | Two trials passed. The failed trial used `search_poi_at_location` instead of the expected route-based charging search after removing Bonn, so `search_poi_along_the_route` was missing. The earlier unrelated-segment policy false negative is not the current dominant issue in this 3-trial run. |
+| `base_96` | `1/3` | fail | One trial passed. Failures are branch-planning instability: one skipped `get_weather` and assumed clear weather; another hit an internal issue, then tried `navigation_replace_final_destination` while navigation was inactive before recovering with `set_new_navigation`. Needs conditional route setup to keep weather read and inactive-navigation state tied to the final action. |
+| `base_98` | `0/3` | fail | The agent computed meeting route, charging status, charger, and charging time, but then set direct navigation to Stuttgart and called the charging provider. Expected behavior is a multi-leg navigation via the charging stop. This is the strongest remaining base planning gap. |
 
-Current clean passes from previously active fixes:
-- `base_20`, `base_28`, `base_64`, `base_68`, `base_70`, `base_76`,
-  `base_78`, `base_82`, `base_84`, and `base_98` all passed in the latest full
-  run.
+Helper-overrides-good-reasoning watchlist:
+- `base_56`: successful waypoint deletion was followed by helper/obligation text inviting route alternatives, causing unnecessary continuation and user-end failure. Suggested tuning: after a state-changing route edit succeeds and the user did not ask to see alternatives, helper narration should be terminal and should not append "other options" prompts.
+- `base_82`: model-selected `K57, B65` route was followed by generic "fastest route" narration, contradicting the user's selected non-default route. Suggested tuning: route narration must be provenance-aware; if the selected route came from user alias/name-via/preference, describe that basis and do not reuse default-fastest wording.
+- `base_84`: a valid two-leg charger route was later disturbed by route-switch invitation/replacement behavior. Suggested tuning: once `set_new_navigation(...)` succeeds for a complete multi-leg route, mark that navigation plan complete for the turn and suppress later final-destination replacement or route-option follow-up unless the user explicitly asks to change it.
+- `base_48`: after the model honored the user's second-route selection, generic route narration still claimed the selected route was fastest. Suggested tuning: route-edit helpers should store selected-route provenance (`fastest`, `shortest`, `alias`, `name_via`, `user_selected`) and only narrate facts true for that specific route.
 
 Prior reference run (3-trial, post facts-vs-intention refactor — see
 `docs/facts-vs-intention-refactor-review.md`):
@@ -78,11 +87,11 @@ Targeted one-trial mechanism checks after the reliability/ergonomics pass:
 - `20260622-214342...contact_routechain...`: `base_78` and `base_84` passed on
   current Cerebras/Gemini after contact-recipient grounding and route-chain
   validation/repair.
-- The 2026-06-24 full run supersedes some earlier targeted uncertainty:
-  `base_28`, `base_76`, `base_82`, and `base_98` now pass in aggregate.
-  `base_86` still has a real downstream EV/charging-station failure in addition
-  to the known route-options policy contradiction. `base_96` still fails, but
-  the failure moved from weather-time branching to route-selection preference.
+- The 2026-06-24 3-trial full run supersedes some earlier targeted uncertainty:
+  `base_28` and `base_76` are stable, but `base_82` and `base_98` are now hard
+  failures again. `base_86` still has a real downstream EV/charging-station
+  failure in addition to the known route-options policy contradiction.
+  `base_96` remains flaky on conditional weather/route setup.
 
 These targeted passes/failures are one-trial evidence only. They update the
 known mechanism, not the 3-trial solid/flaky classification above.
@@ -282,30 +291,51 @@ Evidence:
   `20260622-100158...preflight_target...` passed `base_48`, `base_64`, and
   `base_82` 3/3 overall. This is one targeted trial per task.
 
-### `base_56`: waypoint deletion presented options before committing fastest
+### `base_56`: waypoint deletion completes, then helper invites continuation — ACTIVE
 
-Latest full run:
+Latest full 3-trial run:
 - User asked: remove Nuremberg and go straight to Paris.
 - The agent read the current Wiesbaden -> Nuremberg -> Paris route.
-- It fetched direct Wiesbaden -> Paris alternatives and asked which one the user
-  wanted.
-- The user selected A11/A51, which was also fastest and shortest.
 - The agent called `navigation_delete_waypoint(...)` with the correct direct
-  route and all action/final checks passed.
-- The policy judge failed the run because the agent should have proactively
-  taken the fastest direct route instead of asking.
+  fastest route.
+- Tool execution, tool subset, action checks, final-state checks, and policy all
+  passed in all three trials.
+- The run still scored `0/3` because `r_user_end_conversation=0`: route
+  narration invited "other options", the user simulator continued, and the agent
+  answered those follow-ups instead of ending after the completed edit.
 
 Fix direction:
-- For direct waypoint deletion where the user did not ask to see alternatives
-  and no explicit route preference is present, the helper/prompt should let the
-  model commit the fastest replacement route and then mention alternatives.
+- For direct waypoint deletion where the user did not ask to see alternatives,
+  the helper/prompt should commit the fastest replacement route and avoid
+  inviting further route-choice continuation after the edit is complete.
 - Keep the model flexible for explicit route-choice requests. This should not
   block cases like `base_86`, where the user explicitly asked for multiple
   route options.
 
-### `base_82`: route actions correct — PASSED LATEST FULL RUN
+Implemented before the latest full run, but insufficient:
+- 120B skill rule: for unqualified intermediate-waypoint deletion, fetch the
+  previous-to-next alternatives and immediately call `navigation_delete_waypoint`
+  with the fastest replacement route.
+- Runtime memory: successful navigation edit mutations are remembered across the
+  next user turn, so a follow-up answer no longer says navigation was not set
+  after `navigation_delete_waypoint(...)` already succeeded.
 
-The latest full run passed `base_82`.
+Target evidence:
+- Before persistent mutation memory,
+  `20260624-135954__run_configs-coroutine_base56_cerebras_gemini_3...` passed
+  `2/3`; the remaining failure was the false follow-up denial after a successful
+  delete.
+- After the memory fix,
+  `20260624-150401__run_configs-coroutine_base56_cerebras_gemini_3...` passed
+  `3/3`.
+
+### `base_82`: user-selected route overridden by premature fastest commit — ACTIVE
+
+Latest full 3-trial run: failed `0/3`. The targeted fixes solved earlier ID
+and route-presentation bugs, but the current failure is different: the agent
+commits the default fastest route before the user-selected `K57, B65` route is
+resolved, and helper narration then describes the final selected route as
+"fastest".
 
 Previous failure shape:
 - The agent got the full action flow right: it read active navigation, resolved
@@ -362,6 +392,25 @@ However, this run also had `r_tool_subset=0`: the agent searched for charging
 near Berlin with `search_poi_at_location(...)`, while the expected tool subset
 included `search_poi_along_the_route`.
 
+Implemented after the latest full run:
+- Added a 120B skill rule that route-based charging should use
+  `search_poi_along_the_route(...)`, not a city/waypoint POI search, unless the
+  user explicitly asks for chargers near a city or POI.
+- Added a second rule for active multi-stop navigation: "along the way" means
+  the current active route segments in `navigation_state["route_ids"]`; do not
+  replace them with a newly fetched direct start-to-final route unless the user
+  explicitly asks for a direct route or removal of the intermediate stop(s).
+
+Target evidence:
+- `20260624-150612__run_configs-coroutine_base88_cerebras_gemini_3...` scored
+  raw `0/3`. Two trials were all-actions-pass policy false negatives; one trial
+  exposed a real direct-route/charging follow-up error.
+- `20260624-151318__run_configs-coroutine_base88_cerebras_gemini_3...` scored
+  raw `0/3` again. Trials 0 and 2 had `r_tool_subset=1`, `r_actions=1`, and
+  failed only on the known unrelated-segment policy false negative. Trial 1
+  still used `search_poi_at_location(...)` near Berlin and remains a real
+  route-charging miss.
+
 Fix direction (remaining):
 - Keep route-edit narration segment-scoped; do not rewrite unrelated existing
   route segments.
@@ -402,17 +451,28 @@ Fix direction (carried forward for other charging tasks):
 - Re-check in a full base split. Keep the generic EV-route planning checklist
   focused on official charging reads and grounded route facts.
 
-### `base_74`: premature email confirmation and duration corruption — PASSED LATEST FULL RUN
+### `base_74`: premature email confirmation and incomplete charging bundle — FLAKY
 
-The model asked for email confirmation before grounding the complete plan and
-reported `38 min` instead of `14 h 38 min`, while losing route and plug details.
+Latest full 3-trial run: `1/3`. One trial completed the full route, charging,
+confirmation, and email flow. The failed trials either skipped required charging
+tools before email confirmation or re-asked confirmation instead of sending the
+second email after the user already confirmed.
+
+Earlier failure shape: the model asked for email confirmation before grounding
+the complete plan and reported `38 min` instead of `14 h 38 min`, while losing
+route and plug details.
 
 Fix direction:
 - Preserve typed duration values rather than reconstructing them from prose.
 - Delay confirmation until all required message facts are grounded.
 - Build the final email body from structured route and charging data.
 
-### `base_84`: charging POI and two-leg navigation — PASSED LATEST FULL RUN
+### `base_84`: charging POI and two-leg navigation disturbed by route switching — FLAKY
+
+Latest full 3-trial run: `2/3`. The good path sets a two-leg route via the
+charging POI. The failed trial first set the two-leg route, then later used
+`navigation_replace_final_destination(...)`, turning a good route-chain into a
+mismatched action sequence.
 
 The POI result already contained the plug identifier, but the model asked the
 user to provide it.
@@ -514,10 +574,13 @@ Remaining fix direction:
 - This should be handled as general priority ordering: explicit user route
   preference > default fastest route.
 
-### `base_98`: EV charging plan loses max-window/provider-call semantics — PASSED LATEST FULL RUN
+### `base_98`: EV charging plan loses the charging stop in navigation — ACTIVE
 
-The agent now uses calendar, charging, route, POI search, and charging-time
-tools. The failure changed: it calculated time using Fastned
+Latest full 3-trial run: failed `0/3`. The agent now uses calendar, charging,
+route, POI search, and charging-time tools, but it sets direct navigation to
+the meeting location instead of a two-leg navigation via the charging stop.
+
+Earlier failure shape: it calculated time using Fastned
 `poi_cha_363177` / plug `plg_cha_564167`, but later routed to EnBW
 `poi_cha_425198`. Because it navigated to the wrong charging station, it never
 called the Fastned provider number after navigation.
@@ -557,10 +620,8 @@ Remaining, in priority order:
 1. Explicit route preference on conditional navigation branches (`base_96`):
    "shortest, not fastest" must survive branch selection.
 2. Later-segment EV range/charging-provider flow for `base_86`.
-3. Proactive fastest commit after unqualified waypoint deletion (`base_56`),
-   without suppressing explicit route-option requests.
-4. Route-based charger search after long route edits (`base_88`), while keeping
+3. Route-based charger search after long route edits (`base_88`), while keeping
    the unrelated-segment fastest-route policy issue classified as evaluator-side.
-5. Track `base_48` and `base_92` as policy-evaluator contradiction candidates,
+4. Track `base_48` and `base_92` as policy-evaluator contradiction candidates,
    not as hard agent bugs, unless Q&A or repeated hidden-like evidence says
    otherwise.

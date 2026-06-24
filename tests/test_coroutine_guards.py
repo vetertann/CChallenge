@@ -157,6 +157,41 @@ class GuardTests(unittest.TestCase):
 
         self.assertEqual(result.response_text, "Navigation set.")
 
+    def test_navigation_edit_success_allows_later_set_claim(self):
+        ws, ex = self.make(
+            {
+                "navigation_delete_waypoint": (
+                    "SUCCESS",
+                    {
+                        "waypoint_deleted": True,
+                        "new_waypoints": ["loc_wie", "loc_par"],
+                        "new_routes": ["route_fastest"],
+                    },
+                )
+            },
+            {
+                "navigation_delete_waypoint": tool_schema(
+                    "navigation_delete_waypoint",
+                    {
+                        "waypoint_id_to_delete": {"type": "string"},
+                        "route_id_without_waypoint": {"type": "string"},
+                    },
+                    required=["waypoint_id_to_delete", "route_id_without_waypoint"],
+                ),
+                "set_new_navigation": self._nav_schema(),
+            },
+        )
+
+        ex.run(
+            "navigation_delete_waypoint("
+            "waypoint_id_to_delete='loc_nur', route_id_without_waypoint='route_fastest')\n"
+            "respond('Nuremberg removed.')"
+        )
+        ws.observe_user("Is it set now?")
+        result = ex.run("respond('Navigation is set to Paris now.')")
+
+        self.assertEqual(result.response_text, "Navigation is set to Paris now.")
+
     def test_clean_mutation_allows_success_text(self):
         ws, ex = self.make(
             {"set_fan_speed": ("SUCCESS", {})},
@@ -1143,6 +1178,267 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(weather_args["time_hour_24hformat"], 18)
         self.assertEqual(weather_args["time_minutes"], 15)
 
+    def test_route_preference_helper_selects_no_toll_within_threshold(self):
+        ws, _ = self.make({}, {})
+        ws.scratchpad["entities"]["user_preferences"] = {
+            "preferences": {
+                "navigation_and_routing": {
+                    "route_selection": [
+                        "User always wants to take the fastest route without toll roads "
+                        "if it's not more than 10 minutes longer than the fastest route"
+                    ]
+                }
+            },
+            "summary": [],
+        }
+        routes = [
+            {
+                "route_id": "route_fast_toll",
+                "duration_hours": 13,
+                "duration_minutes": 20,
+                "includes_toll": True,
+                "alias": ["fastest", "first"],
+            },
+            {
+                "route_id": "route_no_toll_close",
+                "duration_hours": 13,
+                "duration_minutes": 27,
+                "includes_toll": False,
+                "alias": ["second"],
+            },
+            {
+                "route_id": "route_no_toll_slow",
+                "duration_hours": 13,
+                "duration_minutes": 38,
+                "includes_toll": False,
+                "alias": ["third"],
+            },
+        ]
+        result = ws.select_route_by_user_preferences(routes)
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["selected_route_id"], "route_no_toll_close")
+        narration = ws.scratchpad["facts"]["pending_route_narration"]
+        self.assertIn("preference-resolved route", narration)
+        self.assertIn("without toll roads", narration)
+        self.assertNotIn("It uses toll roads", narration)
+
+    def test_route_preference_helper_keeps_fastest_when_no_toll_exceeds_threshold(self):
+        ws, _ = self.make({}, {})
+        result = ws.select_route_by_user_preferences(
+            [
+                {
+                    "route_id": "route_fast_toll",
+                    "duration_hours": 1,
+                    "duration_minutes": 0,
+                    "includes_toll": True,
+                    "alias": ["fastest"],
+                },
+                {
+                    "route_id": "route_no_toll_slow",
+                    "duration_hours": 1,
+                    "duration_minutes": 15,
+                    "includes_toll": False,
+                    "alias": ["second"],
+                },
+            ],
+            preference_text=(
+                "fastest route without toll roads if not more than 10 minutes longer than fastest"
+            ),
+        )
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["selected_route_id"], "route_fast_toll")
+        self.assertNotIn("without toll roads", ws.scratchpad["facts"]["pending_route_narration"])
+
+    def test_route_preference_helper_does_not_guess_between_multiple_no_toll_routes(self):
+        ws, _ = self.make({}, {})
+        result = ws.select_route_by_user_preferences(
+            [
+                {
+                    "route_id": "route_toll",
+                    "duration_hours": 1,
+                    "duration_minutes": 0,
+                    "includes_toll": True,
+                },
+                {
+                    "route_id": "route_no_toll_1",
+                    "duration_hours": 1,
+                    "duration_minutes": 5,
+                    "includes_toll": False,
+                },
+                {
+                    "route_id": "route_no_toll_2",
+                    "duration_hours": 1,
+                    "duration_minutes": 6,
+                    "includes_toll": False,
+                },
+            ],
+            preference_text="avoid toll roads",
+        )
+        self.assertEqual(result["status"], "AMBIGUOUS")
+        self.assertEqual(len(result["matches"]), 2)
+
+    def test_open_at_arrival_poi_helper_selects_unique_open_poi(self):
+        ws, ex = self.make(
+            {
+                "search_poi_at_location": (
+                    "SUCCESS",
+                    {
+                        "pois": [
+                            {
+                                "id": "poi_sup_closed",
+                                "name": "Tesco",
+                                "category": "supermarkets",
+                                "opening_hours": "08:00h - 18:00h",
+                            },
+                            {
+                                "id": "poi_sup_open",
+                                "name": "Billa",
+                                "category": "supermarkets",
+                                "opening_hours": "06:00h - 21:00h",
+                            },
+                        ]
+                    },
+                ),
+            },
+            {
+                "search_poi_at_location": tool_schema(
+                    "search_poi_at_location",
+                    {
+                        "location_id": {"type": "string"},
+                        "category_poi": {"type": "string"},
+                        "filters": {"type": "array", "items": {"type": "string"}},
+                    },
+                    required=["location_id", "category_poi"],
+                ),
+            },
+            policy=(
+                'CURRENT_LOCATION = {"id": "loc_home_1", "name": "Munich"}\n'
+                'DATETIME = {"year": 2025, "month": 6, "day": 6, "hour": 5, "minute": 30}\n'
+            ),
+        )
+        result = ex.run(
+            "route = {\n"
+            "    'route_id': 'route_to_city',\n"
+            "    'start_id': 'loc_home_1',\n"
+            "    'destination_id': 'loc_city',\n"
+            "    'duration_hours': 13,\n"
+            "    'duration_minutes': 27,\n"
+            "}\n"
+            "poi = select_poi_at_location_open_at_route_arrival(\n"
+            "    location_id='loc_city',\n"
+            "    category_poi='supermarkets',\n"
+            "    route=route,\n"
+            ")\n"
+            "respond(poi['status'] + '|' + poi['poi_id'] + '|' + poi['arrival']['time_label'])"
+        )
+        self.assertEqual(result.response_text, "SUCCESS|poi_sup_open|18:57")
+        args = self._emitted(ws, "search_poi_at_location")
+        self.assertEqual(args["location_id"], "loc_city")
+        self.assertEqual(args["category_poi"], "supermarkets")
+        self.assertNotIn("filters", args)
+        self.assertEqual(
+            ws.scratchpad["entities"]["selected_poi"]["poi_id"],
+            "poi_sup_open",
+        )
+
+    def test_open_at_arrival_poi_helper_reports_ambiguous_open_pois(self):
+        ws, ex = self.make(
+            {
+                "search_poi_at_location": (
+                    "SUCCESS",
+                    {
+                        "pois": [
+                            {
+                                "id": "poi_sup_1",
+                                "name": "Billa",
+                                "opening_hours": "06:00h - 21:00h",
+                            },
+                            {
+                                "id": "poi_sup_2",
+                                "name": "Aldi",
+                                "opening_hours": "08:00h - 22:00h",
+                            },
+                        ]
+                    },
+                ),
+            },
+            {
+                "search_poi_at_location": tool_schema(
+                    "search_poi_at_location",
+                    {"location_id": {"type": "string"}, "category_poi": {"type": "string"}},
+                    required=["location_id", "category_poi"],
+                ),
+            },
+            policy=(
+                'CURRENT_LOCATION = {"id": "loc_home_1", "name": "Munich"}\n'
+                'DATETIME = {"year": 2025, "month": 6, "day": 6, "hour": 5, "minute": 30}\n'
+            ),
+        )
+        result = ex.run(
+            "poi = select_poi_at_location_open_at_route_arrival(\n"
+            "    location_id='loc_city',\n"
+            "    category_poi='supermarkets',\n"
+            "    route={'route_id': 'r1', 'duration_hours': 13, 'duration_minutes': 27},\n"
+            ")\n"
+            "respond(poi['status'] + '|' + str(len(poi['open_pois'])))"
+        )
+        self.assertEqual(result.response_text, "AMBIGUOUS|2")
+        self.assertNotIn("selected_poi", ws.scratchpad["entities"])
+
+    def test_open_at_arrival_poi_helper_reports_none_open(self):
+        ws, ex = self.make(
+            {
+                "search_poi_at_location": (
+                    "SUCCESS",
+                    {
+                        "pois": [
+                            {
+                                "id": "poi_sup_1",
+                                "name": "Tesco",
+                                "opening_hours": "08:00h - 18:00h",
+                            },
+                            {
+                                "id": "poi_sup_2",
+                                "name": "Local Market",
+                                "opening_hours": "07:00h - 12:00h",
+                            },
+                        ]
+                    },
+                ),
+            },
+            {
+                "search_poi_at_location": tool_schema(
+                    "search_poi_at_location",
+                    {"location_id": {"type": "string"}, "category_poi": {"type": "string"}},
+                    required=["location_id", "category_poi"],
+                ),
+            },
+            policy=(
+                'CURRENT_LOCATION = {"id": "loc_home_1", "name": "Munich"}\n'
+                'DATETIME = {"year": 2025, "month": 6, "day": 6, "hour": 5, "minute": 30}\n'
+            ),
+        )
+        result = ex.run(
+            "poi = select_poi_at_location_open_at_route_arrival(\n"
+            "    location_id='loc_city',\n"
+            "    category_poi='supermarkets',\n"
+            "    route={'route_id': 'r1', 'duration_hours': 13, 'duration_minutes': 27},\n"
+            ")\n"
+            "respond(poi['status'] + '|' + str(len(poi['closed_pois'])))"
+        )
+        self.assertEqual(result.response_text, "NOT_FOUND|2")
+
+    def test_opening_hours_parser_handles_overnight_windows(self):
+        self.assertTrue(
+            CoroutineWorkspace._poi_open_status_at_minutes("22:00h - 02:00h", 23 * 60 + 30)
+        )
+        self.assertTrue(
+            CoroutineWorkspace._poi_open_status_at_minutes("22:00h - 02:00h", 60)
+        )
+        self.assertFalse(
+            CoroutineWorkspace._poi_open_status_at_minutes("22:00h - 02:00h", 3 * 60)
+        )
+
     def test_select_charging_plug_prefers_highest_power_even_if_occupied(self):
         ws, ex = self.make({}, {})
         result = ex.run(
@@ -1343,6 +1639,120 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(
             [call["tool_name"] for request in ws.bridge.requests for call in request],
             ["get_current_navigation_state", "get_current_navigation_state"],
+        )
+
+    def test_preflight_user_preferences_populates_and_reuses_state(self):
+        preferences = {
+            "navigation_and_routing": {
+                "route_selection": [
+                    "The user always wants the fastest route that does not include toll roads."
+                ]
+            },
+            "vehicle_settings": {
+                "climate_control": ["The user prefers airflow toward FEET."],
+                "vehicle_settings": [],
+            },
+        }
+        ws, _ = self.make(
+            {"get_user_preferences": ("SUCCESS", preferences)},
+            {
+                "get_user_preferences": tool_schema(
+                    "get_user_preferences",
+                    {
+                        "preference_categories": {
+                            "type": "object",
+                            "properties": {
+                                "navigation_and_routing": {
+                                    "type": "object",
+                                    "properties": {
+                                        "route_selection": {"type": "boolean"},
+                                    },
+                                },
+                                "vehicle_settings": {
+                                    "type": "object",
+                                    "properties": {
+                                        "climate_control": {"type": "boolean"},
+                                        "vehicle_settings": {"type": "boolean"},
+                                    },
+                                },
+                            },
+                        }
+                    },
+                    required=["preference_categories"],
+                ),
+            },
+        )
+
+        first = ws.preflight_user_preferences()
+        second = ws.preflight_user_preferences()
+
+        self.assertEqual(first["status"], "SUCCESS")
+        self.assertEqual(second["status"], "CACHED")
+        stored = ws.scratchpad["entities"]["user_preferences"]
+        self.assertEqual(stored["preferences"], preferences)
+        self.assertEqual(
+            stored["summary"],
+            [
+                (
+                    "navigation_and_routing.route_selection: "
+                    "The user always wants the fastest route that does not include toll roads."
+                ),
+                "vehicle_settings.climate_control: The user prefers airflow toward FEET.",
+            ],
+        )
+        self.assertEqual(
+            [call["tool_name"] for request in ws.bridge.requests for call in request],
+            ["get_user_preferences"],
+        )
+
+    def test_preflight_user_preferences_skips_when_tool_unavailable(self):
+        ws, _ = self.make({}, {})
+
+        result = ws.preflight_user_preferences()
+
+        self.assertEqual(result["status"], "SKIPPED")
+        self.assertNotIn("user_preferences", ws.scratchpad["entities"])
+        self.assertEqual(ws.bridge.requests, [])
+
+    def test_preflight_user_preferences_uses_live_schema_leaves_only(self):
+        preferences = {
+            "vehicle_settings": {
+                "vehicle_settings": ["The user prefers BLUE ambient lighting."],
+            },
+        }
+        ws, _ = self.make(
+            {"get_user_preferences": ("SUCCESS", preferences)},
+            {
+                "get_user_preferences": tool_schema(
+                    "get_user_preferences",
+                    {
+                        "preference_categories": {
+                            "type": "object",
+                            "properties": {
+                                "vehicle_settings": {
+                                    "type": "object",
+                                    "properties": {
+                                        "vehicle_settings": {"type": "boolean"},
+                                    },
+                                },
+                            },
+                        }
+                    },
+                    required=["preference_categories"],
+                ),
+            },
+        )
+
+        result = ws.preflight_user_preferences()
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(
+            ws.bridge.requests[0][0]["arguments"],
+            {
+                "preference_categories": {
+                    "vehicle_settings": {"vehicle_settings": True}
+                }
+            },
         )
 
     def test_question_mark_placeholder_id_is_blocked_before_evaluator(self):
@@ -1746,6 +2156,53 @@ class GuardTests(unittest.TestCase):
         stored = ws.scratchpad["entities"].get("last_pois")
         self.assertTrue(stored)
         self.assertEqual(stored[0]["phone_number"], "+49 89 123")
+
+    def test_known_poi_name_location_lookup_uses_poi_id_without_bridge_call(self):
+        pois = {
+            "pois_found": [
+                {
+                    "id": "poi_ionity",
+                    "name": "Ionity",
+                    "category": "charging_stations",
+                    "corresponding_location_id": "loc_war",
+                }
+            ]
+        }
+        ws, ex = self.make(
+            {
+                "search_poi_at_location": ("SUCCESS", pois),
+                "get_location_id_by_location_name": ("FAILURE", {}),
+            },
+            {
+                "search_poi_at_location": tool_schema(
+                    "search_poi_at_location",
+                    {
+                        "location_id": {"type": "string"},
+                        "category_poi": {"type": "string"},
+                    },
+                    required=["location_id", "category_poi"],
+                ),
+                "get_location_id_by_location_name": tool_schema(
+                    "get_location_id_by_location_name",
+                    {"location": {"type": "string"}},
+                    required=["location"],
+                ),
+            },
+        )
+        ex.run("search_poi_at_location(location_id='loc_war', category_poi='charging_stations')")
+        request_count = len(ws.bridge.requests)
+
+        result = ex.run(
+            "loc = get_location_id_by_location_name(location='Ionity')\n"
+            "respond(loc['result']['id'])"
+        )
+
+        self.assertEqual(result.response_text, "poi_ionity")
+        self.assertEqual(len(ws.bridge.requests), request_count)
+        self.assertEqual(
+            ws.scratchpad["entities"]["selected_charging_poi"]["poi_id"],
+            "poi_ionity",
+        )
 
     def test_nav_mutation_marks_active(self):
         ws, ex = self.make(

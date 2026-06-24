@@ -41,14 +41,16 @@ safe serialization of arbitrary model-owned scratchpad values. Known pure
 context callables are resolved before helper execution and persistence. Final
 destination replacement keeps a valid model-supplied route ID or fills the route
 only when exactly one option exists; it does not parse user language or
-preferences. Before the first model decision on each user turn, navigation state
-is refreshed and stored as facts. After serializing the scratchpad, the agent
-appends the first **preflight attention message**: a short static policy reminder
-placed next to the state fields it applies to. The reminder does not derive an
-answer from those values, parse user wording, or block a tool. The model remains
-responsible for interpreting the request and choosing the route. This mechanism
-can be extended to other frequently relevant grounded state, including
-disambiguation facts, while preserving the same facts-vs-intention boundary.
+preferences. Before the first model decision, navigation state is refreshed per
+user turn and user preferences are read once per task when the official
+preference tool is exposed. Both are stored as facts. After serializing the
+scratchpad, the agent appends **preflight attention messages**: short static
+policy reminders placed next to the fields they apply to. The reminders do not
+derive an answer from those values, parse user wording, or block a tool. The
+model remains responsible for interpreting the request and choosing the action.
+This mechanism can be extended to other frequently relevant grounded state,
+including disambiguation facts, while preserving the same facts-vs-intention
+boundary.
 `set_new_navigation(...)` on an active route remains a fact-only
 `NEEDS_ACTIVE_ROUTE_EDIT` result and does not redirect to a mutation.
 Confirmation-required wrappers store the fully grounded action before asking,
@@ -471,9 +473,27 @@ segment_count = 1
 is_multi_stop = false
 
 Attention:
-For final-destination replacement with exactly two waypoints and one segment,
-present alternatives and wait unless the user or preferences uniquely selected
-one. The proactive fastest default applies to multi-stop routes.
+For final-destination replacement, if the user asked to change/update/replace
+the destination and did not ask to see or choose route options first, perform the
+edit with the policy-resolved route, normally fastest. Present alternatives and
+wait only when the user asked for options/choice/details before the edit or when
+the route remains unresolved after policy, preferences, and route metadata.
+```
+
+User preference example:
+
+```text
+Scratchpad facts:
+user_preferences.summary = [
+  "vehicle_settings.vehicle_settings: The user prefers blue ambient lighting.",
+  "navigation_and_routing.route_selection: The user prefers the fastest route without tolls."
+]
+
+Attention:
+Before asking the user to choose or before applying a default, check stored
+preferences. If a relevant preference uniquely leaves one valid option, act on
+it. If preferences are absent, irrelevant, or still ambiguous, continue with the
+normal policy order.
 ```
 
 Organizer Q&A on 2026-06-22 clarified two route-policy boundaries used by this

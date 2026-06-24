@@ -93,8 +93,10 @@ WORKSPACE_HELPER_NAMES = (
     "set_occupied_seat_heating",
     "get_route_options",
     "select_route",
+    "select_route_by_user_preferences",
     "select_poi",
     "get_weather_at_route_arrival",
+    "select_poi_at_location_open_at_route_arrival",
     "select_charging_plug",
     "set_new_navigation_via_stop",
     "plan_charging_for_next_meeting",
@@ -984,6 +986,10 @@ class CoroutineWorkspace:
                 "select_route(routes, route_id=None, alias=None, name_via=None, "
                 "prefer=None, record_selection=True)"
             ),
+            "select_route_by_user_preferences": (
+                "select_route_by_user_preferences(routes, preference_text=None, "
+                "record_selection=True)"
+            ),
             "select_poi": (
                 "select_poi(pois=None, poi_id=None, name=None, category=None, "
                 "record_selection=True)"
@@ -991,6 +997,10 @@ class CoroutineWorkspace:
             "get_weather_at_route_arrival": (
                 "get_weather_at_route_arrival(location_or_poi_id, route=None, route_id=None, "
                 "routes=None, start_id=None)"
+            ),
+            "select_poi_at_location_open_at_route_arrival": (
+                "select_poi_at_location_open_at_route_arrival(location_id, category_poi, "
+                "route=None, route_id=None, routes=None, start_id=None, record_selection=True)"
             ),
             "select_charging_plug": (
                 "select_charging_plug(pois=None, require_available=False)"
@@ -1483,6 +1493,31 @@ class CoroutineWorkspace:
                     "record_selection": "Whether to persist revision-bound selection provenance.",
                 },
             }
+        if tool_name == "select_route_by_user_preferences":
+            return {
+                "name": "select_route_by_user_preferences",
+                "signature": (
+                    "select_route_by_user_preferences(routes, preference_text=None, "
+                    "record_selection=True)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in route selector for stored route-selection preferences. It reads "
+                    "the current user preference facts unless `preference_text` is provided, "
+                    "applies supported route rules such as fastest, shortest, no toll roads, "
+                    "and no-toll-within-N-minutes-of-fastest, then records exactly one selected "
+                    "route. It returns UNAVAILABLE or AMBIGUOUS instead of guessing when the "
+                    "preference cannot be applied uniquely."
+                ),
+                "required_arguments": ["routes"],
+                "optional_arguments": ["preference_text", "record_selection"],
+                "schema": {"type": "object", "required": ["routes"], "properties": {}},
+                "argument_descriptions": {
+                    "routes": "Route list or get_route_options(...) result.",
+                    "preference_text": "Optional explicit route preference text; defaults to stored user route preferences.",
+                    "record_selection": "Whether to persist revision-bound selection provenance.",
+                },
+            }
         if tool_name == "select_poi":
             return {
                 "name": "select_poi",
@@ -1551,6 +1586,45 @@ class CoroutineWorkspace:
                     "route_id": "Optional route id to resolve from remembered route facts.",
                     "routes": "Optional route options/list; fastest is used if no explicit route is supplied.",
                     "start_id": "Optional route start id; defaults to policy_location_id().",
+                },
+            }
+        if tool_name == "select_poi_at_location_open_at_route_arrival":
+            return {
+                "name": "select_poi_at_location_open_at_route_arrival",
+                "signature": (
+                    "select_poi_at_location_open_at_route_arrival(location_id, category_poi, "
+                    "route=None, route_id=None, routes=None, start_id=None, record_selection=True)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in read/selection helper for requests such as a supermarket open when "
+                    "the car arrives at an intermediate destination. It computes route-arrival "
+                    "time, searches POIs at the location without a currently-open filter, parses "
+                    "opening_hours, and selects the unique POI open at arrival when possible."
+                ),
+                "required_arguments": ["location_id", "category_poi"],
+                "optional_arguments": ["route", "route_id", "routes", "start_id", "record_selection"],
+                "schema": {
+                    "type": "object",
+                    "required": ["location_id", "category_poi"],
+                    "properties": {
+                        "location_id": {"type": "string"},
+                        "category_poi": {"type": "string"},
+                        "route": {"type": ["object", "null"]},
+                        "route_id": {"type": ["string", "null"]},
+                        "routes": {"type": ["array", "object", "null"]},
+                        "start_id": {"type": ["string", "null"]},
+                        "record_selection": {"type": "boolean", "default": True},
+                    },
+                },
+                "argument_descriptions": {
+                    "location_id": "Grounded location where POIs should be searched.",
+                    "category_poi": "POI category, such as supermarkets or fast_food.",
+                    "route": "Optional selected route dict whose duration determines arrival time.",
+                    "route_id": "Optional route id to resolve from remembered route facts.",
+                    "routes": "Optional route options/list; fastest is used only if no route is supplied.",
+                    "start_id": "Optional route start id; defaults to policy_location_id().",
+                    "record_selection": "Whether to persist a uniquely selected open POI.",
                 },
             }
         if tool_name == "select_charging_plug":
@@ -2756,12 +2830,22 @@ class CoroutineWorkspace:
         )
 
     def _has_successful_navigation_mutation(self) -> bool:
-        return any(
+        if any(
             isinstance(item, dict)
             and item.get("tool_name") in NAVIGATION_ACTIVATING_MUTATIONS
             and str(item.get("status") or "").upper() == "SUCCESS"
             for item in self._successful_mutations
-        )
+        ):
+            return True
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return False
+        last_mutation = entities.get("last_successful_navigation_mutation")
+        if not isinstance(last_mutation, dict):
+            return False
+        if last_mutation.get("tool_name") not in NAVIGATION_ACTIVATING_MUTATIONS:
+            return False
+        return str(last_mutation.get("status") or "").upper() == "SUCCESS"
 
     @staticmethod
     def _claims_navigation_completed(message: str) -> bool:
@@ -4356,6 +4440,13 @@ class CoroutineWorkspace:
             if name in NAVIGATION_ACTIVATING_MUTATIONS:
                 revision = int(entities.get("navigation_revision") or 0) + 1
                 entities["navigation_revision"] = revision
+                entities["last_successful_navigation_mutation"] = {
+                    "status": "SUCCESS",
+                    "tool_name": name,
+                    "arguments": copy.deepcopy(arguments),
+                    "result": copy.deepcopy(payload),
+                    "revision": revision,
+                }
                 waypoint_ids = self._first_string_list(
                     payload,
                     "new_waypoints",
@@ -4424,6 +4515,37 @@ class CoroutineWorkspace:
             elif name == "get_location_id_by_location_name":
                 location_id = payload.get("location_id") or payload.get("id")
                 location_name = arguments.get("location") or payload.get("name")
+                if payload.get("is_poi") is True:
+                    poi_id = payload.get("poi_id") or payload.get("navigation_id") or location_id
+                    if isinstance(poi_id, str) and poi_id:
+                        poi = {
+                            "poi_id": poi_id,
+                            "id": poi_id,
+                            "navigation_id": payload.get("navigation_id") or poi_id,
+                            "name": payload.get("name") or location_name,
+                            "category": payload.get("category"),
+                        }
+                        selected = {
+                            "status": "SUCCESS",
+                            "poi": copy.deepcopy(poi),
+                            "selected": copy.deepcopy(poi),
+                            "result": copy.deepcopy(poi),
+                            "poi_id": poi_id,
+                            "id": poi_id,
+                            "navigation_id": poi.get("navigation_id"),
+                            "name": poi.get("name"),
+                        }
+                        entities["selected_poi"] = copy.deepcopy(selected)
+                        category = str(poi.get("category") or "").lower()
+                        if "charging" in category or self._is_charging_poi_id(poi_id):
+                            entities["selected_charging_poi"] = copy.deepcopy(selected)
+                        pois_by_id = entities.setdefault("pois_by_id", {})
+                        if isinstance(pois_by_id, dict):
+                            existing = pois_by_id.get(poi_id)
+                            merged = dict(existing) if isinstance(existing, dict) else {}
+                            merged.update({k: v for k, v in poi.items() if v is not None})
+                            pois_by_id[poi_id] = merged
+                    continue
                 if isinstance(location_id, str):
                     lookup = {"location_id": location_id, "id": location_id}
                     if isinstance(location_name, str) and location_name.strip():
@@ -4627,7 +4749,8 @@ class CoroutineWorkspace:
             entry: dict[str, Any] = {}
             for key in (
                 "name", "id", "location_id", "phone_number", "phone",
-                "is_open", "opening_hours", "address", "plug_ids", "plug_id",
+                "is_open", "opening_hours", "address", "category",
+                "plug_ids", "plug_id",
                 "connector_ids", "corresponding_location_id",
             ):
                 if key in poi:
@@ -5002,24 +5125,39 @@ class CoroutineWorkspace:
             for call in normalized
         ]
         normalized = self._repair_climate_sync_inverse_calls(normalized)
+        local_slots: list[dict[str, Any] | None] = [None] * len(normalized)
+        bridge_calls: list[dict[str, Any]] = []
+        bridge_positions: list[int] = []
+        for index, call in enumerate(normalized):
+            local_result = self._known_poi_location_lookup_result(call)
+            if local_result is not None:
+                local_slots[index] = local_result
+                continue
+            bridge_calls.append(call)
+            bridge_positions.append(index)
         blocked_by_surface = self._tool_surface_blocker_result(
             "tool_surface",
             "do that",
-            normalized,
+            bridge_calls,
         )
         if blocked_by_surface is not None:
-            ordered = self._restore_raw_result_order(blocked_by_surface, normalized)
+            for position, result in zip(bridge_positions, blocked_by_surface):
+                local_slots[position] = result
+            ordered = [result for result in local_slots if result is not None]
             self.observe_environment(ordered)
             return ordered
-        for call in normalized:
+        for call in bridge_calls:
             self._validate_tool_call(call["tool_name"], call["arguments"])
-        blocked_by_confirmation = self._confirmation_required_blocker_result(normalized)
+        blocked_by_confirmation = self._confirmation_required_blocker_result(bridge_calls)
         if blocked_by_confirmation is not None:
-            self.observe_environment(blocked_by_confirmation)
-            return blocked_by_confirmation
+            for position, result in zip(bridge_positions, blocked_by_confirmation):
+                local_slots[position] = result
+            ordered = [result for result in local_slots if result is not None]
+            self.observe_environment(ordered)
+            return ordered
         policy_011_blocker = self._active_policy_011_blocker()
         if policy_011_blocker is not None:
-            for call in normalized:
+            for call in bridge_calls:
                 if call["tool_name"] == "set_air_conditioning" and call["arguments"].get("on") is True:
                     blocked = self._block_policy_011_action("turn on AC", policy_011_blocker)
                     blocked_results = [
@@ -5028,20 +5166,26 @@ class CoroutineWorkspace:
                             "tool_name": item["tool_name"],
                             "tool_call_id": "",
                         }
-                        for item in normalized
+                        for item in bridge_calls
                     ]
-                    return self._restore_raw_result_order(blocked_results, normalized)
+                    for position, result in zip(bridge_positions, blocked_results):
+                        local_slots[position] = result
+                    ordered = [result for result in local_slots if result is not None]
+                    self.observe_environment(ordered)
+                    return ordered
 
-        parsed_slots: list[dict[str, Any] | None] = [None] * len(normalized)
+        parsed_slots: list[dict[str, Any] | None] = list(local_slots)
         uncached_calls: list[dict[str, Any]] = []
         uncached_indices: list[int] = []
         uncached_keys: list[str | None] = []
-        for index, call in enumerate(normalized):
+        for position, call in zip(bridge_positions, bridge_calls):
+            if parsed_slots[position] is not None:
+                continue
             cache_key = self._read_cache_key(call)
             cached = self._read_cache.get(cache_key) if cache_key is not None else None
             if cached is None:
                 uncached_calls.append(call)
-                uncached_indices.append(index)
+                uncached_indices.append(position)
                 uncached_keys.append(cache_key)
                 continue
             repeat_count = self._read_repeat_counts.get(cache_key, 0) + 1
@@ -5050,7 +5194,7 @@ class CoroutineWorkspace:
             repeated["cached"] = True
             repeated["repeat_count"] = repeat_count
             repeated["no_progress"] = True
-            parsed_slots[index] = repeated
+            parsed_slots[position] = repeated
             self.remember(
                 "last_no_progress",
                 {
@@ -5101,6 +5245,95 @@ class CoroutineWorkspace:
         ordered = self._restore_raw_result_order(parsed, normalized)
         self.observe_environment(ordered)
         return ordered
+
+    def _known_poi_location_lookup_result(
+        self,
+        call: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if call.get("tool_name") != "get_location_id_by_location_name":
+            return None
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return None
+        name = arguments.get("location")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        poi = self._unique_known_poi_by_name(name)
+        if poi is None:
+            return None
+        poi_id = poi.get("poi_id") or poi.get("id") or poi.get("navigation_id")
+        if not isinstance(poi_id, str) or not poi_id:
+            return None
+        result = {
+            "id": poi_id,
+            "location_id": poi_id,
+            "poi_id": poi_id,
+            "navigation_id": poi.get("navigation_id") or poi_id,
+            "name": poi.get("name") or name.strip(),
+            "category": poi.get("category"),
+            "is_poi": True,
+            "source": "known_poi",
+        }
+        self.remember(
+            "last_known_poi_location_lookup",
+            {
+                "requested_name": name.strip(),
+                "poi_id": poi_id,
+                "message": (
+                    "The requested name matches a previously grounded POI. "
+                    "Use its POI/navigation ID instead of a city-location lookup."
+                ),
+            },
+        )
+        return {
+            "status": "SUCCESS",
+            "tool_name": "get_location_id_by_location_name",
+            "tool_call_id": "",
+            "result": result,
+            "resolved_known_poi": True,
+        }
+
+    def _unique_known_poi_by_name(self, name: str) -> dict[str, Any] | None:
+        wanted = self._normalize_poi_selector_text(name)
+        if not wanted:
+            return None
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        candidates: list[dict[str, Any]] = []
+
+        def add(candidate: Any) -> None:
+            if isinstance(candidate, dict):
+                poi = candidate.get("poi") if isinstance(candidate.get("poi"), dict) else candidate
+                if isinstance(poi, dict):
+                    candidates.append(poi)
+
+        add(entities.get("selected_poi"))
+        add(entities.get("selected_charging_poi"))
+        last_pois = entities.get("last_pois")
+        if isinstance(last_pois, list):
+            for poi in last_pois:
+                add(poi)
+        pois_by_id = entities.get("pois_by_id")
+        if isinstance(pois_by_id, dict):
+            for poi in pois_by_id.values():
+                add(poi)
+
+        matches: dict[str, dict[str, Any]] = {}
+        for poi in candidates:
+            poi_name = poi.get("name")
+            if self._normalize_poi_selector_text(poi_name) != wanted:
+                continue
+            poi_id = poi.get("poi_id") or poi.get("id") or poi.get("navigation_id")
+            if not isinstance(poi_id, str) or not poi_id:
+                continue
+            normalized = copy.deepcopy(poi)
+            normalized.setdefault("poi_id", poi_id)
+            normalized.setdefault("navigation_id", poi_id)
+            matches[poi_id] = normalized
+        if len(matches) == 1:
+            return next(iter(matches.values()))
+        return None
 
     @staticmethod
     def _restore_raw_result_order(
@@ -5869,6 +6102,112 @@ class CoroutineWorkspace:
             "status": str(result.get("status") or "UNKNOWN"),
             "navigation_state": copy.deepcopy(persisted),
         }
+
+    def preflight_user_preferences(self) -> dict[str, Any]:
+        """Populate stable user preference facts before the model's first decision."""
+
+        self._ensure_scratchpad_shape()
+        existing = self.scratchpad["entities"].get("user_preferences")
+        if isinstance(existing, dict):
+            return {
+                "status": "CACHED",
+                "user_preferences": copy.deepcopy(existing),
+                "summary": copy.deepcopy(existing.get("summary") or []),
+                "requested_categories": copy.deepcopy(existing.get("requested_categories") or {}),
+            }
+        if not self.tool_available("get_user_preferences"):
+            return {"status": "SKIPPED", "reason": "preference tool unavailable"}
+
+        request = self._preflight_preference_categories()
+        if not request:
+            return {"status": "SKIPPED", "reason": "no supported preference categories"}
+
+        previous_source = self.last_source
+        try:
+            result = self._call_raw_tool_sync(
+                "get_user_preferences",
+                {"preference_categories": request},
+            )
+        finally:
+            self.last_source = previous_source
+
+        status = str(result.get("status") or "UNKNOWN")
+        if status != "SUCCESS":
+            return {"status": status, "result": copy.deepcopy(result)}
+
+        raw = result_value(result)
+        if isinstance(raw, dict) and raw.get("status") == "SUCCESS":
+            raw = {key: value for key, value in raw.items() if key != "status"}
+        summary = self._summarize_preference_facts(raw)
+        stored = {
+            "status": "SUCCESS",
+            "requested_categories": copy.deepcopy(request),
+            "preferences": copy.deepcopy(raw),
+            "summary": summary,
+        }
+        self.scratchpad["entities"]["user_preferences"] = stored
+        return {
+            "status": "SUCCESS",
+            "user_preferences": copy.deepcopy(stored),
+            "summary": copy.deepcopy(summary),
+            "requested_categories": copy.deepcopy(request),
+        }
+
+    def _preflight_preference_categories(self) -> dict[str, dict[str, bool]]:
+        """Request all preference leaves supported by the live tool schema."""
+
+        try:
+            schema = self.tool_schema("get_user_preferences")
+        except KeyError:
+            return {}
+        preference_arg = (schema.get("properties") or {}).get("preference_categories")
+        if not isinstance(preference_arg, dict):
+            return {}
+        categories = preference_arg.get("properties") or {}
+        request: dict[str, dict[str, bool]] = {}
+        for category_name, category_schema in categories.items():
+            if not isinstance(category_name, str) or not isinstance(category_schema, dict):
+                continue
+            subcategories = category_schema.get("properties") or {}
+            requested_subcategories = {
+                str(subcategory_name): True
+                for subcategory_name, subcategory_schema in subcategories.items()
+                if (
+                    isinstance(subcategory_name, str)
+                    and isinstance(subcategory_schema, dict)
+                    and subcategory_schema.get("type") == "boolean"
+                )
+            }
+            if requested_subcategories:
+                request[category_name] = requested_subcategories
+        return request
+
+    @staticmethod
+    def _summarize_preference_facts(raw: Any, *, limit: int = 24) -> list[str]:
+        """Flatten non-empty preference strings while preserving their category path."""
+
+        summary: list[str] = []
+
+        def collect(value: Any, path: tuple[str, ...]) -> None:
+            if len(summary) >= limit:
+                return
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    label = ".".join(path) if path else "preference"
+                    summary.append(f"{label}: {text}")
+                return
+            if isinstance(value, dict):
+                for key, inner in value.items():
+                    if isinstance(key, str):
+                        collect(inner, (*path, key))
+                return
+            if isinstance(value, list):
+                for inner in value:
+                    collect(inner, path)
+
+        collect(raw, ())
+        return summary
 
     def get_contact_details(
         self,
@@ -7787,6 +8126,252 @@ class CoroutineWorkspace:
             return {"status": "NOT_FOUND", "matches": [], "reason": "selector matched no route"}
         return {"status": "AMBIGUOUS", "matches": matches, "reason": "selector matched multiple routes"}
 
+    def select_route_by_user_preferences(
+        self,
+        routes: Any,
+        preference_text: str | list[str] | None = None,
+        record_selection: bool = True,
+    ) -> dict[str, Any]:
+        """Select a route using supported stored route-selection preferences."""
+
+        route_list = [self._normalize_route(route) for route in self._extract_routes(routes)]
+        if not route_list:
+            return {"status": "NOT_FOUND", "matches": [], "reason": "no routes available"}
+        if len(route_list) == 1:
+            return self.select_route(
+                route_list,
+                route_id=route_list[0].get("route_id"),
+                record_selection=record_selection,
+            )
+
+        preference_texts = self._route_preference_texts(preference_text)
+        if not preference_texts:
+            return {
+                "status": "UNAVAILABLE",
+                "matches": route_list,
+                "reason": "no stored route-selection preference is available",
+            }
+
+        preference_blob = " ".join(preference_texts).lower()
+        threshold = self._route_preference_threshold_minutes(preference_blob)
+        wants_fastest = "fastest" in preference_blob or "quickest" in preference_blob
+        wants_shortest = "shortest" in preference_blob
+        avoids_tolls = any(
+            phrase in preference_blob
+            for phrase in (
+                "without toll",
+                "no toll",
+                "avoid toll",
+                "avoids toll",
+                "does not include toll",
+                "don't include toll",
+                "do not include toll",
+                "toll-free",
+                "toll free",
+            )
+        )
+
+        chosen: dict[str, Any] | None = None
+        rule = "stored route preference"
+        if wants_fastest and avoids_tolls:
+            fastest = self._fastest_route(route_list)
+            no_toll_routes = [
+                route for route in route_list if not self._route_includes_toll(route)
+            ]
+            fastest_no_toll = self._fastest_route(no_toll_routes)
+            if threshold is not None and fastest is not None and fastest_no_toll is not None:
+                fastest_minutes = self._route_duration_minutes(fastest)
+                no_toll_minutes = self._route_duration_minutes(fastest_no_toll)
+                if (
+                    fastest_minutes is not None
+                    and no_toll_minutes is not None
+                    and no_toll_minutes <= fastest_minutes + threshold
+                ):
+                    chosen = fastest_no_toll
+                    rule = f"fastest no-toll route within {threshold} minutes of fastest"
+                else:
+                    chosen = fastest
+                    rule = f"overall fastest because no-toll route exceeds {threshold} minute threshold"
+            elif fastest_no_toll is not None:
+                chosen = fastest_no_toll
+                rule = "fastest route without toll roads"
+        elif avoids_tolls:
+            no_toll_routes = [
+                route for route in route_list if not self._route_includes_toll(route)
+            ]
+            if len(no_toll_routes) == 1:
+                chosen = no_toll_routes[0]
+                rule = "only route without toll roads"
+            elif len(no_toll_routes) > 1:
+                return {
+                    "status": "AMBIGUOUS",
+                    "matches": no_toll_routes,
+                    "reason": "stored preference excludes toll roads but multiple no-toll routes remain",
+                    "preference_texts": preference_texts,
+                }
+        elif wants_fastest:
+            chosen = self._fastest_route(route_list)
+            rule = "fastest route preference"
+        elif wants_shortest:
+            chosen = self._shortest_route(route_list)
+            rule = "shortest route preference"
+
+        if chosen is None:
+            return {
+                "status": "UNAVAILABLE",
+                "matches": route_list,
+                "reason": "stored route-selection preference could not be applied by this helper",
+                "preference_texts": preference_texts,
+            }
+
+        route_id = chosen.get("route_id")
+        selected = self.select_route(
+            route_list,
+            route_id=route_id if isinstance(route_id, str) else None,
+            record_selection=record_selection,
+        )
+        if selected.get("status") == "SUCCESS":
+            selected["preference_texts"] = preference_texts
+            selected["preference_rule"] = rule
+            selected_route = selected.get("route")
+            if isinstance(selected_route, dict):
+                self._store_preference_route_narration(route_list, selected_route, rule)
+        return selected
+
+    def _store_preference_route_narration(
+        self,
+        routes: list[dict[str, Any]],
+        selected_route: dict[str, Any],
+        rule: str,
+    ) -> None:
+        route_id = selected_route.get("route_id") or selected_route.get("id")
+        if not isinstance(route_id, str) or not route_id:
+            return
+        alternatives = max(0, len(routes) - 1)
+        via = _clean_string(selected_route.get("name_via") or selected_route.get("via"))
+        text = "I selected your preference-resolved route"
+        if not self._route_includes_toll(selected_route) and (
+            "no-toll" in rule or "without toll" in rule
+        ):
+            text += " without toll roads"
+        if via:
+            text += f" via {via}"
+        text += " for this segment"
+        if alternatives > 0:
+            verb = "is" if alternatives == 1 else "are"
+            plural = "" if alternatives == 1 else "s"
+            text += f"; there {verb} {alternatives} other option{plural}"
+        text += "."
+        if self._route_includes_toll(selected_route):
+            text += " It uses toll roads."
+        self._ensure_scratchpad_shape()
+        self.scratchpad["facts"]["pending_route_narration"] = text
+
+    def _route_preference_texts(self, preference_text: str | list[str] | None) -> list[str]:
+        if isinstance(preference_text, str) and preference_text.strip():
+            return [preference_text.strip()]
+        if isinstance(preference_text, list):
+            return [str(item).strip() for item in preference_text if str(item).strip()]
+
+        entities = self.scratchpad.get("entities", {})
+        stored = entities.get("user_preferences")
+        preferences = stored.get("preferences") if isinstance(stored, dict) else None
+        texts: list[str] = []
+        if isinstance(preferences, dict):
+            route_selection = (
+                preferences.get("navigation_and_routing", {})
+                if isinstance(preferences.get("navigation_and_routing"), dict)
+                else {}
+            ).get("route_selection")
+            if isinstance(route_selection, str) and route_selection.strip():
+                texts.append(route_selection.strip())
+            elif isinstance(route_selection, list):
+                texts.extend(str(item).strip() for item in route_selection if str(item).strip())
+        if not texts and isinstance(stored, dict):
+            summary = stored.get("summary")
+            if isinstance(summary, list):
+                texts.extend(
+                    str(item).split(":", 1)[-1].strip()
+                    for item in summary
+                    if "route_selection" in str(item) and str(item).strip()
+                )
+        return texts
+
+    @staticmethod
+    def _route_preference_threshold_minutes(text: str) -> int | None:
+        patterns = (
+            r"(?:not|no)\s+more\s+than\s+(\d+)\s+minutes?\s+longer\s+than\s+(?:the\s+)?fastest",
+            r"within\s+(\d+)\s+minutes?\s+of\s+(?:the\s+)?fastest",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1))
+        return None
+
+    @staticmethod
+    def _route_includes_toll(route: dict[str, Any]) -> bool:
+        if route.get("includes_toll") is True or route.get("has_tolls") is True:
+            return True
+        if route.get("tolls") not in (None, False, "", [], {}):
+            return True
+        road_types = route.get("road_types")
+        if isinstance(road_types, list):
+            return any("toll" in str(road_type).lower() for road_type in road_types)
+        return False
+
+    @staticmethod
+    def _route_duration_minutes(route: dict[str, Any]) -> int | None:
+        duration = route.get("duration_total_minutes")
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+            return int(duration)
+        hours = route.get("duration_hours")
+        minutes = route.get("duration_minutes")
+        if (
+            isinstance(hours, (int, float))
+            and not isinstance(hours, bool)
+            and isinstance(minutes, (int, float))
+            and not isinstance(minutes, bool)
+        ):
+            return int(hours) * 60 + int(minutes)
+        return None
+
+    @staticmethod
+    def _route_distance_km(route: dict[str, Any]) -> float | None:
+        distance = first_number_value(route.get("distance_km"), default=None)
+        if isinstance(distance, (int, float)) and not isinstance(distance, bool):
+            return float(distance)
+        distance = first_number_value(route.get("distance"), default=None)
+        if isinstance(distance, (int, float)) and not isinstance(distance, bool):
+            return float(distance)
+        return None
+
+    def _fastest_route(self, routes: list[dict[str, Any]]) -> dict[str, Any] | None:
+        candidates = [
+            (self._route_duration_minutes(route), str(route.get("route_id") or ""), route)
+            for route in routes
+        ]
+        timed = [item for item in candidates if item[0] is not None]
+        if timed:
+            return min(timed, key=lambda item: (int(item[0]), item[1]))[2]
+        selected = self.select_route(routes, alias="fastest", record_selection=False)
+        if selected.get("status") == "SUCCESS" and isinstance(selected.get("route"), dict):
+            return selected["route"]
+        return None
+
+    def _shortest_route(self, routes: list[dict[str, Any]]) -> dict[str, Any] | None:
+        candidates = [
+            (self._route_distance_km(route), str(route.get("route_id") or ""), route)
+            for route in routes
+        ]
+        measured = [item for item in candidates if item[0] is not None]
+        if measured:
+            return min(measured, key=lambda item: (float(item[0]), item[1]))[2]
+        selected = self.select_route(routes, alias="shortest", record_selection=False)
+        if selected.get("status") == "SUCCESS" and isinstance(selected.get("route"), dict):
+            return selected["route"]
+        return None
+
     @staticmethod
     def _normalize_poi_selector_text(value: Any) -> str:
         text = _clean_string(value) or ""
@@ -7889,6 +8474,121 @@ class CoroutineWorkspace:
             "matches": copy.deepcopy(matches),
             "reason": "selector matched multiple POIs",
         }
+
+    def select_poi_at_location_open_at_route_arrival(
+        self,
+        location_id: str,
+        category_poi: str,
+        route: Any = None,
+        route_id: str | None = None,
+        routes: Any = None,
+        start_id: str | None = None,
+        record_selection: bool = True,
+    ) -> dict[str, Any]:
+        """Select POIs open at route-arrival time without guessing."""
+
+        gate_name = "select_poi_at_location_open_at_route_arrival"
+        if not isinstance(location_id, str) or not location_id.strip():
+            raise ValueError("location_id must be a grounded location id")
+        if not isinstance(category_poi, str) or not category_poi.strip():
+            raise ValueError("category_poi must be a non-empty POI category")
+        location_id = location_id.strip()
+        category_poi = category_poi.strip()
+
+        route_fact = self._resolve_route_for_arrival_poi(
+            location_id=location_id,
+            route=route,
+            route_id=route_id,
+            routes=routes,
+            start_id=start_id,
+        )
+        if route_fact.get("status") != "SUCCESS":
+            return route_fact
+        route_value = route_fact.get("route")
+        if not isinstance(route_value, dict):
+            return {
+                "status": "UNAVAILABLE",
+                "reason": "route facts for arrival-time POI selection are unavailable",
+            }
+        arrival = self._arrival_time_for_route(route_value)
+        if arrival.get("status") != "SUCCESS":
+            return arrival
+
+        call = (
+            "search_poi_at_location",
+            {"location_id": location_id, "category_poi": category_poi},
+        )
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "search POIs open at route arrival",
+            [call],
+        )
+        if blocker:
+            return blocker
+        result = self._call_raw_tool_sync(*call)
+        if result.get("status") != "SUCCESS":
+            return {"status": "FAILED_TOOL_RESULT", "result": result}
+
+        pois = self._summarize_pois(result, call[1])
+        arrival_minute_of_day = int(arrival["hour"]) * 60 + int(arrival["minute"])
+        open_pois: list[dict[str, Any]] = []
+        closed_pois: list[dict[str, Any]] = []
+        unknown_opening_pois: list[dict[str, Any]] = []
+        for poi in pois:
+            if not isinstance(poi, dict) or poi.get("_truncated"):
+                continue
+            opening_hours = poi.get("opening_hours")
+            status = self._poi_open_status_at_minutes(opening_hours, arrival_minute_of_day)
+            enriched = copy.deepcopy(poi)
+            enriched["open_at_arrival"] = status
+            enriched["arrival_time"] = arrival.get("time_label")
+            if status is True:
+                open_pois.append(enriched)
+            elif status is False:
+                closed_pois.append(enriched)
+            else:
+                unknown_opening_pois.append(enriched)
+
+        report_base = {
+            "helper": gate_name,
+            "location_id": location_id,
+            "category_poi": category_poi,
+            "arrival": copy.deepcopy(arrival),
+            "route": copy.deepcopy(route_value),
+            "route_source": route_fact.get("source"),
+            "open_pois": copy.deepcopy(open_pois),
+            "closed_pois": copy.deepcopy(closed_pois),
+            "unknown_opening_pois": copy.deepcopy(unknown_opening_pois),
+            "searched_pois": copy.deepcopy(pois),
+        }
+
+        if len(open_pois) == 1:
+            selected = self.select_poi(open_pois, record_selection=record_selection)
+            if selected.get("status") == "SUCCESS":
+                selected_poi = selected.get("poi")
+                report = {
+                    **report_base,
+                    "status": "SUCCESS",
+                    "selected_poi": copy.deepcopy(selected_poi),
+                    "poi_id": selected.get("poi_id"),
+                    "navigation_id": selected.get("navigation_id"),
+                    "name": selected.get("name"),
+                }
+                self.remember_entity("last_open_at_arrival_poi", copy.deepcopy(report))
+                self._store_helper_report(gate_name, report)
+                return report
+            return selected
+
+        status = "NOT_FOUND" if not open_pois else "AMBIGUOUS"
+        reason = (
+            "no searched POI has opening hours covering route arrival"
+            if status == "NOT_FOUND"
+            else "multiple POIs are open at route arrival"
+        )
+        report = {**report_base, "status": status, "reason": reason}
+        self.remember_entity("last_open_at_arrival_poi", copy.deepcopy(report))
+        self._store_helper_report(gate_name, report)
+        return report
 
     def _remember_route_selection(
         self,
@@ -8391,6 +9091,43 @@ class CoroutineWorkspace:
         normalized["display"] = CoroutineWorkspace._route_display(normalized)
         return normalized
 
+    def _resolve_route_for_arrival_poi(
+        self,
+        *,
+        location_id: str,
+        route: Any = None,
+        route_id: str | None = None,
+        routes: Any = None,
+        start_id: str | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(route, dict):
+            normalized = self._normalize_route(route)
+            return {"status": "SUCCESS", "route": normalized, "source": "route"}
+        entities = self.scratchpad.get("entities", {})
+        selected = entities.get("selected_route")
+        if isinstance(selected, dict):
+            selected_route = selected.get("route")
+            selected_destination = selected.get("destination_id")
+            if not isinstance(selected_destination, str) and isinstance(selected_route, dict):
+                selected_destination = selected_route.get("destination_id")
+            if (
+                isinstance(selected_route, dict)
+                and isinstance(selected_destination, str)
+                and selected_destination == location_id
+            ):
+                return {
+                    "status": "SUCCESS",
+                    "route": self._normalize_route(selected_route),
+                    "source": "selected_route",
+                }
+        return self._resolve_route_for_arrival_weather(
+            destination_id=location_id,
+            route=route,
+            route_id=route_id,
+            routes=routes,
+            start_id=start_id,
+        )
+
     def _resolve_route_for_arrival_weather(
         self,
         *,
@@ -8493,9 +9230,32 @@ class CoroutineWorkspace:
             "day": int(day),
             "hour": (arrival_total // 60) % 24,
             "minute": arrival_total % 60,
+            "time_label": f"{(arrival_total // 60) % 24:02d}:{arrival_total % 60:02d}",
             "duration_total_minutes": int(duration),
             "route_id": route.get("route_id") or route.get("id"),
         }
+
+    @staticmethod
+    def _poi_open_status_at_minutes(opening_hours: Any, minute_of_day: int) -> bool | None:
+        if not isinstance(opening_hours, str) or not opening_hours.strip():
+            return None
+        windows = re.findall(
+            r"(\d{1,2}):(\d{2})h?\s*-\s*(\d{1,2}):(\d{2})h?",
+            opening_hours,
+        )
+        if not windows:
+            return None
+        minute_of_day = int(minute_of_day) % (24 * 60)
+        for start_hour, start_minute, end_hour, end_minute in windows:
+            start = int(start_hour) * 60 + int(start_minute)
+            end = int(end_hour) * 60 + int(end_minute)
+            if start == end:
+                return True
+            if end > start and start <= minute_of_day <= end:
+                return True
+            if end < start and (minute_of_day >= start or minute_of_day <= end):
+                return True
+        return False
 
     @staticmethod
     def _route_display(route: dict[str, Any]) -> str:
@@ -9325,8 +10085,10 @@ class BlockingPythonExecutor:
             "set_occupied_seat_heating": ws.set_occupied_seat_heating,
             "get_route_options": ws.get_route_options,
             "select_route": ws.select_route,
+            "select_route_by_user_preferences": ws.select_route_by_user_preferences,
             "select_poi": ws.select_poi,
             "get_weather_at_route_arrival": ws.get_weather_at_route_arrival,
+            "select_poi_at_location_open_at_route_arrival": ws.select_poi_at_location_open_at_route_arrival,
             "select_charging_plug": ws.select_charging_plug,
             "set_new_navigation_via_stop": ws.set_new_navigation_via_stop,
             "plan_charging_for_next_meeting": ws.plan_charging_for_next_meeting,
