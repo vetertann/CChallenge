@@ -77,6 +77,7 @@ WORKSPACE_HELPER_NAMES = (
     "get_distance_by_soc_value",
     "get_navigation_state",
     "get_contact_details",
+    "send_contact_details_to_contact",
     "get_next_calendar_entry",
     "defrost_front_window",
     "set_window_defrost_safe",
@@ -84,6 +85,8 @@ WORKSPACE_HELPER_NAMES = (
     "open_close_window_safe",
     "set_fog_lights_on_safe",
     "set_high_beams_on_safe",
+    "set_exterior_lights_safe",
+    "present_climate_comfort_options",
     "set_air_conditioning_on_safe",
     "close_known_windows_for_blocked_ac",
     "set_climate_temperature_safe",
@@ -91,13 +94,24 @@ WORKSPACE_HELPER_NAMES = (
     "increase_fan_speed",
     "decrease_fan_speed",
     "set_occupied_seat_heating",
+    "turn_off_unoccupied_seat_heating",
+    "set_occupied_reading_lights",
     "get_route_options",
     "select_route",
     "select_route_by_user_preferences",
     "select_poi",
     "get_weather_at_route_arrival",
+    "navigate_by_arrival_weather",
+    "navigate_to_poi_by_arrival_weather",
+    "navigate_to_poi_unless_arrival_weather",
+    "set_navigation_conditioned_on_arrival_weather",
     "select_poi_at_location_open_at_route_arrival",
     "select_charging_plug",
+    "find_charging_stop_on_active_route_by_soc",
+    "search_charging_stations_on_route",
+    "search_charging_stations_on_active_route",
+    "estimate_charging_stops_for_route_by_soc_window",
+    "set_navigation_via_route_stop_with_open_poi",
     "set_new_navigation_via_stop",
     "plan_charging_for_next_meeting",
     "call_selected_charging_provider",
@@ -114,6 +128,21 @@ WORKSPACE_HELPER_NAMES = (
 )
 
 KNOWN_CALL_NAMES = frozenset([*ALL_TOOL_NAMES, *WORKSPACE_HELPER_NAMES])
+
+SCRATCHPAD_ENTITY_ALIASES = frozenset(
+    {
+        "last_location_lookup",
+        "last_charging_specs_and_status",
+        "last_distance_by_soc",
+        "last_pois",
+        "last_routes",
+        "last_route_options",
+        "selected_charging_poi",
+        "selected_charging_plug",
+        "selected_poi",
+        "selected_route",
+    }
+)
 
 # Batch envelope fields the runtime controls; a helper's own top-level keys are
 # hoisted into the envelope for convenience EXCEPT these, so a helper field
@@ -733,6 +762,7 @@ class CoroutineWorkspace:
         self._read_cache: dict[str, dict[str, Any]] = {}
         self._read_repeat_counts: dict[str, int] = {}
         self._state_revision = 0
+        self._explicit_full_window_open_depth = 0
 
     @staticmethod
     def _new_scratchpad() -> dict[str, Any]:
@@ -766,6 +796,17 @@ class CoroutineWorkspace:
         for key, default in defaults.items():
             if key not in self.scratchpad or not isinstance(self.scratchpad[key], type(default)):
                 self.scratchpad[key] = default
+        self._sync_scratchpad_entity_aliases()
+
+    def _sync_scratchpad_entity_aliases(self) -> None:
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return
+        for key in SCRATCHPAD_ENTITY_ALIASES:
+            if key in entities:
+                self.scratchpad[key] = entities[key]
+            else:
+                self.scratchpad.pop(key, None)
 
     def remember(self, key: str, value: Any, section: str = "facts") -> Any:
         self._ensure_scratchpad_shape()
@@ -775,7 +816,10 @@ class CoroutineWorkspace:
         return value
 
     def remember_entity(self, key: str, value: Any) -> Any:
-        return self.remember(key, value, section="entities")
+        remembered = self.remember(key, value, section="entities")
+        if key in SCRATCHPAD_ENTITY_ALIASES:
+            self.scratchpad[key] = remembered
+        return remembered
 
     def register_preloaded_callable(self, value: Callable[..., Any], name: str) -> None:
         self._preloaded_callables[id(value)] = name
@@ -844,12 +888,14 @@ class CoroutineWorkspace:
         labels = [str(item.get("label", "a window")) for item in unknown_windows]
         if not labels:
             return ""
-        verb = "was" if len(labels) == 1 else "were"
-        target = "that window" if len(labels) == 1 else "those windows"
-        return (
-            f"The current position for {_human_join(labels)} {verb} unavailable, "
-            f"so I closed {target} before turning {action} on."
-        )
+        if len(labels) == 1:
+            label_text = labels[0]
+            return f"I closed the {label_text} that had an unknown position."
+        elif all(label.endswith(" window") for label in labels):
+            label_text = f"{_human_join([label[:-7] for label in labels])} windows"
+        else:
+            label_text = _human_join(labels)
+        return f"I closed the {label_text} that had unknown positions."
 
     def _store_helper_report(self, name: str, report: dict[str, Any]) -> dict[str, Any]:
         self.remember(f"helper_report:{name}", report)
@@ -965,13 +1011,23 @@ class CoroutineWorkspace:
             "open_sunroof_safe": "open_sunroof_safe(percentage)",
             "set_fog_lights_on_safe": "set_fog_lights_on_safe()",
             "set_high_beams_on_safe": "set_high_beams_on_safe()",
+            "set_exterior_lights_safe": "set_exterior_lights_safe(intent)",
+            "present_climate_comfort_options": "present_climate_comfort_options(intent)",
             "get_distance_by_soc_value": (
                 "get_distance_by_soc_value(initial_state_of_charge, final_state_of_charge=0)"
             ),
             "get_navigation_state": "get_navigation_state(detailed_information=True)",
-            "get_contact_details": "get_contact_details(contact_ids, required_fields=None)",
+            "get_contact_details": (
+                "get_contact_details(contact_ids, required_fields=None, role=None)"
+            ),
+            "send_contact_details_to_contact": (
+                "send_contact_details_to_contact("
+                "recipient_contact_id, subject_contact_id, required_fields=None, intro=None)"
+            ),
             "get_next_calendar_entry": "get_next_calendar_entry()",
-            "set_air_conditioning_on_safe": "set_air_conditioning_on_safe()",
+            "set_air_conditioning_on_safe": (
+                "set_air_conditioning_on_safe(use_preferred_air_circulation=False)"
+            ),
             "close_known_windows_for_blocked_ac": "close_known_windows_for_blocked_ac(window=None)",
             "set_climate_temperature_safe": "set_climate_temperature_safe(seat_zone, temperature)",
             "sync_climate_zone": (
@@ -980,7 +1036,13 @@ class CoroutineWorkspace:
             ),
             "increase_fan_speed": "increase_fan_speed(steps=1)",
             "decrease_fan_speed": "decrease_fan_speed(steps=1)",
-            "set_occupied_seat_heating": "set_occupied_seat_heating(level=None, increase_by=None)",
+            "set_occupied_seat_heating": (
+                "set_occupied_seat_heating(level=None, increase_by=None, seat_zone=None)"
+            ),
+            "turn_off_unoccupied_seat_heating": "turn_off_unoccupied_seat_heating()",
+            "set_occupied_reading_lights": (
+                "set_occupied_reading_lights(on=True, include_rear=True)"
+            ),
             "get_route_options": "get_route_options(start_id, destination_id)",
             "select_route": (
                 "select_route(routes, route_id=None, alias=None, name_via=None, "
@@ -992,11 +1054,33 @@ class CoroutineWorkspace:
             ),
             "select_poi": (
                 "select_poi(pois=None, poi_id=None, name=None, category=None, "
-                "record_selection=True)"
+                "record_selection=True, role=None)"
             ),
             "get_weather_at_route_arrival": (
                 "get_weather_at_route_arrival(location_or_poi_id, route=None, route_id=None, "
                 "routes=None, start_id=None)"
+            ),
+            "navigate_by_arrival_weather": (
+                "navigate_by_arrival_weather("
+                "primary_destination_id, fallback_destination_id, avoid_conditions, "
+                "route_prefer='fastest', start_id=None)"
+            ),
+            "navigate_to_poi_by_arrival_weather": (
+                "navigate_to_poi_by_arrival_weather("
+                "primary_location_id, fallback_destination_id, category_poi, "
+                "avoid_conditions, poi_prefer='fastest_charging', "
+                "route_prefer='fastest', start_id=None)"
+            ),
+            "navigate_to_poi_unless_arrival_weather": (
+                "navigate_to_poi_unless_arrival_weather("
+                "primary_location_id, fallback_destination_id, category_poi, "
+                "avoid_conditions, poi_prefer='fastest_charging', "
+                "route_prefer='fastest', start_id=None)"
+            ),
+            "set_navigation_conditioned_on_arrival_weather": (
+                "set_navigation_conditioned_on_arrival_weather("
+                "primary_destination_id, fallback_destination_id, avoid_conditions, "
+                "route_prefer='fastest', start_id=None)"
             ),
             "select_poi_at_location_open_at_route_arrival": (
                 "select_poi_at_location_open_at_route_arrival(location_id, category_poi, "
@@ -1004,6 +1088,30 @@ class CoroutineWorkspace:
             ),
             "select_charging_plug": (
                 "select_charging_plug(pois=None, require_available=False)"
+            ),
+            "find_charging_stop_on_active_route_by_soc": (
+                "find_charging_stop_on_active_route_by_soc("
+                "reserve_state_of_charge, route_id=None, require_available=False)"
+            ),
+            "search_charging_stations_on_route": (
+                "search_charging_stations_on_route("
+                "route_id, at_kilometer, require_available=False)"
+            ),
+            "search_charging_stations_on_active_route": (
+                "search_charging_stations_on_active_route("
+                "at_kilometer, route_id=None, require_available=False)"
+            ),
+            "estimate_charging_stops_for_route_by_soc_window": (
+                "estimate_charging_stops_for_route_by_soc_window("
+                "destination_id, charge_from_state_of_charge, charge_to_state_of_charge, "
+                "start_id=None, route_prefer=None)"
+            ),
+            "set_navigation_via_route_stop_with_open_poi": (
+                "set_navigation_via_route_stop_with_open_poi("
+                "destination_id, stop_category_poi, companion_category_poi, "
+                "window_start_hour, window_start_minute, window_end_hour, "
+                "window_end_minute, start_id=None, route_prefer='fastest', "
+                "candidate_kilometers=None)"
             ),
             "set_new_navigation_via_stop": (
                 "set_new_navigation_via_stop(stop_id, final_destination_id, "
@@ -1084,16 +1192,18 @@ class CoroutineWorkspace:
         if tool_name == "get_contact_details":
             return {
                 "name": "get_contact_details",
-                "signature": "get_contact_details(contact_ids, required_fields=None)",
+                "signature": "get_contact_details(contact_ids, required_fields=None, role=None)",
                 "confirmation_required": False,
                 "description": (
                     "Built-in read-only helper. Calls get_contact_information and normalizes the "
                     "contact-ID-keyed result into contacts, by_id, and first, with flat name "
                     "aliases for nested name objects. Pass required_fields such as ['email'] or "
-                    "['phone_number'] so unavailable response fields are reported directly."
+                    "['phone_number'] so unavailable response fields are reported directly. Pass "
+                    "an explicit role such as email_recipient or contact_details_subject when "
+                    "multiple contacts have different roles in the same email task."
                 ),
                 "required_arguments": ["contact_ids"],
-                "optional_arguments": ["required_fields"],
+                "optional_arguments": ["required_fields", "role"],
                 "schema": {
                     "type": "object",
                     "required": ["contact_ids"],
@@ -1109,11 +1219,61 @@ class CoroutineWorkspace:
                             "default": None,
                             "description": "Contact fields required for the next action.",
                         },
+                        "role": {
+                            "type": ["string", "null"],
+                            "default": None,
+                            "description": (
+                                "Optional model-resolved role for this contact in the current "
+                                "plan, such as email_recipient or contact_details_subject."
+                            ),
+                        },
                     },
                 },
                 "argument_descriptions": {
                     "contact_ids": "Grounded contact IDs to retrieve.",
                     "required_fields": "Fields required for the next action, such as email.",
+                    "role": (
+                        "Optional explicit role for the contact in this task; do not derive "
+                        "it from raw text inside the helper."
+                    ),
+                },
+            }
+        if tool_name == "send_contact_details_to_contact":
+            return {
+                "name": "send_contact_details_to_contact",
+                "signature": (
+                    "send_contact_details_to_contact("
+                    "recipient_contact_id, subject_contact_id, required_fields=None, intro=None)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper, not a direct evaluator tool. For requests to send "
+                    "one contact's details to another contact, keeps the recipient contact and the "
+                    "subject contact in separate explicit arguments, reads both contacts, builds a "
+                    "grounded details message, then routes through the normal send_email confirmation "
+                    "gate. It does not inspect raw user text or choose the contacts itself."
+                ),
+                "required_arguments": ["recipient_contact_id", "subject_contact_id"],
+                "optional_arguments": ["required_fields", "intro"],
+                "schema": {
+                    "type": "object",
+                    "required": ["recipient_contact_id", "subject_contact_id"],
+                    "properties": {
+                        "recipient_contact_id": {"type": "string"},
+                        "subject_contact_id": {"type": "string"},
+                        "required_fields": {
+                            "type": ["array", "null"],
+                            "items": {"type": "string"},
+                            "default": None,
+                        },
+                        "intro": {"type": ["string", "null"], "default": None},
+                    },
+                },
+                "argument_descriptions": {
+                    "recipient_contact_id": "Grounded contact ID that should receive the email.",
+                    "subject_contact_id": "Grounded contact ID whose details should be included.",
+                    "required_fields": "Optional subject fields to require, such as phone_number or email.",
+                    "intro": "Optional message prefix chosen by the model.",
                 },
             }
         if tool_name == "get_next_calendar_entry":
@@ -1203,18 +1363,20 @@ class CoroutineWorkspace:
         if tool_name == "open_sunroof_safe":
             return {
                 "name": "open_sunroof_safe",
-                "signature": "open_sunroof_safe(percentage)",
+                "signature": "open_sunroof_safe(percentage, target_is_explicit=False)",
                 "confirmation_required": False,
                 "description": (
                     "Built-in workspace helper for setting the sunroof position under policies "
-                    "005 and 008/009. It checks sunshade state, opens the sunshade in parallel "
+                    "005 and 008/009. Call it only after the target percentage is resolved. "
+                    "It checks sunshade state, opens the sunshade in parallel "
                     "when needed, checks weather at the current policy location/time before "
                     "opening, stores pending confirmation for unsafe weather, and emits a "
                     "missing-capability limitation if any required evaluator tool or parameter "
-                    "is unavailable."
+                    "is unavailable. Raw/default full-open targets are treated as unresolved "
+                    "unless target_is_explicit=True."
                 ),
                 "required_arguments": ["percentage"],
-                "optional_arguments": [],
+                "optional_arguments": ["target_is_explicit"],
                 "schema": {
                     "type": "object",
                     "required": ["percentage"],
@@ -1224,27 +1386,40 @@ class CoroutineWorkspace:
                             "minimum": 0,
                             "maximum": 100,
                             "description": "Target absolute sunroof position percentage.",
-                        }
+                        },
+                        "target_is_explicit": {
+                            "type": "boolean",
+                            "description": (
+                                "True only when this exact sunroof percentage came from the "
+                                "user, policy, or a resolved follow-up."
+                            ),
+                        },
                     },
                 },
                 "argument_descriptions": {
                     "percentage": "Target absolute sunroof position percentage from 0 to 100.",
+                    "target_is_explicit": (
+                        "Set true only when this exact sunroof percentage is grounded by "
+                        "the user, policy, or a resolved follow-up."
+                    ),
                 },
             }
         if tool_name == "open_close_window_safe":
             return {
                 "name": "open_close_window_safe",
-                "signature": "open_close_window_safe(window, percentage)",
+                "signature": "open_close_window_safe(window, percentage, target_is_explicit=False)",
                 "confirmation_required": False,
                 "description": (
                     "Built-in workspace helper for moving a window under policy 007. "
+                    "Call it only after the target window and percentage are resolved. "
                     "For target positions above 25%, it reads AC state first. If AC is "
                     "known on, or if AC state was checked but unavailable, it asks for "
                     "explicit confirmation with the intended window and percentage "
-                    "before moving the window. Otherwise it calls open_close_window."
+                    "before moving the window. Raw/default full-open calls are treated "
+                    "as unresolved unless target_is_explicit=True."
                 ),
                 "required_arguments": ["window", "percentage"],
-                "optional_arguments": [],
+                "optional_arguments": ["target_is_explicit"],
                 "schema": {
                     "type": "object",
                     "required": ["window", "percentage"],
@@ -1266,11 +1441,22 @@ class CoroutineWorkspace:
                             "minimum": 0,
                             "maximum": 100,
                         },
+                        "target_is_explicit": {
+                            "type": "boolean",
+                            "description": (
+                                "True only when the user, policy, or a resolved follow-up "
+                                "explicitly selected this exact percentage."
+                            ),
+                        },
                     },
                 },
                 "argument_descriptions": {
                     "window": "Window enum or normalized window label.",
                     "percentage": "Target absolute window position from 0 to 100.",
+                    "target_is_explicit": (
+                        "Set true only when this exact percentage is grounded by the "
+                        "user, policy, or a resolved follow-up."
+                    ),
                 },
             }
         if tool_name == "set_fog_lights_on_safe":
@@ -1305,10 +1491,79 @@ class CoroutineWorkspace:
                 "schema": {"type": "object", "required": [], "properties": {}},
                 "argument_descriptions": {},
             }
+        if tool_name == "set_exterior_lights_safe":
+            return {
+                "name": "set_exterior_lights_safe",
+                "signature": "set_exterior_lights_safe(intent)",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in policy helper for broad exterior-light requests after the model "
+                    "has resolved the intent. It does not inspect user text. Use "
+                    "intent='improve_visibility' for broad safety/visibility lighting where "
+                    "fog lights are the resolved policy action, intent='turn_on_headlights' "
+                    "for state-aware low/high-beam handling, and "
+                    "intent='turn_off_exterior_lights' to read exterior-light state and turn "
+                    "off only lights known to be on."
+                ),
+                "required_arguments": ["intent"],
+                "optional_arguments": [],
+                "schema": {
+                    "type": "object",
+                    "required": ["intent"],
+                    "properties": {
+                        "intent": {
+                            "type": "string",
+                            "enum": [
+                                "improve_visibility",
+                                "turn_on_headlights",
+                                "turn_off_exterior_lights",
+                            ],
+                        }
+                    },
+                },
+                "argument_descriptions": {
+                    "intent": (
+                        "Explicit model-resolved intent. Do not pass raw user text."
+                    ),
+                },
+            }
+        if tool_name == "present_climate_comfort_options":
+            return {
+                "name": "present_climate_comfort_options",
+                "signature": "present_climate_comfort_options(intent)",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in response helper for broad comfort requests after the model has "
+                    "resolved the intent. It does not inspect raw user text and performs no "
+                    "side effects. Use intent='too_warm' to offer cooling options such as "
+                    "lowering temperature, reducing seat heating, increasing fan speed, or "
+                    "turning on AC. Use intent='stuffy_air' to offer airflow options such as "
+                    "increasing fan speed, changing airflow direction, changing circulation, "
+                    "or turning on AC. After the user chooses, call the appropriate setter or "
+                    "safe helper with the explicit value they provide."
+                ),
+                "required_arguments": ["intent"],
+                "optional_arguments": [],
+                "schema": {
+                    "type": "object",
+                    "required": ["intent"],
+                    "properties": {
+                        "intent": {
+                            "type": "string",
+                            "enum": ["too_warm", "stuffy_air"],
+                        }
+                    },
+                },
+                "argument_descriptions": {
+                    "intent": (
+                        "Explicit model-resolved comfort intent. Do not pass raw user text."
+                    ),
+                },
+            }
         if tool_name == "set_air_conditioning_on_safe":
             return {
                 "name": "set_air_conditioning_on_safe",
-                "signature": "set_air_conditioning_on_safe()",
+                "signature": "set_air_conditioning_on_safe(use_preferred_air_circulation=False)",
                 "confirmation_required": False,
                 "description": (
                     "Built-in workspace helper for turning AC on under CAR-bench policy 011. "
@@ -1316,12 +1571,27 @@ class CoroutineWorkspace:
                     "than 20%, closes each controllable window whose current position is unknown, "
                     "sets fan speed to 1 if currently 0, turns AC on, remembers which windows it "
                     "adjusted, and emits a limitation response if required evaluator tools are "
-                    "missing."
+                    "missing. Pass use_preferred_air_circulation=True only when the model has "
+                    "explicitly resolved that the request asks for stored circulation preference."
                 ),
                 "required_arguments": [],
-                "optional_arguments": [],
-                "schema": {"type": "object", "required": [], "properties": {}},
-                "argument_descriptions": {},
+                "optional_arguments": ["use_preferred_air_circulation"],
+                "schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "use_preferred_air_circulation": {
+                            "type": "boolean",
+                            "default": False,
+                        }
+                    },
+                },
+                "argument_descriptions": {
+                    "use_preferred_air_circulation": (
+                        "Explicit model-resolved flag. Do not infer it inside the helper "
+                        "from raw user text."
+                    ),
+                },
             }
         if tool_name == "close_known_windows_for_blocked_ac":
             return {
@@ -1434,6 +1704,23 @@ class CoroutineWorkspace:
                     "steps": "Positive number of fan-speed levels to change; defaults to 1.",
                 },
             }
+        if tool_name == "turn_off_unoccupied_seat_heating":
+            return {
+                "name": "turn_off_unoccupied_seat_heating",
+                "signature": "turn_off_unoccupied_seat_heating()",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper for energy-saving seat-heating cleanup. "
+                    "It reads seat occupancy and current seat-heating levels, then calls "
+                    "set_seat_heating(level=0, seat_zone=...) only for heatable front seats "
+                    "that are currently unoccupied. It does not infer the request from raw "
+                    "user text and does not change occupied seats."
+                ),
+                "required_arguments": [],
+                "optional_arguments": [],
+                "schema": {"type": "object", "required": [], "properties": {}},
+                "argument_descriptions": {},
+            }
         if tool_name == "get_route_options":
             return {
                 "name": "get_route_options",
@@ -1523,7 +1810,7 @@ class CoroutineWorkspace:
                 "name": "select_poi",
                 "signature": (
                     "select_poi(pois=None, poi_id=None, name=None, category=None, "
-                    "record_selection=True)"
+                    "record_selection=True, role=None)"
                 ),
                 "confirmation_required": False,
                 "description": (
@@ -1533,7 +1820,14 @@ class CoroutineWorkspace:
                     "the returned `poi` or `navigation_id` to charging, routing, or calling helpers."
                 ),
                 "required_arguments": [],
-                "optional_arguments": ["pois", "poi_id", "name", "category", "record_selection"],
+                "optional_arguments": [
+                    "pois",
+                    "poi_id",
+                    "name",
+                    "category",
+                    "record_selection",
+                    "role",
+                ],
                 "schema": {
                     "type": "object",
                     "required": [],
@@ -1543,6 +1837,7 @@ class CoroutineWorkspace:
                         "name": {"type": ["string", "null"]},
                         "category": {"type": ["string", "null"]},
                         "record_selection": {"type": "boolean", "default": True},
+                        "role": {"type": ["string", "null"]},
                     },
                 },
                 "argument_descriptions": {
@@ -1551,6 +1846,7 @@ class CoroutineWorkspace:
                     "name": "POI name the user selected, such as Ionity.",
                     "category": "Optional category constraint, such as charging_stations.",
                     "record_selection": "Whether to persist the selected POI for follow-up turns.",
+                    "role": "Optional explicit plan role such as charging_stop, meal_stop, destination, or companion; stores selected_<role>_poi without changing selection.",
                 },
             }
         if tool_name == "get_weather_at_route_arrival":
@@ -1586,6 +1882,145 @@ class CoroutineWorkspace:
                     "route_id": "Optional route id to resolve from remembered route facts.",
                     "routes": "Optional route options/list; fastest is used if no explicit route is supplied.",
                     "start_id": "Optional route start id; defaults to policy_location_id().",
+                },
+            }
+        if tool_name in {
+            "navigate_by_arrival_weather",
+            "set_navigation_conditioned_on_arrival_weather",
+        }:
+            helper_name = str(tool_name)
+            return {
+                "name": helper_name,
+                "signature": (
+                    f"{helper_name}("
+                    "primary_destination_id, fallback_destination_id, avoid_conditions, "
+                    "route_prefer='fastest', start_id=None)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper for navigation requests like 'go to A unless "
+                    "arrival weather there has condition X, otherwise go to B'. It looks up "
+                    "routes to the primary destination, checks weather at primary route-arrival "
+                    "time, then either sets navigation to the primary route or to the fallback "
+                    "route. The model supplies the grounded destination ids, blocked weather "
+                    "condition words such as rain or hail, and any resolved route preference. "
+                    "The helper does not inspect raw user text."
+                ),
+                "required_arguments": [
+                    "primary_destination_id",
+                    "fallback_destination_id",
+                    "avoid_conditions",
+                ],
+                "optional_arguments": ["route_prefer", "start_id"],
+                "schema": {
+                    "type": "object",
+                    "required": [
+                        "primary_destination_id",
+                        "fallback_destination_id",
+                        "avoid_conditions",
+                    ],
+                    "properties": {
+                        "primary_destination_id": {"type": "string"},
+                        "fallback_destination_id": {"type": "string"},
+                        "avoid_conditions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "route_prefer": {
+                            "type": ["string", "null"],
+                            "default": "fastest",
+                        },
+                        "start_id": {"type": ["string", "null"]},
+                    },
+                },
+                "argument_descriptions": {
+                    "primary_destination_id": "Grounded id for the first-choice destination.",
+                    "fallback_destination_id": "Grounded id for the fallback destination.",
+                    "avoid_conditions": "Weather conditions that make the helper choose the fallback, e.g. ['rain', 'hail'].",
+                    "route_prefer": "Resolved route selector such as fastest or shortest; defaults to fastest when no preference is resolved.",
+                    "start_id": "Optional route start id; defaults to policy_location_id().",
+                },
+            }
+        if tool_name in {
+            "navigate_to_poi_by_arrival_weather",
+            "navigate_to_poi_unless_arrival_weather",
+        }:
+            helper_name = str(tool_name)
+            return {
+                "name": helper_name,
+                "signature": (
+                    f"{helper_name}("
+                    "primary_location_id, fallback_destination_id, category_poi, "
+                    "avoid_conditions, poi_prefer='fastest_charging', "
+                    "route_prefer='fastest', start_id=None)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper for requests like 'navigate to a POI in A "
+                    "unless arrival weather there has condition X, otherwise go to B'. It "
+                    "selects a route to the primary location to compute arrival weather, "
+                    "checks weather at that arrival time, and if blocked sets navigation to "
+                    "the fallback destination. If not blocked, it searches the model-supplied "
+                    "POI category at the primary location, selects the requested POI using "
+                    "the model-supplied poi_prefer such as fastest_charging, then sets "
+                    "navigation to that POI using the model-supplied route_prefer. It does "
+                    "not inspect raw user text."
+                ),
+                "required_arguments": [
+                    "primary_location_id",
+                    "fallback_destination_id",
+                    "category_poi",
+                    "avoid_conditions",
+                ],
+                "optional_arguments": [
+                    "poi_prefer",
+                    "route_prefer",
+                    "start_id",
+                    "poi_id",
+                    "poi_name",
+                    "require_available",
+                ],
+                "schema": {
+                    "type": "object",
+                    "required": [
+                        "primary_location_id",
+                        "fallback_destination_id",
+                        "category_poi",
+                        "avoid_conditions",
+                    ],
+                    "properties": {
+                        "primary_location_id": {"type": "string"},
+                        "fallback_destination_id": {"type": "string"},
+                        "category_poi": {"type": "string"},
+                        "avoid_conditions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "poi_prefer": {
+                            "type": ["string", "null"],
+                            "default": "fastest_charging",
+                        },
+                        "route_prefer": {
+                            "type": ["string", "null"],
+                            "default": "fastest",
+                        },
+                        "start_id": {"type": ["string", "null"]},
+                        "poi_id": {"type": ["string", "null"]},
+                        "poi_name": {"type": ["string", "null"]},
+                        "require_available": {"type": "boolean", "default": False},
+                    },
+                },
+                "argument_descriptions": {
+                    "primary_location_id": "Grounded location id for the first-choice city/location.",
+                    "fallback_destination_id": "Grounded id for the fallback navigation destination.",
+                    "category_poi": "POI category to search at the primary location if weather allows it.",
+                    "avoid_conditions": "Weather conditions that make the helper choose the fallback, e.g. ['rain', 'hail'].",
+                    "poi_prefer": "Resolved POI selector such as fastest_charging, highest_power, or unique.",
+                    "route_prefer": "Resolved route selector such as fastest or shortest; defaults to fastest.",
+                    "start_id": "Optional route start id; defaults to policy_location_id().",
+                    "poi_id": "Optional grounded POI id if the model already selected a specific POI.",
+                    "poi_name": "Optional grounded POI name selector from official POI results.",
+                    "require_available": "For charging POIs, require an available plug only when explicitly resolved.",
                 },
             }
         if tool_name == "select_poi_at_location_open_at_route_arrival":
@@ -1652,6 +2087,280 @@ class CoroutineWorkspace:
                 "argument_descriptions": {
                     "pois": "POI list or search_poi_at_location/search_poi_along_the_route result.",
                     "require_available": "If true, ignore occupied/maintenance plugs.",
+                },
+            }
+        if tool_name == "find_charging_stop_on_active_route_by_soc":
+            return {
+                "name": "find_charging_stop_on_active_route_by_soc",
+                "signature": (
+                    "find_charging_stop_on_active_route_by_soc("
+                    "reserve_state_of_charge, route_id=None, require_available=False)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in planning helper for active-route charging requests such as "
+                    "finding a charger where a stated battery reserve will be reached. "
+                    "The model must pass the resolved reserve SOC number, for example 15 "
+                    "for a 15% safety buffer. The helper reads active navigation, charging "
+                    "status, and official distance-by-SOC facts, converts current-location "
+                    "range into the correct active route segment, then calls "
+                    "search_poi_along_the_route. It does not inspect raw user text or infer "
+                    "the reserve SOC."
+                ),
+                "required_arguments": ["reserve_state_of_charge"],
+                "optional_arguments": ["route_id", "require_available"],
+                "schema": {
+                    "type": "object",
+                    "required": ["reserve_state_of_charge"],
+                    "properties": {
+                        "reserve_state_of_charge": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                        "route_id": {"type": ["string", "null"]},
+                        "require_available": {"type": "boolean", "default": False},
+                    },
+                },
+                "argument_descriptions": {
+                    "reserve_state_of_charge": (
+                        "Battery reserve percentage already resolved by the model, e.g. 15."
+                    ),
+                    "route_id": (
+                        "Optional active route segment id; omit to let the helper select "
+                        "the active segment where the reserve is reached."
+                    ),
+                    "require_available": "If true, select only currently available plugs.",
+                },
+            }
+        if tool_name == "search_charging_stations_on_active_route":
+            return {
+                "name": "search_charging_stations_on_active_route",
+                "signature": (
+                    "search_charging_stations_on_active_route("
+                    "at_kilometer, route_id=None, require_available=False)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in planning helper for active-trip charging-station searches at "
+                    "a resolved route kilometer, for example around 100 km from here. The "
+                    "model must pass the numeric kilometer. The helper reads active "
+                    "navigation, defaults to the first active route segment when route_id "
+                    "is omitted, calls search_poi_along_the_route, and stores selected "
+                    "charger/plug facts. It does not inspect raw user text."
+                ),
+                "required_arguments": ["at_kilometer"],
+                "optional_arguments": ["route_id", "require_available"],
+                "schema": {
+                    "type": "object",
+                    "required": ["at_kilometer"],
+                    "properties": {
+                        "at_kilometer": {
+                            "type": "number",
+                            "minimum": 0,
+                        },
+                        "route_id": {"type": ["string", "null"]},
+                        "require_available": {"type": "boolean", "default": False},
+                    },
+                },
+                "argument_descriptions": {
+                    "at_kilometer": (
+                        "Route kilometer already resolved by the model, e.g. 100."
+                    ),
+                    "route_id": (
+                        "Optional active route segment id. Omit for the current first "
+                        "active segment."
+                    ),
+                    "require_available": "If true, select only currently available plugs.",
+                },
+            }
+        if tool_name == "search_charging_stations_on_route":
+            return {
+                "name": "search_charging_stations_on_route",
+                "signature": (
+                    "search_charging_stations_on_route("
+                    "route_id, at_kilometer, require_available=False)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in planning helper for charging-station searches along a "
+                    "known route that may not be active navigation. The model must pass "
+                    "a grounded route_id and numeric route kilometer. The helper does "
+                    "not start navigation; it calls search_poi_along_the_route directly, "
+                    "optionally includes the live-supported availability filter, and "
+                    "stores selected charger/plug facts. It does not inspect raw user text."
+                ),
+                "required_arguments": ["route_id", "at_kilometer"],
+                "optional_arguments": ["require_available"],
+                "schema": {
+                    "type": "object",
+                    "required": ["route_id", "at_kilometer"],
+                    "properties": {
+                        "route_id": {"type": "string"},
+                        "at_kilometer": {
+                            "type": "number",
+                            "minimum": 0,
+                        },
+                        "require_available": {"type": "boolean", "default": False},
+                    },
+                },
+                "argument_descriptions": {
+                    "route_id": "Grounded route id from route lookup or active navigation.",
+                    "at_kilometer": (
+                        "Route kilometer already resolved by the model, e.g. 150."
+                    ),
+                    "require_available": "If true, select only currently available plugs.",
+                },
+            }
+        if tool_name == "estimate_charging_stops_for_route_by_soc_window":
+            return {
+                "name": "estimate_charging_stops_for_route_by_soc_window",
+                "signature": (
+                    "estimate_charging_stops_for_route_by_soc_window("
+                    "destination_id, charge_from_state_of_charge, charge_to_state_of_charge, "
+                    "start_id=None, route_prefer=None)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in planning helper for questions like how many charging stops are "
+                    "needed when repeatedly driving from one resolved SOC to another, for "
+                    "example charging to 80% and stopping again at 10%. The model must pass "
+                    "the resolved destination id, lower SOC, upper SOC, and any resolved route "
+                    "preference. The helper calls the real route lookup and get_distance_by_soc "
+                    "tools, then returns route distance, official range for the SOC window, and "
+                    "a simple ceiling-based stops estimate. It does not inspect raw user text."
+                ),
+                "required_arguments": [
+                    "destination_id",
+                    "charge_from_state_of_charge",
+                    "charge_to_state_of_charge",
+                ],
+                "optional_arguments": ["start_id", "route_prefer"],
+                "schema": {
+                    "type": "object",
+                    "required": [
+                        "destination_id",
+                        "charge_from_state_of_charge",
+                        "charge_to_state_of_charge",
+                    ],
+                    "properties": {
+                        "destination_id": {"type": "string"},
+                        "charge_from_state_of_charge": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                        "charge_to_state_of_charge": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 100,
+                        },
+                        "start_id": {"type": ["string", "null"]},
+                        "route_prefer": {"type": ["string", "null"]},
+                    },
+                },
+                "argument_descriptions": {
+                    "destination_id": "Grounded destination location id.",
+                    "charge_from_state_of_charge": (
+                        "Lower SOC percentage already resolved by the model, e.g. 10."
+                    ),
+                    "charge_to_state_of_charge": (
+                        "Upper SOC percentage already resolved by the model or stored preference, "
+                        "e.g. 80."
+                    ),
+                    "start_id": (
+                        "Optional grounded start location id; defaults to policy_location_id()."
+                    ),
+                    "route_prefer": (
+                        "Resolved route selector such as 'fastest' or 'shortest'. If omitted "
+                        "and multiple routes exist, the helper returns AMBIGUOUS instead of "
+                        "choosing for the model."
+                    ),
+                },
+            }
+        if tool_name == "set_navigation_via_route_stop_with_open_poi":
+            return {
+                "name": "set_navigation_via_route_stop_with_open_poi",
+                "signature": (
+                    "set_navigation_via_route_stop_with_open_poi("
+                    "destination_id, stop_category_poi, companion_category_poi, "
+                    "window_start_hour, window_start_minute, window_end_hour, "
+                    "window_end_minute, start_id=None, route_prefer='fastest', "
+                    "candidate_kilometers=None)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in navigation helper for requests that need an intermediate "
+                    "route stop of one POI category where another POI category is also "
+                    "available and open during a resolved time window. It looks up and "
+                    "selects the resolved route, derives or uses candidate route "
+                    "kilometers, searches both POI categories along that same route, "
+                    "pairs POIs at the same route position, checks the companion POI's "
+                    "opening hours at estimated arrival time, then sets navigation via "
+                    "the selected stop. It does not inspect raw user text."
+                ),
+                "required_arguments": [
+                    "destination_id",
+                    "stop_category_poi",
+                    "companion_category_poi",
+                    "window_start_hour",
+                    "window_start_minute",
+                    "window_end_hour",
+                    "window_end_minute",
+                ],
+                "optional_arguments": [
+                    "start_id",
+                    "route_prefer",
+                    "candidate_kilometers",
+                ],
+                "schema": {
+                    "type": "object",
+                    "required": [
+                        "destination_id",
+                        "stop_category_poi",
+                        "companion_category_poi",
+                        "window_start_hour",
+                        "window_start_minute",
+                        "window_end_hour",
+                        "window_end_minute",
+                    ],
+                    "properties": {
+                        "destination_id": {"type": "string"},
+                        "stop_category_poi": {"type": "string"},
+                        "companion_category_poi": {"type": "string"},
+                        "window_start_hour": {"type": "integer"},
+                        "window_start_minute": {"type": "integer"},
+                        "window_end_hour": {"type": "integer"},
+                        "window_end_minute": {"type": "integer"},
+                        "start_id": {"type": ["string", "null"]},
+                        "route_prefer": {"type": ["string", "null"], "default": "fastest"},
+                        "candidate_kilometers": {
+                            "type": ["array", "null"],
+                            "items": {"type": "number"},
+                        },
+                    },
+                },
+                "argument_descriptions": {
+                    "destination_id": "Grounded final destination location id.",
+                    "stop_category_poi": (
+                        "POI category for the intermediate stop, e.g. 'charging_stations'."
+                    ),
+                    "companion_category_poi": (
+                        "POI category that must be open at the same route position, "
+                        "e.g. 'fast_food'."
+                    ),
+                    "window_*": (
+                        "Resolved local route-arrival window for the stop, such as "
+                        "19, 0, 19, 45."
+                    ),
+                    "start_id": (
+                        "Optional grounded start location id; defaults to policy_location_id()."
+                    ),
+                    "route_prefer": "Resolved route selector, usually 'fastest'.",
+                    "candidate_kilometers": (
+                        "Optional explicit route kilometer buckets. Omit to derive buckets "
+                        "from route duration, route distance, policy_now(), and the window."
+                    ),
                 },
             }
         if tool_name == "set_new_navigation_via_stop":
@@ -1768,27 +2477,57 @@ class CoroutineWorkspace:
         if tool_name == "set_occupied_seat_heating":
             return {
                 "name": "set_occupied_seat_heating",
-                "signature": "set_occupied_seat_heating(level=None, increase_by=None)",
+                "signature": "set_occupied_seat_heating(level=None, increase_by=None, seat_zone=None)",
                 "confirmation_required": False,
                 "description": (
                     "Built-in workspace helper, not a direct evaluator tool. Reads seat occupancy "
-                    "and current seat-heating levels, then calls set_seat_heating for each occupied "
-                    "front seat (DRIVER/PASSENGER). Pass level for an absolute target or increase_by "
-                    "for a relative change."
+                    "and current seat-heating levels when needed, then calls set_seat_heating for "
+                    "each occupied front seat (DRIVER/PASSENGER). If seat_zone is explicitly supplied, "
+                    "it narrows the action to that front zone instead of all occupied seats. Pass level "
+                    "for an absolute target or increase_by for a relative change."
                 ),
                 "required_arguments": [],
-                "optional_arguments": ["level", "increase_by"],
+                "optional_arguments": ["level", "increase_by", "seat_zone"],
                 "schema": {
                     "type": "object",
                     "required": [],
                     "properties": {
                         "level": {"type": "integer", "minimum": 0, "maximum": 3},
                         "increase_by": {"type": "integer"},
+                        "seat_zone": {"type": "string", "enum": ["DRIVER", "PASSENGER"]},
                     },
                 },
                 "argument_descriptions": {
                     "level": "Absolute seat-heating level 0-3 for each occupied front seat.",
                     "increase_by": "Relative change applied to each occupied front seat's current level.",
+                    "seat_zone": "Optional explicit front zone. If supplied, set only DRIVER or PASSENGER.",
+                },
+            }
+        if tool_name == "set_occupied_reading_lights":
+            return {
+                "name": "set_occupied_reading_lights",
+                "signature": "set_occupied_reading_lights(on=True, include_rear=True)",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper, not a direct evaluator tool. Reads seat occupancy "
+                    "and calls set_reading_light once for each occupied canonical reading-light "
+                    "position. It maps rear seats to DRIVER_REAR/PASSENGER_REAR and never emits "
+                    "duplicate LEFT_REAR/RIGHT_REAR aliases. It does not infer the desired on/off "
+                    "state from raw user text; pass on=True or on=False explicitly."
+                ),
+                "required_arguments": [],
+                "optional_arguments": ["on", "include_rear"],
+                "schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "on": {"type": "boolean", "default": True},
+                        "include_rear": {"type": "boolean", "default": True},
+                    },
+                },
+                "argument_descriptions": {
+                    "on": "Desired reading-light state.",
+                    "include_rear": "Whether occupied rear seats should be included.",
                 },
             }
         if tool_name in WORKSPACE_HELPER_NAMES:
@@ -1974,6 +2713,10 @@ class CoroutineWorkspace:
         if nav_blocker is not None:
             self._respond_locked(nav_blocker)
             return
+        charging_blocker = self._unknown_charging_range_response(message)
+        if charging_blocker is not None:
+            self._respond_locked(charging_blocker)
+            return
         replacement_blocker = self._missing_destination_replacement_response(message)
         if replacement_blocker is not None:
             self._respond_locked(replacement_blocker)
@@ -1982,9 +2725,42 @@ class CoroutineWorkspace:
         if navigation_claim_blocker is not None:
             self._respond_locked(navigation_claim_blocker)
             return
+        email_claim_blocker = self._ungrounded_email_completion_response(message)
+        if email_claim_blocker is not None:
+            self._respond_locked(email_claim_blocker)
+            return
+        circulation_repair = self._preferred_air_circulation_response_repair(message)
+        if circulation_repair is not None:
+            message = circulation_repair
+        temperature_unit_repair = self._temperature_unit_response_repair(message)
+        if temperature_unit_repair is not None:
+            message = temperature_unit_repair
         message = self._append_response_obligations(message)
         message = self._append_pending_route_narration(message)
         self._response_text = self._safe_user_message(message)
+
+    def _temperature_unit_response_repair(self, message: str) -> str | None:
+        if not isinstance(message, str) or not message.strip():
+            return None
+        if not any(
+            isinstance(item, dict)
+            and item.get("tool_name") == "set_climate_temperature"
+            and str(item.get("status") or "").upper() == "SUCCESS"
+            for item in self._successful_mutations
+        ):
+            return None
+        lowered = message.lower()
+        if "celsius" in lowered or "°c" in lowered:
+            return None
+        if not re.search(r"\bdegrees?\b", lowered):
+            return None
+        repaired = re.sub(
+            r"\b(degrees?)\b(?!\s*(?:celsius|°c|\bc\b))",
+            r"\1 Celsius",
+            message,
+            flags=re.IGNORECASE,
+        )
+        return repaired if repaired != message else None
 
     def _add_response_obligation(
         self,
@@ -2043,27 +2819,85 @@ class CoroutineWorkspace:
         return output
 
     def _append_pending_route_narration(self, message: str) -> str:
-        """Append the policy-required route-selection sentence, once, if pending."""
+        """Append a grounded route-selection sentence, once, if pending."""
 
         facts = self.scratchpad.get("facts")
         narration = facts.get("pending_route_narration") if isinstance(facts, dict) else None
         if isinstance(facts, dict):
             facts.pop("pending_route_narration", None)
-        if not isinstance(narration, str) or not narration.strip():
+        if isinstance(narration, list):
+            output = message.strip()
+            lowered = output.lower()
+            for item in narration:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                cleaned = text.strip()
+                if cleaned.lower() in lowered:
+                    continue
+                offers_alternatives = item.get("offers_alternatives") is True
+                has_route_alternative_text = any(
+                    k in lowered
+                    for k in ("alternativ", "other option", "other route", "more route")
+                )
+                if offers_alternatives and has_route_alternative_text:
+                    continue
+                output = output.rstrip().rstrip(".") + ". " + cleaned
+                lowered = output.lower()
+            return output
+        if isinstance(narration, dict):
+            text = narration.get("text")
+            offers_alternatives = narration.get("offers_alternatives") is True
+        elif isinstance(narration, str):
+            text = narration
+            offers_alternatives = True
+        else:
+            return message
+        if not isinstance(text, str) or not text.strip():
+            return message
+        if self._message_presents_route_choice(message):
             return message
         lowered = message.lower()
-        # The policy gap the judge flags is failing to offer alternatives. Only
-        # skip if the model already offered them; otherwise append (even if the
-        # model mentioned "fastest", because the alternatives ask is missing).
-        if any(k in lowered for k in ("alternativ", "other option", "other route", "more route")):
+        has_route_alternative_text = any(
+            k in lowered
+            for k in ("alternativ", "other option", "other route", "more route")
+        )
+        if offers_alternatives and has_route_alternative_text:
             return message
-        return message.rstrip().rstrip(".") + ". " + narration.strip()
+        if not offers_alternatives and text.strip().lower() in lowered:
+            return message
+        return message.rstrip().rstrip(".") + ". " + text.strip()
 
     def _respond_locked(self, message: str) -> None:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("_respond_locked(message) requires a non-empty string")
         self._response_text = self._safe_user_message(message)
         self._response_locked = True
+
+    def _preferred_air_circulation_response_repair(self, message: str) -> str | None:
+        facts = self.scratchpad.get("facts")
+        mode = facts.get("preferred_air_circulation_mode") if isinstance(facts, dict) else None
+        if mode not in {"FRESH_AIR", "RECIRCULATION", "AUTO"}:
+            return None
+        lowered = str(message or "").casefold()
+        claims_auto = "circulation" in lowered and "auto" in lowered
+        claims_fresh = "circulation" in lowered and "fresh" in lowered
+        claims_recirc = "circulation" in lowered and (
+            "recirculation" in lowered or "recirculate" in lowered
+        )
+        contradicts = (
+            (mode == "FRESH_AIR" and (claims_auto or claims_recirc))
+            or (mode == "RECIRCULATION" and (claims_auto or claims_fresh))
+            or (mode == "AUTO" and (claims_fresh or claims_recirc))
+        )
+        if not contradicts:
+            return None
+        return (
+            "Air conditioning is on, and air circulation is set to your "
+            f"preferred {mode} mode."
+        )
 
     def _helper_message(self, message: str) -> None:
         """Record a successful helper's suggested sentence WITHOUT locking.
@@ -2143,35 +2977,6 @@ class CoroutineWorkspace:
         value = climate.get("fan_speed")
         return value is None or isinstance(value, UnknownToolResponseValue)
 
-    def _relative_fan_speed_direction_from_user_request(self) -> str | None:
-        text = self.last_user_message.lower()
-        if "fan" not in text:
-            return None
-        if any(
-            phrase in text
-            for phrase in (
-                "increase",
-                "raise",
-                "turn up",
-                "speed up",
-                "higher",
-                "boost",
-            )
-        ):
-            return "increase"
-        if any(
-            phrase in text
-            for phrase in (
-                "decrease",
-                "lower",
-                "turn down",
-                "reduce",
-                "drop",
-            )
-        ):
-            return "decrease"
-        return None
-
     @staticmethod
     def _message_requests_current_fan_speed(message: str) -> bool:
         text = message.lower()
@@ -2186,15 +2991,499 @@ class CoroutineWorkspace:
         )
 
     def _unknown_fan_speed_relative_response(self, message: str) -> str | None:
-        direction = self._relative_fan_speed_direction_from_user_request()
-        if direction is None:
-            return None
         climate = self._current_turn_climate_settings()
         if climate is None or not self._fan_speed_value_unavailable(climate):
             return None
         if not self._message_requests_current_fan_speed(message):
             return None
-        return self._unknown_fan_speed_relative_message(direction=direction)
+        return self._unknown_fan_speed_relative_message()
+
+    def _charging_range_unknown_message(self) -> str:
+        return (
+            "I can't determine whether the remaining range is enough or complete "
+            "charging-stop planning because I looked it up and the car system did "
+            "not provide the remaining range."
+        )
+
+    @staticmethod
+    def _charging_remaining_range_unavailable(payload: dict[str, Any]) -> bool:
+        if CoroutineWorkspace._parse_first_number(payload.get("remaining_range_km")) is not None:
+            return False
+        if "remaining_range" not in payload:
+            return True
+        value = payload.get("remaining_range")
+        return CoroutineWorkspace._parse_first_number(value) is None
+
+    def _record_unknown_charging_range(self, payload: dict[str, Any]) -> None:
+        self._ensure_scratchpad_shape()
+        self.scratchpad["facts"]["unknown_charging_range_turn"] = self.last_user_message
+        self.scratchpad["facts"]["unknown_charging_range_message"] = (
+            self._charging_range_unknown_message()
+        )
+        self.scratchpad["gates"]["charging_range_unknown"] = {
+            "status": "UNAVAILABLE",
+            "missing_response_fields": [
+                "result.get_charging_specs_and_status.remaining_range"
+            ],
+            "charging_status": copy.deepcopy(self._drop_unknown_values(payload)),
+        }
+
+    def _current_turn_unknown_charging_range(self) -> bool:
+        facts = self.scratchpad.get("facts")
+        if not isinstance(facts, dict):
+            return False
+        return facts.get("unknown_charging_range_turn") == self.last_user_message
+
+    def _unknown_charging_range_response(self, message: str) -> str | None:
+        if not self._current_turn_unknown_charging_range():
+            return None
+        lowered = str(message or "").casefold()
+        if (
+            "remaining range" in lowered
+            and any(term in lowered for term in ("unavailable", "did not provide", "can't determine", "cannot determine"))
+        ):
+            return None
+        if any(
+            term in lowered
+            for term in (
+                "unknown km",
+                "unknown kilometers",
+                "insufficient",
+                "sufficient for",
+                "range is sufficient",
+                "battery range is sufficient",
+                "without charging",
+                "no charging stops",
+                "without charging stops",
+                "enough for",
+                "need about",
+                "charging at",
+                "will take",
+                "to reach 100",
+            )
+        ):
+            return self._charging_range_unknown_message()
+        return None
+
+    @staticmethod
+    def _drop_unknown_values(value: Any) -> Any:
+        if isinstance(value, UnknownToolResponseValue):
+            return "unknown"
+        if isinstance(value, dict):
+            return {
+                key: CoroutineWorkspace._drop_unknown_values(inner)
+                for key, inner in value.items()
+            }
+        if isinstance(value, list):
+            return [CoroutineWorkspace._drop_unknown_values(inner) for inner in value]
+        return copy.deepcopy(value)
+
+    def _abort_if_unknown_charging_range_blocks(self, call: dict[str, Any]) -> None:
+        if not self._current_turn_unknown_charging_range():
+            return
+        tool_name = call.get("tool_name")
+        if tool_name not in {
+            "calculate_charging_time_by_soc",
+            "calculate_charging_soc_by_time",
+            "get_distance_by_soc",
+            "search_poi_at_location",
+            "search_poi_along_the_route",
+        }:
+            return
+        self._store_helper_report(
+            "charging_range_unknown",
+            {
+                "status": "UNAVAILABLE",
+                "helper": "charging_range_unknown",
+                "missing_response_fields": [
+                    "result.get_charging_specs_and_status.remaining_range"
+                ],
+                "blocked_tool": tool_name,
+                "message": self._charging_range_unknown_message(),
+            },
+        )
+        self._abort_with_response(self._charging_range_unknown_message())
+
+    def _abort_if_raw_full_window_open_needs_explicit_target(
+        self,
+        call: dict[str, Any],
+    ) -> None:
+        if call.get("tool_name") != "open_close_window":
+            return
+        if self._explicit_full_window_open_depth > 0:
+            return
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return
+        target = first_number_value(arguments.get("percentage"))
+        if not isinstance(target, (int, float)) or float(target) < 100:
+            return
+        prompt = (
+            "What percentage should I open the window to? Please specify a "
+            "target from 0 to 100%."
+        )
+        gate_name = "open_close_window_safe"
+        self.scratchpad["gates"][gate_name] = {
+            "status": "NEEDS_CLARIFICATION",
+            "policy": "window_percentage",
+            "requested_window": arguments.get("window"),
+            "blocked_default_percentage": target,
+        }
+        self._store_helper_report(
+            gate_name,
+            {
+                "helper": gate_name,
+                "status": "NEEDS_CLARIFICATION",
+                "window": arguments.get("window"),
+                "blocked_default_percentage": target,
+                "message": prompt,
+            },
+        )
+        self._abort_with_response(prompt)
+
+    def _long_route_email_needs_charging_facts_result(
+        self,
+        call: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if call.get("tool_name") != "send_email":
+            return None
+        if not self.tool_available("get_charging_specs_and_status"):
+            return None
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        route = self._last_long_route_for_email_guard()
+        if route is None:
+            return None
+        charging_status = entities.get("last_charging_specs_and_status")
+        if isinstance(charging_status, dict):
+            return self._post_charge_email_needs_distance_by_soc_result(
+                route,
+                charging_status,
+            )
+        route_distance = first_number_value(route.get("distance_km"))
+        message = (
+            "Before requesting confirmation to send this long-route email, check "
+            "the vehicle charging status and remaining range so the email can "
+            "include whether charging stops are needed."
+        )
+        report = {
+            "helper": "long_route_email_charging_fact_guard",
+            "status": "NEEDS_MORE_FACTS",
+            "reason": "long-route email needs charging/range facts before confirmation",
+            "message": message,
+            "blocked_tool": "send_email",
+            "route_id": route.get("route_id") or route.get("id"),
+            "route_distance_km": route_distance,
+        }
+        self.scratchpad["gates"]["long_route_email_charging_fact_guard"] = report
+        self._store_helper_report("long_route_email_charging_fact_guard", report)
+        return {
+            "status": "NEEDS_MORE_FACTS",
+            "tool_name": "send_email",
+            "tool_call_id": "",
+            "result": report,
+            "message": message,
+        }
+
+    def _post_charge_email_needs_distance_by_soc_result(
+        self,
+        route: dict[str, Any],
+        charging_status: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not self.tool_available("get_distance_by_soc"):
+            return None
+        route_distance = self._parse_first_number(route.get("distance_km"))
+        remaining_range = self._parse_first_number(
+            charging_status.get("remaining_range_km")
+        )
+        if remaining_range is None:
+            remaining_range = self._parse_first_number(charging_status.get("remaining_range"))
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in (route_distance, remaining_range)
+        ):
+            return None
+        if float(route_distance) <= float(remaining_range):
+            return None
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        plan = entities.get("selected_charging_plan")
+        if not isinstance(plan, dict):
+            return None
+        target_soc = self._parse_first_number(plan.get("target_state_of_charge"))
+        if not isinstance(target_soc, (int, float)) or isinstance(target_soc, bool):
+            return None
+        if self._has_distance_by_soc_fact(target_soc, 0):
+            return None
+        message = (
+            "Before requesting confirmation to send this charging-route email, "
+            "check the official range after charging by calling "
+            f"get_distance_by_soc(initial_state_of_charge={target_soc:g}, "
+            "final_state_of_charge=0)."
+        )
+        report = {
+            "helper": "post_charge_email_distance_fact_guard",
+            "status": "NEEDS_MORE_FACTS",
+            "reason": (
+                "charging-route email needs official post-charge range before "
+                "confirmation"
+            ),
+            "message": message,
+            "blocked_tool": "send_email",
+            "route_id": route.get("route_id") or route.get("id"),
+            "route_distance_km": route_distance,
+            "current_remaining_range_km": remaining_range,
+            "target_state_of_charge": target_soc,
+        }
+        self.scratchpad["gates"]["post_charge_email_distance_fact_guard"] = report
+        self._store_helper_report("post_charge_email_distance_fact_guard", report)
+        return {
+            "status": "NEEDS_MORE_FACTS",
+            "tool_name": "send_email",
+            "tool_call_id": "",
+            "result": report,
+            "message": message,
+        }
+
+    def _has_distance_by_soc_fact(
+        self,
+        initial_state_of_charge: int | float,
+        final_state_of_charge: int | float,
+    ) -> bool:
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return False
+        candidates: list[Any] = []
+        last = entities.get("last_distance_by_soc")
+        if isinstance(last, dict):
+            candidates.append(last)
+        history = entities.get("distance_by_soc_history")
+        if isinstance(history, list):
+            candidates.extend(history)
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            initial = self._parse_first_number(candidate.get("initial_state_of_charge"))
+            final = self._parse_first_number(candidate.get("final_state_of_charge"))
+            distance = self._parse_first_number(candidate.get("distance_km"))
+            if not isinstance(distance, (int, float)) or isinstance(distance, bool):
+                continue
+            if _numbers_equal(initial, initial_state_of_charge) and _numbers_equal(
+                final,
+                final_state_of_charge,
+            ):
+                return True
+        return False
+
+    def _last_long_route_for_email_guard(self) -> dict[str, Any] | None:
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        options = entities.get("last_route_options")
+        routes: list[Any] = []
+        active_routes = entities.get("active_route_records")
+        if isinstance(active_routes, list):
+            routes.extend(active_routes)
+        applied_selection = entities.get("last_applied_route_selection")
+        if isinstance(applied_selection, dict):
+            applied_route = applied_selection.get("route")
+            if isinstance(applied_route, dict):
+                routes.append(applied_route)
+            else:
+                routes.append(applied_selection)
+        if isinstance(options, dict):
+            fastest = options.get("fastest")
+            if isinstance(fastest, dict):
+                routes.append(fastest)
+            option_routes = options.get("routes")
+            if isinstance(option_routes, list):
+                routes.extend(option_routes)
+        last_routes = entities.get("last_routes")
+        if isinstance(last_routes, list):
+            routes.extend(last_routes)
+        for route in routes:
+            if not isinstance(route, dict):
+                continue
+            distance = first_number_value(route.get("distance_km"))
+            if isinstance(distance, (int, float)) and float(distance) >= 300:
+                return route
+        return None
+
+    def _repair_charging_location_search_to_route(self, call: dict[str, Any]) -> dict[str, Any]:
+        if call.get("tool_name") != "search_poi_at_location":
+            return call
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return call
+        if "charg" not in str(arguments.get("category_poi") or "").casefold():
+            return call
+        route_context = self.scratchpad.get("entities", {}).get(
+            "last_route_edit_followup_route"
+        )
+        if not isinstance(route_context, dict):
+            return call
+        if route_context.get("turn") != self.last_user_message:
+            return call
+        route_id = route_context.get("route_id")
+        if not isinstance(route_id, str) or not route_id:
+            return call
+        kilometer = self._charging_search_kilometer_from_state(route_context)
+        if kilometer is None:
+            return call
+        repaired_arguments = {
+            "route_id": route_id,
+            "category_poi": arguments.get("category_poi"),
+            "at_kilometer": kilometer,
+        }
+        try:
+            search_schema = self.tool_schema("search_poi_along_the_route")
+        except KeyError:
+            search_schema = {}
+        search_properties = search_schema.get("properties", {}) if isinstance(search_schema, dict) else {}
+        if isinstance(search_properties, dict) and "filters" in search_properties:
+            repaired_arguments["filters"] = ["charging_stations::has_available_plug"]
+        self.scratchpad["gates"]["charging_location_search_guard"] = {
+            "status": "REPAIRED_TO_ROUTE_SEARCH",
+            "from_tool": "search_poi_at_location",
+            "to_tool": "search_poi_along_the_route",
+            "route_id": route_id,
+            "at_kilometer": kilometer,
+        }
+        return {
+            **call,
+            "tool_name": "search_poi_along_the_route",
+            "arguments": repaired_arguments,
+        }
+
+    def _charging_search_kilometer_from_state(
+        self,
+        route_context: dict[str, Any],
+    ) -> int | None:
+        charging = self.scratchpad.get("entities", {}).get(
+            "last_charging_specs_and_status"
+        )
+        remaining = None
+        if isinstance(charging, dict):
+            remaining = self._parse_first_number(charging.get("remaining_range_km"))
+            if remaining is None:
+                remaining = self._parse_first_number(charging.get("remaining_range"))
+            if remaining is None and self._charging_remaining_range_unavailable(charging):
+                return None
+        if isinstance(remaining, (int, float)) and remaining > 0:
+            return max(1, int(math.floor(float(remaining) / 50.0) * 50))
+        route_id = route_context.get("route_id")
+        route = self._route_record_for_id(route_id) if isinstance(route_id, str) else None
+        distance = self._parse_first_number(route.get("distance_km")) if isinstance(route, dict) else None
+        if isinstance(distance, (int, float)) and distance > 0:
+            return max(1, int(float(distance) / 2))
+        return None
+
+    def _repair_later_segment_charging_search_kilometer(
+        self,
+        call: dict[str, Any],
+    ) -> dict[str, Any]:
+        if call.get("tool_name") != "search_poi_along_the_route":
+            return call
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return call
+        if "charg" not in str(arguments.get("category_poi") or "").casefold():
+            return call
+        route_id = arguments.get("route_id")
+        if not isinstance(route_id, str) or not route_id:
+            return call
+        requested_km = self._parse_first_number(arguments.get("at_kilometer"))
+        if not isinstance(requested_km, (int, float)) or isinstance(requested_km, bool):
+            return call
+        active_route_ids = self._active_route_ids_in_order()
+        if route_id not in active_route_ids:
+            return call
+        route_index = active_route_ids.index(route_id)
+        if route_index <= 0:
+            return call
+        global_distance = self._latest_distance_by_soc_km()
+        if not isinstance(global_distance, (int, float)) or isinstance(global_distance, bool):
+            return call
+        global_tolerance = max(5.0, abs(float(global_distance)) * 0.02)
+        if abs(float(requested_km) - float(global_distance)) > global_tolerance:
+            return call
+
+        prior_distance = self._route_distance_sum(active_route_ids[:route_index])
+        if not isinstance(prior_distance, (int, float)) or isinstance(prior_distance, bool):
+            return call
+        corrected_km = float(global_distance) - float(prior_distance)
+        if corrected_km <= 0:
+            corrected_km = 1.0
+        route = self._route_record_for_id(route_id)
+        route_distance = (
+            self._parse_first_number(route.get("distance_km"))
+            if isinstance(route, dict)
+            else None
+        )
+        if isinstance(route_distance, (int, float)) and not isinstance(route_distance, bool):
+            corrected_km = min(corrected_km, float(route_distance))
+        if abs(float(requested_km) - corrected_km) <= 5.0:
+            return call
+
+        repaired_arguments = dict(arguments, at_kilometer=round(corrected_km, 1))
+        self.scratchpad["gates"]["later_segment_charging_search_guard"] = {
+            "status": "REPAIRED_GLOBAL_DISTANCE_TO_SEGMENT_KM",
+            "route_id": route_id,
+            "from_at_kilometer": requested_km,
+            "to_at_kilometer": repaired_arguments["at_kilometer"],
+            "global_distance_km": global_distance,
+            "prior_segment_distance_km": prior_distance,
+        }
+        return {**call, "arguments": repaired_arguments}
+
+    def _active_route_ids_in_order(self) -> list[str]:
+        entities = self.scratchpad.get("entities", {})
+        state = entities.get("navigation_state") if isinstance(entities, dict) else None
+        route_ids = state.get("route_ids") if isinstance(state, dict) else None
+        if isinstance(route_ids, list):
+            ordered = [route_id for route_id in route_ids if isinstance(route_id, str)]
+            if ordered:
+                return ordered
+        active_records = entities.get("active_route_records") if isinstance(entities, dict) else None
+        if isinstance(active_records, list):
+            return [
+                route_id
+                for route in active_records
+                if isinstance(route, dict)
+                for route_id in [route.get("route_id") or route.get("id")]
+                if isinstance(route_id, str) and route_id
+            ]
+        return []
+
+    def _latest_distance_by_soc_km(self) -> int | float | None:
+        entities = self.scratchpad.get("entities", {})
+        if not isinstance(entities, dict):
+            return None
+        candidates: list[Any] = [entities.get("last_distance_by_soc")]
+        history = entities.get("distance_by_soc_history")
+        if isinstance(history, list):
+            candidates.extend(reversed(history))
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            distance = self._parse_first_number(candidate.get("distance_km"))
+            if isinstance(distance, (int, float)) and not isinstance(distance, bool):
+                return distance
+        return None
+
+    def _route_distance_sum(self, route_ids: list[str]) -> float | None:
+        total = 0.0
+        for route_id in route_ids:
+            route = self._route_record_for_id(route_id)
+            if not isinstance(route, dict):
+                return None
+            distance = self._parse_first_number(route.get("distance_km"))
+            if not isinstance(distance, (int, float)) or isinstance(distance, bool):
+                return None
+            total += float(distance)
+        return total
 
     @staticmethod
     def _navigation_state_unknown_fields(payload: dict[str, Any]) -> list[str]:
@@ -2211,35 +3500,6 @@ class CoroutineWorkspace:
             if value is None or isinstance(value, UnknownToolResponseValue):
                 fields.append(f"result.get_current_navigation_state.{path}")
         return fields
-
-    def _navigation_edit_action_from_user_request(self) -> str | None:
-        text = self.last_user_message.lower()
-        if not any(
-            term in text
-            for term in (
-                "route",
-                "navigation",
-                "waypoint",
-                "destination",
-                "stop",
-            )
-        ):
-            return None
-        if any(term in text for term in ("remove", "delete", "skip")):
-            if any(term in text for term in ("intermediate", "waypoint", "stop")):
-                return "remove the intermediate stop"
-            if "destination" in text:
-                return "remove the destination"
-            return "remove the requested route point"
-        if any(term in text for term in ("change", "replace", "switch")) and "destination" in text:
-            return "change the destination"
-        if any(term in text for term in ("add", "insert")) and any(
-            term in text for term in ("stop", "waypoint", "destination")
-        ):
-            return "add the requested route point"
-        if any(term in text for term in ("go straight", "direct", "straight to")):
-            return "edit the current route"
-        return None
 
     @staticmethod
     def _navigation_unknown_field_category(missing_fields: list[str]) -> str:
@@ -2260,7 +3520,6 @@ class CoroutineWorkspace:
     ) -> str:
         clean_action = _clean_action_phrase(
             action
-            or self._navigation_edit_action_from_user_request()
             or "use the current navigation state"
         )
         category = self._navigation_unknown_field_category(missing_fields)
@@ -2342,9 +3601,6 @@ class CoroutineWorkspace:
         )
 
     def _unknown_navigation_structure_response(self, message: str) -> str | None:
-        action = self._navigation_edit_action_from_user_request()
-        if action is None:
-            return None
         state = self._current_turn_navigation_state()
         if not isinstance(state, dict):
             return None
@@ -2355,7 +3611,6 @@ class CoroutineWorkspace:
             return None
         return self._unknown_navigation_structure_message(
             [str(field) for field in missing_fields],
-            action,
         )
 
     def _active_route_final_destination_id(self) -> str | None:
@@ -2366,14 +3621,10 @@ class CoroutineWorkspace:
         return destination_id if isinstance(destination_id, str) and destination_id else None
 
     def _is_requested_final_destination_replacement(self, destination_id: Any) -> bool:
-        if self._navigation_edit_action_from_user_request() != "change the destination":
-            return False
-        if not isinstance(destination_id, str) or not destination_id:
-            return False
-        current_destination_id = self._active_route_final_destination_id()
-        if current_destination_id is None:
-            return False
-        return destination_id != current_destination_id
+        # This response-only guard used to infer destination-replacement intent
+        # from the raw user message. Keep the actual replacement wrapper
+        # protected, but do not block unrelated route-choice text here.
+        return False
 
     def _destination_replacement_surface_blocker(
         self,
@@ -2447,20 +3698,30 @@ class CoroutineWorkspace:
         action: str = "complete the requested action",
         gate_name: str = "missing_tool_response",
     ) -> NoReturn:
+        if response_path.startswith("result.get_charging_specs_and_status.remaining_range"):
+            self._store_helper_report(
+                "charging_range_unknown",
+                {
+                    "status": "UNAVAILABLE",
+                    "helper": "charging_range_unknown",
+                    "missing_response_fields": [
+                        "result.get_charging_specs_and_status.remaining_range"
+                    ],
+                    "message": self._charging_range_unknown_message(),
+                },
+            )
+            self._abort_with_response(self._charging_range_unknown_message())
         if response_path.startswith("result.get_current_navigation_state."):
-            edit_action = self._navigation_edit_action_from_user_request()
-            if edit_action is not None:
-                missing_fields = [response_path]
-                state = self._current_turn_navigation_state()
-                if isinstance(state, dict):
-                    known_missing = state.get("unknown_response_fields")
-                    if isinstance(known_missing, list) and known_missing:
-                        missing_fields = [str(field) for field in known_missing]
-                self._abort_unknown_navigation_structure(
-                    "navigation_state_unknown",
-                    missing_fields,
-                    edit_action,
-                )
+            missing_fields = [response_path]
+            state = self._current_turn_navigation_state()
+            if isinstance(state, dict):
+                known_missing = state.get("unknown_response_fields")
+                if isinstance(known_missing, list) and known_missing:
+                    missing_fields = [str(field) for field in known_missing]
+            self._abort_unknown_navigation_structure(
+                "navigation_state_unknown",
+                missing_fields,
+            )
         clean_path = response_path.removeprefix("result.")
         message = (
             f"I acknowledge that I can't {_clean_action_phrase(action)} because the required "
@@ -2720,10 +3981,20 @@ class CoroutineWorkspace:
 
     @staticmethod
     def _is_mutation_failure_status(status: Any) -> bool:
-        """A genuine side-effect failure, ignoring parse-artifact statuses."""
+        """A genuine side-effect failure, ignoring local control statuses."""
 
         text = str(status or "").upper()
-        return text not in {"SUCCESS", "UNKNOWN", "RAW", ""}
+        non_failure_statuses = {
+            "",
+            "SUCCESS",
+            "UNKNOWN",
+            "RAW",
+            "NEEDS_MORE_FACTS",
+            "NEEDS_CLARIFICATION",
+            "NEEDS_ACTIVE_ROUTE_EDIT",
+            "UNAVAILABLE",
+        }
+        return text not in non_failure_statuses
 
     @staticmethod
     def _mutation_signature(tool_name: str, arguments: Any) -> str:
@@ -2852,9 +4123,11 @@ class CoroutineWorkspace:
         lowered = message.lower()
         patterns = (
             r"\bnavigation\s+set\b",
-            r"\bnavigation\s+(?:is\s+|has\s+been\s+|was\s+)?(?:set|started|updated|configured)\b",
+            r"\bnavigation\s+(?:is\s+(?:now\s+)?|has\s+been\s+|was\s+)?(?:set|started|updated|configured)\b",
             r"\b(?:i|i['’]ve|i have)\s+(?:set|started|updated|configured)\s+(?:up\s+)?(?:the\s+)?navigation\b",
             r"\b(?:i|i['’]ve|i have)\s+(?:set|started|updated|configured)\s+(?:up\s+)?(?:(?![.!?]).){0,80}\bnavigation\b",
+            r"\b(?:i|i['’]ve|i have)\s+(?:set|started|updated|configured)\s+(?:up\s+)?(?:the\s+)?(?:first|second|next|final)\s+leg\b",
+            r"\b(?:first|second|next|final)\s+leg\s+(?:is\s+|has\s+been\s+|was\s+)?(?:set|started|updated|configured)\b",
             r"\broute\s+(?:is\s+|has\s+been\s+|was\s+)?set\b",
         )
         return any(re.search(pattern, lowered) for pattern in patterns)
@@ -2875,6 +4148,70 @@ class CoroutineWorkspace:
             "I haven't set the navigation yet because the navigation control "
             "call has not completed."
         )
+
+    def _has_successful_email_send(self) -> bool:
+        if any(
+            isinstance(item, dict)
+            and item.get("tool_name") == "send_email"
+            and str(item.get("status") or "").upper() == "SUCCESS"
+            for item in self._successful_mutations
+        ):
+            return True
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return False
+        last_send = entities.get("last_successful_email_send")
+        if not isinstance(last_send, dict):
+            return False
+        return str(last_send.get("status") or "").upper() == "SUCCESS"
+
+    @staticmethod
+    def _claims_email_sent(message: str) -> bool:
+        lowered = message.lower()
+        negative_patterns = (
+            r"\b(?:haven['’]t|have\s+not|did\s+not|didn['’]t)\s+send\b",
+            r"\b(?:email|mail)\s+(?:has\s+not|hasn['’]t|was\s+not|is\s+not)\s+sent\b",
+            r"\bnot\s+sent\s+(?:the\s+|an?\s+)?(?:email|mail)\b",
+        )
+        if any(re.search(pattern, lowered) for pattern in negative_patterns):
+            return False
+        patterns = (
+            r"\b(?:email|mail)\s+(?:has\s+been\s+|was\s+|is\s+)?sent\b",
+            r"\b(?:i|i['’]ve|i\s+have)\s+sent\s+(?:the\s+|an?\s+)?(?:email|mail)\b",
+            r"\bsent\s+(?:the\s+|an?\s+)?(?:email|mail)\b",
+        )
+        return any(re.search(pattern, lowered) for pattern in patterns)
+
+    def _pending_send_email_confirmation(self) -> bool:
+        facts = self.scratchpad.get("facts")
+        if not isinstance(facts, dict):
+            return False
+        pending = facts.get("pending_confirmation")
+        if not isinstance(pending, dict):
+            return False
+        calls = pending.get("on_confirm_calls")
+        if not isinstance(calls, list):
+            return False
+        return any(
+            isinstance(call, dict) and call.get("tool_name") == "send_email"
+            for call in calls
+        )
+
+    def _ungrounded_email_completion_response(self, message: str) -> str | None:
+        if not self._claims_email_sent(message):
+            return None
+        if self._has_successful_email_send():
+            return None
+        if not self.tool_available("send_email"):
+            report = self._record_tool_surface_limitation(
+                "email_completion_claim",
+                "send the email",
+                missing_tools=["send_email"],
+            )
+            return str(report.get("message") or "")
+        if self._pending_send_email_confirmation():
+            return "I haven't sent the email yet because it still needs your confirmation."
+        return "I haven't sent the email yet because the send_email call has not completed."
 
     # ------------------------------------------------------------------
     # Policy date/time + location exposure
@@ -2995,6 +4332,10 @@ class CoroutineWorkspace:
         selection_route_ids = selection_check.get("route_ids")
         if isinstance(selection_route_ids, list):
             kwargs = dict(kwargs, route_ids=selection_route_ids)
+        via_check = self._repair_route_ids_for_current_request_via(kwargs.get("route_ids"))
+        via_route_ids = via_check.get("route_ids")
+        if isinstance(via_route_ids, list):
+            kwargs = dict(kwargs, route_ids=via_route_ids)
         # Narrate the selected route (policy 022/021) from the routes the model
         # already fetched (auto-persisted as last_routes), so a brand-new route
         # set still informs about fastest/alternatives/tolls.
@@ -3034,6 +4375,445 @@ class CoroutineWorkspace:
             "selection": selected,
             "route_options": copy.deepcopy(route_options),
         }
+
+    def set_navigation_via_route_stop_with_open_poi(
+        self,
+        destination_id: str,
+        stop_category_poi: str,
+        companion_category_poi: str,
+        window_start_hour: int,
+        window_start_minute: int,
+        window_end_hour: int,
+        window_end_minute: int,
+        start_id: str | None = None,
+        route_prefer: str | None = "fastest",
+        candidate_kilometers: list[int | float] | None = None,
+    ) -> dict[str, Any]:
+        """Set navigation through a route stop paired with an open companion POI."""
+
+        gate_name = "set_navigation_via_route_stop_with_open_poi"
+        destination_id = self._resolve_preloaded_argument_value(destination_id)
+        start_id = (
+            self.policy_location_id()
+            if start_id is None
+            else self._resolve_preloaded_argument_value(start_id)
+        )
+        if not isinstance(destination_id, str) or not destination_id:
+            return self._limitation_response(
+                gate_name,
+                "set navigation via a route stop",
+                reason="the destination id is unavailable",
+            )
+        if not isinstance(start_id, str) or not start_id:
+            return self._limitation_response(
+                gate_name,
+                "set navigation via a route stop",
+                reason="the start location is unavailable",
+            )
+        if not isinstance(stop_category_poi, str) or not stop_category_poi.strip():
+            raise ValueError("stop_category_poi must be a non-empty POI category")
+        if not isinstance(companion_category_poi, str) or not companion_category_poi.strip():
+            raise ValueError("companion_category_poi must be a non-empty POI category")
+
+        window = self._route_stop_window_minutes(
+            window_start_hour,
+            window_start_minute,
+            window_end_hour,
+            window_end_minute,
+        )
+        if window.get("status") != "SUCCESS":
+            return window
+
+        route_options = self.get_route_options(
+            start_id=start_id,
+            destination_id=destination_id,
+        )
+        if route_options.get("status") != "SUCCESS":
+            return route_options
+        selected_route = self.select_route(
+            route_options.get("routes"),
+            prefer=route_prefer,
+            record_selection=True,
+        )
+        if selected_route.get("status") != "SUCCESS":
+            report = {
+                "status": selected_route.get("status") or "AMBIGUOUS",
+                "reason": selected_route.get("reason") or "route selector is unresolved",
+                "start_id": start_id,
+                "destination_id": destination_id,
+                "routes": copy.deepcopy(route_options.get("routes")),
+                "matches": copy.deepcopy(selected_route.get("matches")),
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+        route = selected_route.get("route")
+        if not isinstance(route, dict):
+            return self._limitation_response(
+                gate_name,
+                "set navigation via a route stop",
+                reason="the selected route facts are unavailable",
+            )
+        route_id = route.get("route_id") or route.get("id")
+        if not isinstance(route_id, str) or not route_id:
+            return self._limitation_response(
+                gate_name,
+                "set navigation via a route stop",
+                reason="the selected route id is unavailable",
+            )
+
+        kilometers = self._route_stop_candidate_kilometers(
+            route,
+            window,
+            candidate_kilometers,
+        )
+        if not kilometers:
+            return self._limitation_response(
+                gate_name,
+                "set navigation via a route stop",
+                reason="no candidate route kilometers could be derived for the time window",
+            )
+
+        searches: list[dict[str, Any]] = []
+        selected_pair: dict[str, Any] | None = None
+        for kilometer in kilometers:
+            companion_search = self._route_stop_search(
+                gate_name,
+                route_id,
+                companion_category_poi.strip(),
+                kilometer,
+            )
+            if companion_search.get("status") == "BLOCKED":
+                return companion_search["blocker"]
+            stop_search = self._route_stop_search(
+                gate_name,
+                route_id,
+                stop_category_poi.strip(),
+                kilometer,
+            )
+            if stop_search.get("status") == "BLOCKED":
+                return stop_search["blocker"]
+            searches.extend([companion_search, stop_search])
+            pair = self._select_route_stop_open_poi_pair(
+                route_id=route_id,
+                route=route,
+                kilometer=kilometer,
+                window=window,
+                stop_pois=stop_search.get("pois"),
+                companion_pois=companion_search.get("pois"),
+            )
+            if pair.get("status") == "SUCCESS":
+                selected_pair = pair
+                break
+
+        if selected_pair is None:
+            report = {
+                "status": "NOT_FOUND",
+                "reason": (
+                    "no route stop had a companion POI open in the requested time window "
+                    "at the same route position"
+                ),
+                "route_id": route_id,
+                "route": copy.deepcopy(route),
+                "candidate_kilometers": kilometers,
+                "window": copy.deepcopy(window),
+                "searches": copy.deepcopy(searches),
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+
+        stop_poi = selected_pair.get("stop_poi")
+        if not isinstance(stop_poi, dict):
+            return self._limitation_response(
+                gate_name,
+                "set navigation via a route stop",
+                reason="the selected intermediate stop is unavailable",
+            )
+        stop_id = (
+            stop_poi.get("poi_id")
+            or stop_poi.get("id")
+            or stop_poi.get("navigation_id")
+        )
+        if not isinstance(stop_id, str) or not stop_id:
+            return self._limitation_response(
+                gate_name,
+                "set navigation via a route stop",
+                reason="the selected intermediate stop id is unavailable",
+            )
+
+        to_stop_options = self.get_route_options(start_id=start_id, destination_id=stop_id)
+        to_stop = self._select_route_for_navigation_leg(
+            to_stop_options,
+            segment_name="current_location_to_route_stop",
+            prefer="fastest",
+        )
+        if to_stop.get("status") != "SUCCESS":
+            return to_stop
+        to_final_options = self.get_route_options(start_id=stop_id, destination_id=destination_id)
+        to_final = self._select_route_for_navigation_leg(
+            to_final_options,
+            segment_name="route_stop_to_final_destination",
+            prefer="fastest",
+        )
+        if to_final.get("status") != "SUCCESS":
+            return to_final
+
+        route_ids = [to_stop["selected_route_id"], to_final["selected_route_id"]]
+        result = self.set_new_navigation_guarded(route_ids=route_ids)
+        companion_poi = selected_pair.get("companion_poi")
+        stop_name = stop_poi.get("name") or "the selected stop"
+        companion_name = (
+            companion_poi.get("name")
+            if isinstance(companion_poi, dict)
+            else "the matching POI"
+        )
+        message = (
+            f"Navigation is set with {stop_name} as the intermediate "
+            f"{stop_category_poi.strip()} stop. {companion_name} is the matching "
+            f"{companion_category_poi.strip()} POI open at that same route position "
+            f"between {window['start_label']} and {window['end_label']}."
+        )
+        report = {
+            "status": result.get("status") if isinstance(result, dict) else "UNKNOWN",
+            "result": result,
+            "route_ids": route_ids,
+            "start_id": start_id,
+            "destination_id": destination_id,
+            "route_id": route_id,
+            "route": copy.deepcopy(route),
+            "stop_category_poi": stop_category_poi.strip(),
+            "companion_category_poi": companion_category_poi.strip(),
+            "selected_stop_is_navigation_waypoint": True,
+            "selected_companion_is_navigation_waypoint": False,
+            "selected_stop": copy.deepcopy(stop_poi),
+            "selected_companion_poi": copy.deepcopy(companion_poi),
+            "selected_pair": copy.deepcopy(selected_pair),
+            "candidate_kilometers": kilometers,
+            "searches": copy.deepcopy(searches),
+            "to_stop": copy.deepcopy(to_stop),
+            "to_final": copy.deepcopy(to_final),
+            "message": message,
+        }
+        self._store_helper_report(gate_name, report)
+        self.remember_entity("selected_route_stop_with_open_poi", copy.deepcopy(report))
+        self._remember_selected_poi(stop_poi, role="route_stop")
+        if isinstance(companion_poi, dict):
+            self._remember_selected_poi(
+                companion_poi,
+                role="companion",
+                set_current=False,
+            )
+        if isinstance(result, dict) and result.get("status") == "SUCCESS":
+            self._helper_message(message)
+        return report
+
+    def _route_stop_window_minutes(
+        self,
+        start_hour: int,
+        start_minute: int,
+        end_hour: int,
+        end_minute: int,
+    ) -> dict[str, Any]:
+        values = (start_hour, start_minute, end_hour, end_minute)
+        if not all(isinstance(value, int) and not isinstance(value, bool) for value in values):
+            return {
+                "status": "INVALID_ARGUMENTS",
+                "reason": "window hour/minute values must be integers",
+            }
+        if not (0 <= start_hour <= 23 and 0 <= end_hour <= 23):
+            return {"status": "INVALID_ARGUMENTS", "reason": "window hours must be 0..23"}
+        if not (0 <= start_minute <= 59 and 0 <= end_minute <= 59):
+            return {"status": "INVALID_ARGUMENTS", "reason": "window minutes must be 0..59"}
+        start = start_hour * 60 + start_minute
+        end = end_hour * 60 + end_minute
+        if end < start:
+            end += 24 * 60
+        return {
+            "status": "SUCCESS",
+            "start_minute_of_day": start,
+            "end_minute_of_day": end,
+            "start_label": f"{start_hour:02d}:{start_minute:02d}",
+            "end_label": f"{end_hour:02d}:{end_minute:02d}",
+        }
+
+    def _route_stop_candidate_kilometers(
+        self,
+        route: dict[str, Any],
+        window: dict[str, Any],
+        candidate_kilometers: list[int | float] | None,
+    ) -> list[float]:
+        if isinstance(candidate_kilometers, list) and candidate_kilometers:
+            parsed = [
+                float(value)
+                for value in candidate_kilometers
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            return sorted({round(value, 1) for value in parsed if value >= 0})
+
+        duration = self._route_duration_minutes(route)
+        distance = self._route_distance_km(route)
+        if duration is None or duration <= 0 or distance is None or distance <= 0:
+            return []
+        now = self.policy_now()
+        current = int(now.get("hour") or 0) * 60 + int(now.get("minute") or 0)
+        start = int(window["start_minute_of_day"])
+        end = int(window["end_minute_of_day"])
+        while start < current:
+            start += 24 * 60
+            end += 24 * 60
+        start_offset = max(0, min(duration, start - current))
+        end_offset = max(0, min(duration, end - current))
+        if end_offset < start_offset:
+            start_offset, end_offset = end_offset, start_offset
+        start_km = float(distance) * float(start_offset) / float(duration)
+        end_km = float(distance) * float(end_offset) / float(duration)
+        lower_bucket = int(math.ceil(min(start_km, end_km) / 50.0) * 50)
+        upper_bucket = int(math.floor(max(start_km, end_km) / 50.0) * 50)
+        buckets = set()
+        if lower_bucket <= upper_bucket:
+            buckets.update(range(lower_bucket, upper_bucket + 1, 50))
+        buckets.add(int(round(start_km / 50.0) * 50))
+        buckets.add(int(round(end_km / 50.0) * 50))
+        return [
+            float(value)
+            for value in sorted(buckets)
+            if 0 <= value <= float(distance)
+        ]
+
+    def _route_stop_search(
+        self,
+        gate_name: str,
+        route_id: str,
+        category_poi: str,
+        kilometer: int | float,
+    ) -> dict[str, Any]:
+        arguments = {
+            "route_id": route_id,
+            "category_poi": category_poi,
+            "at_kilometer": float(kilometer),
+        }
+        call = ("search_poi_along_the_route", arguments)
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "search POIs along the route",
+            [call],
+        )
+        if blocker:
+            return {"status": "BLOCKED", "blocker": blocker}
+        result = self._call_raw_tool_sync(*call)
+        if result.get("status") != "SUCCESS":
+            return {
+                "status": "FAILED_TOOL_RESULT",
+                "result": copy.deepcopy(result),
+                "arguments": arguments,
+                "pois": [],
+            }
+        return {
+            "status": "SUCCESS",
+            "arguments": arguments,
+            "result": copy.deepcopy(result),
+            "pois": pois_value(result),
+        }
+
+    def _select_route_stop_open_poi_pair(
+        self,
+        *,
+        route_id: str,
+        route: dict[str, Any],
+        kilometer: int | float,
+        window: dict[str, Any],
+        stop_pois: Any,
+        companion_pois: Any,
+    ) -> dict[str, Any]:
+        stop_list = [poi for poi in stop_pois if isinstance(poi, dict)] if isinstance(stop_pois, list) else []
+        companion_list = [
+            poi for poi in companion_pois if isinstance(poi, dict)
+        ] if isinstance(companion_pois, list) else []
+        if not stop_list or not companion_list:
+            return {"status": "NOT_FOUND", "reason": "missing stop or companion POIs"}
+        route_distance = self._route_distance_km(route)
+        route_duration = self._route_duration_minutes(route)
+        if route_distance is None or route_distance <= 0 or route_duration is None:
+            return {"status": "UNAVAILABLE", "reason": "route distance or duration unavailable"}
+        now = self.policy_now()
+        current = int(now.get("hour") or 0) * 60 + int(now.get("minute") or 0)
+
+        candidates: list[dict[str, Any]] = []
+        for stop in stop_list:
+            stop_position = self._poi_route_position_km(stop, route_id)
+            if stop_position is None:
+                stop_position = float(kilometer)
+            arrival_offset = int(round(float(route_duration) * float(stop_position) / float(route_distance)))
+            arrival_minute = current + arrival_offset
+            window_start = int(window["start_minute_of_day"])
+            window_end = int(window["end_minute_of_day"])
+            while arrival_minute < window_start - 24 * 60:
+                arrival_minute += 24 * 60
+            in_window = window_start <= arrival_minute <= window_end
+            for companion in companion_list:
+                companion_position = self._poi_route_position_km(companion, route_id)
+                if companion_position is None:
+                    companion_position = float(kilometer)
+                if abs(float(companion_position) - float(stop_position)) > 1.0:
+                    continue
+                open_status = self._poi_open_status_at_minutes(
+                    companion.get("opening_hours"),
+                    arrival_minute,
+                )
+                if in_window and open_status is True:
+                    candidates.append(
+                        {
+                            "stop_poi": copy.deepcopy(stop),
+                            "companion_poi": copy.deepcopy(companion),
+                            "route_position_km": float(stop_position),
+                            "arrival_minute_of_day": arrival_minute % (24 * 60),
+                            "arrival_time": (
+                                f"{(arrival_minute // 60) % 24:02d}:"
+                                f"{arrival_minute % 60:02d}"
+                            ),
+                            "companion_open_at_arrival": True,
+                        }
+                    )
+        if not candidates:
+            return {
+                "status": "NOT_FOUND",
+                "reason": "no stop and companion POI matched the same open route position",
+            }
+        candidates.sort(
+            key=lambda item: (
+                float(item.get("route_position_km") or 0),
+                str(item.get("stop_poi", {}).get("name") or ""),
+                str(item.get("companion_poi", {}).get("name") or ""),
+            )
+        )
+        selected = candidates[0]
+        return {
+            "status": "SUCCESS",
+            **selected,
+            "matches": candidates,
+        }
+
+    @staticmethod
+    def _poi_route_position_km(poi: dict[str, Any], route_id: str) -> float | None:
+        positions = poi.get("route_positions")
+        if not isinstance(positions, dict):
+            return None
+        candidates: list[Any] = []
+        if route_id in positions:
+            candidates.append(positions.get(route_id))
+        for key, value in positions.items():
+            if not isinstance(key, str):
+                continue
+            if route_id.startswith(key) or key.startswith(route_id):
+                candidates.append(value)
+        if not candidates and len(positions) == 1:
+            candidates.extend(positions.values())
+        for value in candidates:
+            if not isinstance(value, dict):
+                continue
+            parsed = CoroutineWorkspace._parse_first_number(value.get("at_route_kilometer"))
+            if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+                return float(parsed)
+        return None
 
     def set_new_navigation_via_stop(
         self,
@@ -3331,7 +5111,7 @@ class CoroutineWorkspace:
         call is left unchanged.
         """
 
-        if not isinstance(route_ids, list) or len(route_ids) < 2:
+        if not isinstance(route_ids, list) or not route_ids:
             return {"status": "OK", "route_ids": route_ids}
         normalized_ids = [
             route_id for route_id in route_ids if isinstance(route_id, str) and route_id
@@ -3382,6 +5162,96 @@ class CoroutineWorkspace:
                 "route_ids": repaired_ids,
             }
         return {"status": "OK", "route_ids": repaired_ids, "repairs": repairs}
+
+    def _repair_route_ids_for_current_request_via(self, route_ids: Any) -> dict[str, Any]:
+        """Apply explicit via-road wording from the current user request.
+
+        This does not infer intent from a task ID. It only repairs a route
+        segment when the model already fetched alternatives for the same
+        start/destination and exactly one of those alternatives has `name_via`
+        roads that appear in the current user message.
+        """
+
+        if not isinstance(route_ids, list) or not route_ids:
+            return {"status": "OK", "route_ids": route_ids}
+        normalized_ids = [
+            route_id for route_id in route_ids if isinstance(route_id, str) and route_id
+        ]
+        if len(normalized_ids) != len(route_ids):
+            return {"status": "OK", "route_ids": route_ids}
+        request_text = self._effective_route_via_request_text()
+        if "via" not in request_text.casefold():
+            return {"status": "OK", "route_ids": route_ids}
+        routes_by_id = self.scratchpad.get("entities", {}).get("routes_by_id")
+        if not isinstance(routes_by_id, dict):
+            return {"status": "OK", "route_ids": route_ids}
+
+        repaired_ids = list(normalized_ids)
+        repairs: list[dict[str, Any]] = []
+        for index, route_id in enumerate(normalized_ids):
+            route = self._route_record_for_id(route_id)
+            if not isinstance(route, dict):
+                continue
+            if self._route_via_is_mentioned_in_current_request(route):
+                continue
+            start_id = route.get("start_id")
+            destination_id = route.get("destination_id")
+            if not (isinstance(start_id, str) and isinstance(destination_id, str)):
+                continue
+            candidates = [
+                candidate
+                for candidate in routes_by_id.values()
+                if isinstance(candidate, dict)
+                and candidate.get("start_id") == start_id
+                and candidate.get("destination_id") == destination_id
+                and self._route_via_is_mentioned_in_current_request(candidate)
+            ]
+            if len(candidates) != 1:
+                continue
+            replacement = candidates[0]
+            replacement_id = replacement.get("route_id") or replacement.get("id")
+            if not isinstance(replacement_id, str) or replacement_id == route_id:
+                continue
+            repaired_ids[index] = replacement_id
+            repairs.append(
+                {
+                    "index": index,
+                    "from_route_id": route_id,
+                    "to_route_id": replacement_id,
+                    "reason": "current user message explicitly names this route's via roads",
+                }
+            )
+        if repairs:
+            self.scratchpad["gates"]["route_via_request_guard"] = {
+                "status": "REPAIRED",
+                "repairs": repairs,
+                "route_ids": repaired_ids,
+            }
+        return {"status": "OK", "route_ids": repaired_ids, "repairs": repairs}
+
+    def _route_via_is_mentioned_in_current_request(self, route: dict[str, Any]) -> bool:
+        via = route.get("name_via") or route.get("via")
+        if not isinstance(via, str) or not via.strip():
+            return False
+        terms = [
+            term
+            for term in re.split(r"[^a-z0-9]+", via.casefold())
+            if len(term) > 1
+        ]
+        if not terms:
+            return False
+        message_terms = set(
+            term
+            for term in re.split(
+                r"[^a-z0-9]+",
+                self._effective_route_via_request_text().casefold(),
+            )
+            if term
+        )
+        return all(term in message_terms for term in terms)
+
+    def _effective_route_via_request_text(self) -> str:
+        return str(self.last_user_message or "")
 
     def _latest_recorded_route_selection_for_destination(
         self,
@@ -3476,6 +5346,59 @@ class CoroutineWorkspace:
                     route.get("route_id") == route_id or route.get("id") == route_id
                 ):
                     return route
+        return None
+
+    def _known_routes_between(
+        self,
+        start_id: str,
+        destination_id: str,
+    ) -> list[dict[str, Any]]:
+        routes_by_id = self.scratchpad.get("entities", {}).get("routes_by_id")
+        if not isinstance(routes_by_id, dict):
+            return []
+        return [
+            route
+            for route in routes_by_id.values()
+            if isinstance(route, dict)
+            and route.get("start_id") == start_id
+            and route.get("destination_id") == destination_id
+        ]
+
+    def _route_id_connects(
+        self,
+        route_id: Any,
+        start_id: str,
+        destination_id: str,
+    ) -> bool:
+        if not isinstance(route_id, str) or not route_id:
+            return False
+        route = self._route_record_for_id(route_id)
+        return (
+            isinstance(route, dict)
+            and route.get("start_id") == start_id
+            and route.get("destination_id") == destination_id
+        )
+
+    def _recorded_selector_for_route_id(self, route_id: str) -> dict[str, Any] | None:
+        entities = self.scratchpad.get("entities", {})
+        selections: list[dict[str, Any]] = []
+        history = entities.get("route_selection_history")
+        if isinstance(history, list):
+            selections.extend(item for item in history if isinstance(item, dict))
+        selected = entities.get("selected_route")
+        if isinstance(selected, dict):
+            selections.append(selected)
+        for selection in reversed(selections):
+            selected_route_id = (
+                selection.get("route_id") or selection.get("selected_route_id")
+            )
+            route = selection.get("route")
+            if not isinstance(selected_route_id, str) and isinstance(route, dict):
+                raw = route.get("route_id") or route.get("id")
+                selected_route_id = raw if isinstance(raw, str) else None
+            if selected_route_id == route_id:
+                selector = selection.get("selector")
+                return copy.deepcopy(selector) if isinstance(selector, dict) else {}
         return None
 
     def _find_unique_connecting_route(
@@ -3581,7 +5504,11 @@ class CoroutineWorkspace:
                 isinstance(r, dict) and (r.get("route_id") == rid or r.get("id") == rid)
                 for r in stored
             ):
-                self._store_route_narration(stored, rid)
+                self._store_route_narration(
+                    stored,
+                    rid,
+                    selector=self._recorded_selector_for_route_id(rid),
+                )
                 return
 
     # ------------------------------------------------------------------
@@ -3872,7 +5799,8 @@ class CoroutineWorkspace:
         """Weather can only be requested for the current (policy) day.
 
         Clamp month/day to the policy DATETIME so a model that uses the host
-        clock or a future day does not trigger `AUT-POL:024`.
+        clock or a future day does not trigger `AUT-POL:024`. Preserve explicit
+        time arguments: policy 024 constrains the day, not the hour/minute.
         """
 
         now = self.policy_now()
@@ -3881,10 +5809,6 @@ class CoroutineWorkspace:
                 kwargs["month"] = now["month"]
             if now.get("day") is not None:
                 kwargs["day"] = now["day"]
-            if now.get("hour") is not None:
-                kwargs["time_hour_24hformat"] = now["hour"]
-            if now.get("minute") is not None:
-                kwargs["time_minutes"] = now["minute"]
         return self._call_raw_tool_sync("get_weather", kwargs)
 
     def search_poi_along_route_guarded(self, **kwargs: Any) -> dict[str, Any]:
@@ -3911,6 +5835,8 @@ class CoroutineWorkspace:
                     "route; provide the route kilometer to search at"
                 ),
             }
+        if "charg" in category:
+            self._ensure_charging_status_fact_for_route_search()
         return self._call_raw_tool_sync("search_poi_along_the_route", kwargs)
 
     def get_contact_id_by_contact_name_guarded(self, **kwargs: Any) -> dict[str, Any]:
@@ -3923,6 +5849,9 @@ class CoroutineWorkspace:
         invented and nothing is dropped.
         """
 
+        constrain_to_recent_calendar_attendees = bool(
+            kwargs.pop("constrain_to_recent_calendar_attendees", False)
+        )
         result = self._call_raw_tool_sync("get_contact_id_by_contact_name", kwargs)
         if not isinstance(result, dict) or result.get("status") != "SUCCESS":
             return result
@@ -3990,19 +5919,92 @@ class CoroutineWorkspace:
                 normalized_result["previous_contact_query"] = copy.deepcopy(
                     previous_lookup.get("query")
                 )
-            self.remember_entity("last_contacts", contacts)
+            calendar_attendee_ids = self._recent_calendar_attendee_ids()
+            if calendar_attendee_ids:
+                attendee_set = set(calendar_attendee_ids)
+                shared_attendee_ids = [
+                    contact_id for contact_id in contact_ids if contact_id in attendee_set
+                ]
+                normalized_result[
+                    "intersection_with_calendar_attendee_ids"
+                ] = shared_attendee_ids
+                if len(shared_attendee_ids) == 1:
+                    attendee_contact = by_id.get(
+                        shared_attendee_ids[0],
+                        {"contact_id": shared_attendee_ids[0]},
+                    )
+                    normalized_result[
+                        "unique_calendar_attendee_contact_id"
+                    ] = shared_attendee_ids[0]
+                    normalized_result["calendar_attendee_contact"] = attendee_contact
+                    if contact_ids and contact_ids[0] != shared_attendee_ids[0]:
+                        ranked_ids = [
+                            shared_attendee_ids[0],
+                            *[
+                                contact_id
+                                for contact_id in contact_ids
+                                if contact_id != shared_attendee_ids[0]
+                            ],
+                        ]
+                        ranked_contacts = [
+                            by_id[contact_id]
+                            for contact_id in ranked_ids
+                            if contact_id in by_id
+                        ]
+                        normalized_result["unconstrained_contact_ids"] = contact_ids
+                        normalized_result["unconstrained_contacts"] = contacts
+                        normalized_result["unconstrained_by_id"] = by_id
+                        normalized_result["matches"] = ranked_ids
+                        normalized_result["contact_ids"] = ranked_ids
+                        normalized_result["contacts"] = ranked_contacts
+                        normalized_result["by_id"] = {
+                            contact_id: by_id[contact_id]
+                            for contact_id in ranked_ids
+                            if contact_id in by_id
+                        }
+                        normalized_result["calendar_attendee_ranked_first"] = True
+                    if constrain_to_recent_calendar_attendees:
+                        normalized_result.setdefault(
+                            "unconstrained_contact_ids",
+                            contact_ids,
+                        )
+                        normalized_result.setdefault("unconstrained_contacts", contacts)
+                        normalized_result.setdefault("unconstrained_by_id", by_id)
+                        normalized_result["matches"] = [shared_attendee_ids[0]]
+                        normalized_result["contact_ids"] = [shared_attendee_ids[0]]
+                        normalized_result["contacts"] = [attendee_contact]
+                        normalized_result["by_id"] = {
+                            shared_attendee_ids[0]: attendee_contact
+                        }
+                        normalized_result["constrained_to_calendar_attendees"] = True
+            stored_contact_ids = normalized_result.get("contact_ids", contact_ids)
+            stored_contacts = normalized_result.get("contacts", contacts)
+            if not isinstance(stored_contact_ids, list):
+                stored_contact_ids = contact_ids
+            if not isinstance(stored_contacts, list):
+                stored_contacts = contacts
+            self.remember_entity("last_contacts", stored_contacts)
             self._remember_contacts_by_id(contacts)
             self.remember_entity(
                 "last_contact_lookup",
                 {
                     "query": copy.deepcopy(kwargs),
-                    "contact_ids": contact_ids,
-                    "contacts": contacts,
+                    "contact_ids": stored_contact_ids,
+                    "contacts": stored_contacts,
                     "intersection_with_previous_contact_ids": normalized_result.get(
                         "intersection_with_previous_contact_ids"
                     ),
                     "unique_intersection_with_previous_contact_id": normalized_result.get(
                         "unique_intersection_with_previous_contact_id"
+                    ),
+                    "intersection_with_calendar_attendee_ids": normalized_result.get(
+                        "intersection_with_calendar_attendee_ids"
+                    ),
+                    "unique_calendar_attendee_contact_id": normalized_result.get(
+                        "unique_calendar_attendee_contact_id"
+                    ),
+                    "constrained_to_calendar_attendees": normalized_result.get(
+                        "constrained_to_calendar_attendees"
                     ),
                 },
             )
@@ -4054,18 +6056,51 @@ class CoroutineWorkspace:
             route_id = raw if isinstance(raw, str) else None
         return route_id, (routes if isinstance(routes, list) else [])
 
-    def _fastest_route_id(self, start_id: str, destination_id: str) -> str | None:
+    def _fastest_route_id(
+        self,
+        start_id: str,
+        destination_id: str,
+        *,
+        offer_alternatives: bool = True,
+    ) -> str | None:
         route_id, routes = self._select_fastest(start_id, destination_id)
         if route_id:
-            self._store_route_narration(routes, route_id)
+            self._store_route_narration(
+                routes,
+                route_id,
+                offer_alternatives=offer_alternatives,
+            )
         return route_id
 
     @staticmethod
-    def _route_narration(
+    def _route_selector_descriptor(
+        selected: dict[str, Any],
+        selector: dict[str, Any] | None = None,
+    ) -> str | None:
+        if not isinstance(selector, dict):
+            selector = {}
+        name_via = _clean_string(selector.get("name_via"))
+        if name_via:
+            return f"the route via {name_via}"
+        alias_selector = _clean_string(selector.get("alias") or selector.get("prefer"))
+        if alias_selector:
+            alias_lower = alias_selector.lower()
+            if alias_lower not in {"fastest", "quickest", "shortest"}:
+                via = _clean_string(selected.get("name_via") or selected.get("via"))
+                return f"the {alias_selector} route" + (f" via {via}" if via else "")
+        # A route_id proves which route was selected, but it should not hide
+        # grounded route ranking aliases such as fastest/shortest.
+        return None
+
+    @staticmethod
+    def _route_narration_record(
         routes: list[dict[str, Any]],
         selected_route_id: str,
         stage: str = "navigate",
-    ) -> str | None:
+        selector: dict[str, Any] | None = None,
+        offer_alternatives: bool = True,
+        segment_label: str | None = None,
+    ) -> dict[str, Any] | None:
         """Policy 022/021 narration built from grounded route fields, or None.
 
         Uses the evaluator's own `alias` (fastest/shortest), `includes_toll`, and
@@ -4088,18 +6123,41 @@ class CoroutineWorkspace:
                 break
         if not isinstance(selected, dict):
             return None
+        selector_descriptor = CoroutineWorkspace._route_selector_descriptor(
+            selected, selector
+        )
         alias = selected.get("alias")
         alias = [str(tag).lower() for tag in alias] if isinstance(alias, list) else []
-        if "fastest" in alias and "shortest" in alias:
-            descriptor = "the fastest route, which is also the shortest"
+        via = _clean_string(selected.get("name_via") or selected.get("via"))
+        via_suffix = f" via {via}" if via else ""
+        if selector_descriptor is not None:
+            descriptor = selector_descriptor
+        elif "fastest" in alias and "shortest" in alias:
+            descriptor = f"the fastest route{via_suffix}, which is also the shortest"
         elif "fastest" in alias:
-            descriptor = "the fastest route"
+            descriptor = f"the fastest route{via_suffix}"
         elif "shortest" in alias:
-            descriptor = "the shortest route"
+            descriptor = f"the shortest route{via_suffix}"
+        elif stage in {"navigate", "select"}:
+            descriptor = "the selected route" + (f" via {via}" if via else "")
         else:
             return None
         alternatives = max(0, len(routes) - 1)
         toll = selected.get("includes_toll") is True
+        alternative_toll_count = sum(
+            1
+            for route in routes
+            if isinstance(route, dict)
+            and route is not selected
+            and route.get("includes_toll") is True
+        )
+        alternative_toll_sentence = ""
+        if alternative_toll_count == 1:
+            alternative_toll_sentence = " One other option uses toll roads."
+        elif alternative_toll_count > 1:
+            alternative_toll_sentence = (
+                f" {alternative_toll_count} other options use toll roads."
+            )
 
         if stage == "search":
             # A pure read: do not claim a route was taken — present and offer.
@@ -4109,10 +6167,17 @@ class CoroutineWorkspace:
                 verb = "is" if alternatives == 1 else "are"
                 plural = "" if alternatives == 1 else "s"
                 text += f" There {verb} {alternatives} other option{plural}."
+                text += alternative_toll_sentence
             if toll:
                 text += " It uses toll roads."
-            text += " Would you like details or to navigate on one of them?"
-            return text
+            text += " Would you like details about the route options?"
+            return {
+                "text": text,
+                "offers_alternatives": alternatives > 0,
+                "stage": stage,
+                "selected_route_id": selected_route_id,
+                "selector": selector or {},
+            }
 
         if stage == "select":
             text = f"I selected {descriptor} for this segment"
@@ -4121,32 +6186,131 @@ class CoroutineWorkspace:
                 plural = "" if alternatives == 1 else "s"
                 text += f"; there {verb} {alternatives} other option{plural}"
             text += "."
+            text += alternative_toll_sentence
             if toll:
                 text += " It uses toll roads."
-            return text
+            return {
+                "text": text,
+                "offers_alternatives": alternatives > 0,
+                "stage": stage,
+                "selected_route_id": selected_route_id,
+                "selector": selector or {},
+            }
 
         # stage == "navigate": a navigation call actually succeeded. Keep the
         # wording segment-scoped; route edits do not prove untouched segments
         # were also re-selected.
-        text = f"This route segment is now using {descriptor}"
-        if alternatives > 0:
-            verb = "is" if alternatives == 1 else "are"
-            plural = "" if alternatives == 1 else "s"
-            text += f" — there {verb} {alternatives} other option{plural} if you'd like to switch it"
+        label = _clean_string(segment_label)
+        if label:
+            text = f"For {label}, this route segment is now using {descriptor}"
+        else:
+            text = f"This route segment is now using {descriptor}"
         text += "."
+        if offer_alternatives and alternatives > 0 and (
+            "fastest" in alias or "shortest" in alias or selector_descriptor is not None
+        ):
+            plural = "" if alternatives == 1 else "s"
+            text += (
+                f" You can ask for more information about the {alternatives} "
+                f"other alternative route{plural}."
+            )
+            text += alternative_toll_sentence
         if toll:
             text += " It uses toll roads."
-        return text
+        return {
+            "text": text,
+            "offers_alternatives": offer_alternatives and alternatives > 0,
+            "stage": stage,
+            "selected_route_id": selected_route_id,
+            "selector": selector or {},
+            "segment_label": label,
+            "has_alternatives": alternatives > 0,
+        }
+
+    @staticmethod
+    def _route_narration(
+        routes: list[dict[str, Any]],
+        selected_route_id: str,
+        stage: str = "navigate",
+        selector: dict[str, Any] | None = None,
+    ) -> str | None:
+        record = CoroutineWorkspace._route_narration_record(
+            routes, selected_route_id, stage, selector=selector
+        )
+        text = record.get("text") if isinstance(record, dict) else None
+        return text if isinstance(text, str) else None
 
     def _store_route_narration(
-        self, routes: Any, selected_route_id: str, stage: str = "navigate"
+        self,
+        routes: Any,
+        selected_route_id: str,
+        stage: str = "navigate",
+        selector: dict[str, Any] | None = None,
+        offer_alternatives: bool = True,
+        segment_label: str | None = None,
     ) -> None:
-        narration = self._route_narration(
-            routes if isinstance(routes, list) else [], selected_route_id, stage
+        narration = self._route_narration_record(
+            routes if isinstance(routes, list) else [],
+            selected_route_id,
+            stage,
+            selector=selector,
+            offer_alternatives=offer_alternatives,
+            segment_label=segment_label,
         )
         if narration:
             self._ensure_scratchpad_shape()
             self.scratchpad["facts"]["pending_route_narration"] = narration
+        elif stage != "search":
+            self._ensure_scratchpad_shape()
+            self.scratchpad["facts"].pop("pending_route_narration", None)
+
+    def _store_route_narration_sequence(
+        self,
+        segments: list[dict[str, Any]],
+    ) -> None:
+        records: list[dict[str, Any]] = []
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            selected_route_id = segment.get("selected_route_id")
+            if not isinstance(selected_route_id, str):
+                continue
+            narration = self._route_narration_record(
+                segment.get("routes") if isinstance(segment.get("routes"), list) else [],
+                selected_route_id,
+                stage=str(segment.get("stage") or "navigate"),
+                selector=(
+                    segment.get("selector")
+                    if isinstance(segment.get("selector"), dict)
+                    else None
+                ),
+                offer_alternatives=bool(segment.get("offer_alternatives", False)),
+                segment_label=(
+                    segment.get("segment_label")
+                    if isinstance(segment.get("segment_label"), str)
+                    else None
+                ),
+            )
+            if narration:
+                records.append(narration)
+        if not records:
+            return
+        if any(record.get("has_alternatives") is True for record in records):
+            records.append(
+                {
+                    "text": (
+                        "Would you like more information about the alternative "
+                        "routes for either new segment?"
+                    ),
+                    "offers_alternatives": True,
+                    "stage": "sequence",
+                    "has_alternatives": True,
+                }
+            )
+        self._ensure_scratchpad_shape()
+        self.scratchpad["facts"]["pending_route_narration"] = (
+            records if len(records) > 1 else records[0]
+        )
 
     def _resolve_route_arg(
         self, provided_id: Any, start_id: str, destination_id: str
@@ -4232,7 +6396,11 @@ class CoroutineWorkspace:
         )
         if to_id:
             kwargs = dict(kwargs, route_id_leading_to_new_waypoint=to_id)
-            self._store_route_narration(to_routes, to_id)
+            self._store_route_narration(
+                to_routes,
+                to_id,
+                selector=self._recorded_selector_for_route_id(to_id),
+            )
         if before_id in order:
             index = order.index(before_id)
             if index + 1 < len(order):  # mid-route insert: BOTH after-args are required
@@ -4271,8 +6439,8 @@ class CoroutineWorkspace:
 
         The required `route_id_without_waypoint` must connect the deleted
         waypoint's previous and next neighbours; a stale id raises
-        `NavigationDeleteOneWaypoint_007`. Always re-derive it from fresh state
-        for a mid-route waypoint.
+        `NavigationDeleteOneWaypoint_007`. Preserve a valid grounded route that
+        the model selected; otherwise derive the policy-default fastest route.
         """
 
         target = kwargs.get("waypoint_id_to_delete")
@@ -4287,10 +6455,33 @@ class CoroutineWorkspace:
         if target in order:
             index = order.index(target)
             if 0 < index < len(order) - 1:  # a mid waypoint with both neighbours
-                route_id = self._fastest_route_id(order[index - 1], order[index + 1])
-                if route_id:
-                    kwargs = dict(kwargs, route_id_without_waypoint=route_id)
-        return self._call_raw_tool_sync("navigation_delete_waypoint", kwargs)
+                previous_id = order[index - 1]
+                next_id = order[index + 1]
+                supplied_route_id = kwargs.get("route_id_without_waypoint")
+                if self._route_id_connects(supplied_route_id, previous_id, next_id):
+                    routes = self._known_routes_between(previous_id, next_id)
+                    self._store_route_narration(
+                        routes,
+                        supplied_route_id,
+                        offer_alternatives=True,
+                    )
+                else:
+                    route_id = self._fastest_route_id(previous_id, next_id)
+                    if route_id:
+                        kwargs = dict(kwargs, route_id_without_waypoint=route_id)
+        result = self._call_raw_tool_sync("navigation_delete_waypoint", kwargs)
+        route_id = kwargs.get("route_id_without_waypoint")
+        if result.get("status") == "SUCCESS" and isinstance(route_id, str) and route_id:
+            self.remember_entity(
+                "last_route_edit_followup_route",
+                {
+                    "turn": self.last_user_message,
+                    "source_tool": "navigation_delete_waypoint",
+                    "route_id": route_id,
+                    "waypoint_id_to_delete": target,
+                },
+            )
+        return result
 
     def _already_removed_result(self, tool_name: str, waypoint_id: str) -> dict[str, Any]:
         # The waypoint is not in the current route. Absence is a FACT, but it is
@@ -4326,8 +6517,8 @@ class CoroutineWorkspace:
         `route_id_leading_away_from_new_waypoint` (new -> next) must be valid for
         the current neighbours; stale ids raise `NavigationReplaceOneWaypoint_011`
         / `_013`. A valid model-provided route id is kept; otherwise the fastest
-        is derived. The route-selection narration (policy 022/021) is stored from
-        the leading-to segment.
+        is derived. The route-selection narration (policy 022/021) is stored for
+        both newly created adjacent segments after a successful mutation.
         """
 
         target = kwargs.get("waypoint_id_to_replace")
@@ -4335,6 +6526,7 @@ class CoroutineWorkspace:
         if not (isinstance(target, str) and isinstance(new_id, str)):
             return self._call_raw_tool_sync("navigation_replace_one_waypoint", kwargs)
         order = self._fresh_waypoint_order()
+        route_narration_segments: list[dict[str, Any]] = []
         if target in order:
             index = order.index(target)
             if index - 1 >= 0:
@@ -4343,14 +6535,34 @@ class CoroutineWorkspace:
                 )
                 if to_id:
                     kwargs = dict(kwargs, route_id_leading_to_new_waypoint=to_id)
-                    self._store_route_narration(to_routes, to_id)
+                    route_narration_segments.append(
+                        {
+                            "routes": to_routes,
+                            "selected_route_id": to_id,
+                            "selector": self._recorded_selector_for_route_id(to_id),
+                            "segment_label": "the segment to the replacement waypoint",
+                            "offer_alternatives": False,
+                        }
+                    )
             if index + 1 < len(order):
-                away_id, _ = self._resolve_route_arg(
+                away_id, away_routes = self._resolve_route_arg(
                     kwargs.get("route_id_leading_away_from_new_waypoint"), new_id, order[index + 1]
                 )
                 if away_id:
                     kwargs = dict(kwargs, route_id_leading_away_from_new_waypoint=away_id)
-        return self._call_raw_tool_sync("navigation_replace_one_waypoint", kwargs)
+                    route_narration_segments.append(
+                        {
+                            "routes": away_routes,
+                            "selected_route_id": away_id,
+                            "selector": self._recorded_selector_for_route_id(away_id),
+                            "segment_label": "the segment after the replacement waypoint",
+                            "offer_alternatives": False,
+                        }
+                    )
+        result = self._call_raw_tool_sync("navigation_replace_one_waypoint", kwargs)
+        if result.get("status") == "SUCCESS" and route_narration_segments:
+            self._store_route_narration_sequence(route_narration_segments)
+        return result
 
     def navigation_replace_final_destination_guarded(self, **kwargs: Any) -> dict[str, Any]:
         """Validate or fill the leading route without interpreting user language."""
@@ -4368,15 +6580,109 @@ class CoroutineWorkspace:
         order = self._fresh_waypoint_order()
         if len(order) >= 2:
             previous_id = order[-2]
+            provided_route_arg = kwargs.get("route_id_leading_to_new_destination")
             route_id, routes = self._resolve_explicit_or_unique_route_arg(
-                kwargs.get("route_id_leading_to_new_destination"),
+                provided_route_arg,
                 previous_id,
                 new_id,
             )
             if isinstance(route_id, str):
+                if self._single_segment_final_destination_needs_route_choice(
+                    order,
+                    new_id,
+                    route_id,
+                    routes,
+                    provided_route_arg,
+                ):
+                    self._abort_with_response(
+                        self._route_choice_prompt_for_final_destination(new_id, routes)
+                    )
                 kwargs = dict(kwargs, route_id_leading_to_new_destination=route_id)
-                self._store_route_narration(routes, route_id)
+                self._store_route_narration(
+                    routes,
+                    route_id,
+                    selector=self._recorded_selector_for_route_id(route_id),
+                )
         return self._call_raw_tool_sync("navigation_replace_final_destination", kwargs)
+
+    def _single_segment_final_destination_needs_route_choice(
+        self,
+        order: list[str],
+        new_destination_id: str,
+        route_id: str,
+        routes: list[dict[str, Any]],
+        provided_route_arg: Any = None,
+    ) -> bool:
+        if len(order) != 2 or len(routes) <= 1:
+            return False
+        if self._final_destination_route_choice_is_explicit(new_destination_id, route_id):
+            return False
+        if isinstance(provided_route_arg, str) and provided_route_arg == route_id:
+            return False
+        if isinstance(provided_route_arg, str) and provided_route_arg != route_id:
+            for route in routes:
+                if (
+                    isinstance(route, dict)
+                    and route.get("base_route_id") == provided_route_arg
+                    and (route.get("route_id") == route_id or route.get("id") == route_id)
+                ):
+                    return False
+        selected_route = self._route_from_list_by_id(routes, route_id)
+        if not isinstance(selected_route, dict):
+            selected_route = self._route_record_for_id(route_id)
+        aliases = selected_route.get("alias") if isinstance(selected_route, dict) else []
+        alias_set = {str(alias).casefold() for alias in aliases} if isinstance(aliases, list) else set()
+        if not alias_set.intersection({"fastest", "first"}):
+            return False
+        return True
+
+    @staticmethod
+    def _route_from_list_by_id(
+        routes: list[dict[str, Any]],
+        route_id: str,
+    ) -> dict[str, Any] | None:
+        for route in routes:
+            if isinstance(route, dict) and (
+                route.get("route_id") == route_id or route.get("id") == route_id
+            ):
+                return route
+        return None
+
+    def _final_destination_route_choice_is_explicit(
+        self,
+        new_destination_id: str,
+        route_id: str,
+    ) -> bool:
+        selection = self._latest_recorded_route_selection_for_destination(new_destination_id)
+        if isinstance(selection, dict):
+            selected_route_id = (
+                selection.get("route_id") or selection.get("selected_route_id")
+            )
+            if selected_route_id == route_id:
+                return True
+            route = selection.get("route")
+            if isinstance(route, dict) and route.get("route_id") == route_id:
+                return True
+        return False
+
+    def _route_choice_prompt_for_final_destination(
+        self,
+        new_destination_id: str,
+        routes: list[dict[str, Any]],
+    ) -> str:
+        destination = self._route_endpoint_label(new_destination_id) or new_destination_id
+        displays: list[str] = []
+        for index, route in enumerate(routes[:3], start=1):
+            if not isinstance(route, dict):
+                continue
+            label = route.get("display") or self._route_display(route)
+            displays.append(f"{index}. {label}")
+        if not displays:
+            return f"I found multiple routes to {destination}. Which route should I use?"
+        return (
+            f"I found multiple routes to {destination}. Which route should I use? "
+            + " ".join(displays)
+        )
 
     # ------------------------------------------------------------------
     # Auto-persistence of grounded entities
@@ -4425,6 +6731,18 @@ class CoroutineWorkspace:
             payload = item.get("result")
             if not isinstance(payload, dict):
                 payload = item
+            if name == "send_email":
+                entities["last_successful_email_send"] = {
+                    "status": "SUCCESS",
+                    "tool_name": name,
+                    "arguments": copy.deepcopy(arguments),
+                    "result": copy.deepcopy(payload),
+                }
+                history = entities.setdefault("email_send_history", [])
+                if isinstance(history, list):
+                    history.append(copy.deepcopy(entities["last_successful_email_send"]))
+                    del history[:-8]
+                continue
             if name == "delete_current_navigation":
                 revision = int(entities.get("navigation_revision") or 0) + 1
                 entities["navigation_revision"] = revision
@@ -4435,6 +6753,8 @@ class CoroutineWorkspace:
                 entities.pop("last_routes", None)
                 entities.pop("last_route_options", None)
                 entities.pop("selected_route", None)
+                entities.pop("last_applied_route_selection", None)
+                entities.pop("active_route_records", None)
                 entities.pop("route_selection_history", None)
                 continue
             if name in NAVIGATION_ACTIVATING_MUTATIONS:
@@ -4488,6 +6808,8 @@ class CoroutineWorkspace:
                     state["route_ids"] = route_ids
                 entities["navigation_state"] = state
                 selected = entities.pop("selected_route", None)
+                entities.pop("last_applied_route_selection", None)
+                active_route_records: list[dict[str, Any]] = []
                 if isinstance(selected, dict):
                     selected_id = selected.get("route_id")
                     if selected_id and self._value_contains(arguments, selected_id):
@@ -4496,6 +6818,28 @@ class CoroutineWorkspace:
                             "applied_revision": revision,
                             "applied_by": name,
                         }
+                        selected_route = selected.get("route")
+                        if isinstance(selected_route, dict):
+                            active_route_records.append(copy.deepcopy(selected_route))
+                        else:
+                            active_route_records.append(copy.deepcopy(selected))
+                routes_by_id = entities.get("routes_by_id")
+                if route_ids and isinstance(routes_by_id, dict):
+                    known_ids = {
+                        str(record.get("route_id") or record.get("id"))
+                        for record in active_route_records
+                        if isinstance(record, dict)
+                    }
+                    for route_id in route_ids:
+                        if route_id in known_ids:
+                            continue
+                        record = routes_by_id.get(route_id)
+                        if isinstance(record, dict):
+                            active_route_records.append(copy.deepcopy(record))
+                if active_route_records:
+                    entities["active_route_records"] = active_route_records
+                else:
+                    entities.pop("active_route_records", None)
                 entities.pop("last_routes", None)
                 entities.pop("last_route_options", None)
                 entities.pop("route_selection_history", None)
@@ -4512,6 +6856,30 @@ class CoroutineWorkspace:
             elif name == "get_climate_settings":
                 entities["last_climate_settings"] = copy.deepcopy(payload)
                 self.remember("last_climate_settings_turn", self.last_user_message)
+            elif name == "get_weather":
+                entities["last_weather"] = copy.deepcopy(payload)
+                self.remember("last_weather_turn", self.last_user_message)
+            elif name == "get_charging_specs_and_status":
+                entities["last_charging_specs_and_status"] = copy.deepcopy(payload)
+                self.remember("last_charging_specs_turn", self.last_user_message)
+                if self._charging_remaining_range_unavailable(payload):
+                    self._record_unknown_charging_range(payload)
+            elif name == "get_distance_by_soc":
+                distance = self._parse_first_number(payload.get("distance_km"))
+                if not isinstance(distance, (int, float)) or isinstance(distance, bool):
+                    distance = self._parse_first_number(item.get("distance_km"))
+                distance_fact = {
+                    "initial_state_of_charge": arguments.get("initial_state_of_charge"),
+                    "final_state_of_charge": arguments.get("final_state_of_charge"),
+                    "distance_km": distance,
+                    "result": copy.deepcopy(payload),
+                }
+                if "distance_raw" in item:
+                    distance_fact["distance_raw"] = copy.deepcopy(item["distance_raw"])
+                entities["last_distance_by_soc"] = distance_fact
+                history = entities.setdefault("distance_by_soc_history", [])
+                if isinstance(history, list):
+                    history.append(copy.deepcopy(distance_fact))
             elif name == "get_location_id_by_location_name":
                 location_id = payload.get("location_id") or payload.get("id")
                 location_name = arguments.get("location") or payload.get("name")
@@ -4559,6 +6927,13 @@ class CoroutineWorkspace:
                 pois = self._summarize_pois(item, arguments)
                 if pois:
                     entities["last_pois"] = pois
+                    entities["last_poi_search"] = {
+                        "turn": self.last_user_message,
+                        "tool_name": name,
+                        "arguments": copy.deepcopy(arguments),
+                        "category_poi": arguments.get("category_poi"),
+                        "pois": copy.deepcopy(pois),
+                    }
                     pois_by_id = entities.setdefault("pois_by_id", {})
                     if isinstance(pois_by_id, dict):
                         for poi in pois:
@@ -4581,12 +6956,27 @@ class CoroutineWorkspace:
                     plan = {
                         "charging_station_id": station_id,
                         "charging_station_plug_id": plug_id,
+                        "start_state_of_charge": arguments.get("start_state_of_charge"),
+                        "target_state_of_charge": arguments.get("target_state_of_charge"),
                         "result": copy.deepcopy(payload),
                     }
                     if isinstance(poi, dict):
                         for key in ("name", "phone_number", "phone", "display"):
                             if key in poi:
                                 plan[key] = copy.deepcopy(poi[key])
+                        for key in (
+                            "poi_id",
+                            "id",
+                            "navigation_id",
+                            "host_location_id",
+                            "category",
+                            "charging_plugs",
+                            "plug_ids",
+                            "available_plug_ids",
+                        ):
+                            if key in poi:
+                                plan[key] = copy.deepcopy(poi[key])
+                        self._remember_selected_poi(poi)
                     entities["selected_charging_plan"] = plan
             elif name == "get_routes_from_start_to_destination":
                 routes = self._summarize_routes(item)
@@ -4892,8 +7282,44 @@ class CoroutineWorkspace:
             parts.append(topic.strip())
         if isinstance(location, str) and location.strip():
             parts.append(f"at {location.strip()}")
+        attendee_ids = cls._string_list(entry.get("attendees"))
+        if attendee_ids:
+            entry["attendee_ids"] = attendee_ids
+            entry["attendee_count"] = len(attendee_ids)
         entry["display"] = " ".join(parts)
         return entry
+
+    @staticmethod
+    def _string_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, str) and item]
+
+    def _recent_calendar_attendee_ids(self) -> list[str]:
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return []
+        ids: list[str] = []
+
+        def add_from_entry(entry: Any) -> None:
+            if not isinstance(entry, dict):
+                return
+            for key in ("attendee_ids", "attendees"):
+                for contact_id in self._string_list(entry.get(key)):
+                    if contact_id not in ids:
+                        ids.append(contact_id)
+
+        next_entry = entities.get("next_calendar_entry")
+        add_from_entry(next_entry)
+        last_calendar = entities.get("last_calendar")
+        if isinstance(last_calendar, dict):
+            for key in ("entries", "meetings"):
+                entries = last_calendar.get(key)
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    add_from_entry(entry)
+        return ids
 
     def _summarize_routes(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -5016,6 +7442,42 @@ class CoroutineWorkspace:
             merged.update(copy.deepcopy(contact))
             contacts_by_id[contact_id] = merged
 
+    @staticmethod
+    def _normalize_contact_role(role: Any) -> str:
+        if not isinstance(role, str):
+            return ""
+        return re.sub(r"[^a-z0-9]+", "_", role.strip().lower()).strip("_")
+
+    def _remember_contact_role(
+        self,
+        role: Any,
+        contact_ids: list[str],
+        contacts: list[dict[str, Any]],
+        required_fields: list[str] | None = None,
+    ) -> None:
+        role_key = self._normalize_contact_role(role)
+        if not role_key:
+            return
+        ids = [
+            contact_id
+            for contact_id in contact_ids
+            if isinstance(contact_id, str) and contact_id
+        ]
+        if not ids:
+            return
+        self._ensure_scratchpad_shape()
+        roles = self.scratchpad["entities"].setdefault("contact_roles", {})
+        if not isinstance(roles, dict):
+            roles = {}
+            self.scratchpad["entities"]["contact_roles"] = roles
+        roles[role_key] = {
+            "role": role_key,
+            "contact_ids": ids,
+            "contacts": copy.deepcopy(contacts),
+            "required_fields": list(required_fields or []),
+            "turn": self.last_user_message,
+        }
+
     def call_tool_sync(self, tool_name: str, arguments: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         """Public policy-aware single-call entry point."""
 
@@ -5124,11 +7586,32 @@ class CoroutineWorkspace:
             }
             for call in normalized
         ]
-        normalized = self._repair_climate_sync_inverse_calls(normalized)
+        normalized = [
+            self._repair_explicit_poi_identity_call(call)
+            for call in normalized
+        ]
+        normalized = [
+            self._repair_charging_station_plug_pair(call)
+            for call in normalized
+        ]
+        normalized = [
+            self._repair_charging_location_search_to_route(call)
+            for call in normalized
+        ]
+        normalized = [
+            self._repair_later_segment_charging_search_kilometer(call)
+            for call in normalized
+        ]
         local_slots: list[dict[str, Any] | None] = [None] * len(normalized)
         bridge_calls: list[dict[str, Any]] = []
         bridge_positions: list[int] = []
         for index, call in enumerate(normalized):
+            self._abort_if_unknown_charging_range_blocks(call)
+            self._abort_if_raw_full_window_open_needs_explicit_target(call)
+            route_email_blocker = self._long_route_email_needs_charging_facts_result(call)
+            if route_email_blocker is not None:
+                local_slots[index] = route_email_blocker
+                continue
             local_result = self._known_poi_location_lookup_result(call)
             if local_result is not None:
                 local_slots[index] = local_result
@@ -5335,6 +7818,242 @@ class CoroutineWorkspace:
             return next(iter(matches.values()))
         return None
 
+    def _repair_explicit_poi_identity_call(self, call: dict[str, Any]) -> dict[str, Any]:
+        selected = self._current_or_referred_selected_charging_poi()
+        if not isinstance(selected, dict):
+            return call
+        selected_id = (
+            selected.get("poi_id")
+            or selected.get("id")
+            or selected.get("navigation_id")
+        )
+        if not isinstance(selected_id, str) or not selected_id:
+            return call
+        tool_name = call.get("tool_name")
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return call
+        if tool_name in {
+            "calculate_charging_time_by_soc",
+            "calculate_charging_soc_by_time",
+        }:
+            return self._repair_charging_calculation_station(
+                call,
+                selected,
+                selected_id,
+            )
+        if tool_name == "get_routes_from_start_to_destination":
+            return self._repair_route_endpoint_to_selected_poi(
+                call,
+                selected,
+                selected_id,
+            )
+        return call
+
+    def _current_or_referred_selected_charging_poi(self) -> dict[str, Any] | None:
+        selected = self.scratchpad.get("entities", {}).get("selected_charging_poi")
+        if isinstance(selected, dict):
+            poi = selected.get("poi") if isinstance(selected.get("poi"), dict) else selected
+            if isinstance(poi, dict):
+                return poi
+        return None
+
+    def _remember_selected_poi(
+        self,
+        poi: dict[str, Any],
+        role: str | None = None,
+        set_current: bool = True,
+    ) -> None:
+        poi_id = poi.get("poi_id") or poi.get("id") or poi.get("navigation_id")
+        if not isinstance(poi_id, str) or not poi_id:
+            return
+        selected = copy.deepcopy(poi)
+        selected.setdefault("poi_id", poi_id)
+        selected.setdefault("navigation_id", poi_id)
+        report = {
+            "status": "SUCCESS",
+            "poi": selected,
+            "selected": selected,
+            "result": selected,
+            "poi_id": poi_id,
+            "id": poi_id,
+            "navigation_id": selected.get("navigation_id"),
+            "name": selected.get("name"),
+        }
+        if role:
+            report["role"] = role
+        if set_current:
+            self.remember_entity("selected_poi", copy.deepcopy(report))
+        role_key = self._selected_poi_role_key(role)
+        if role_key:
+            self.remember_entity(role_key, copy.deepcopy(report))
+        category = str(selected.get("category") or "").casefold()
+        if set_current and (
+            "charging" in category or self._is_charging_poi_id(poi_id)
+        ):
+            self.remember_entity("selected_charging_poi", copy.deepcopy(report))
+
+    @staticmethod
+    def _selected_poi_role_key(role: str | None) -> str | None:
+        if not isinstance(role, str):
+            return None
+        normalized = re.sub(r"[^a-z0-9]+", "_", role.strip().casefold()).strip("_")
+        if not normalized:
+            return None
+        return f"selected_{normalized}_poi"
+
+    def _repair_charging_calculation_station(
+        self,
+        call: dict[str, Any],
+        selected: dict[str, Any],
+        selected_id: str,
+    ) -> dict[str, Any]:
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return call
+        current_station = arguments.get("charging_station_id")
+        if current_station == selected_id:
+            return call
+        if (
+            isinstance(current_station, str)
+            and current_station
+            and isinstance(self._known_poi_by_id(current_station), dict)
+        ):
+            return call
+        if current_station is not None and not self._is_charging_poi_id(current_station):
+            return call
+        plug = self.select_charging_plug(pois=[selected])
+        selected_plug = plug.get("selected") if isinstance(plug, dict) else None
+        plug_id = (
+            selected_plug.get("charging_station_plug_id")
+            if isinstance(selected_plug, dict)
+            else None
+        )
+        repaired = dict(arguments, charging_station_id=selected_id)
+        if isinstance(plug_id, str) and plug_id:
+            repaired["charging_station_plug_id"] = plug_id
+        self.scratchpad["gates"]["explicit_poi_identity_guard"] = {
+            "status": "REPAIRED_CHARGING_CALCULATION",
+            "from_station_id": current_station,
+            "to_station_id": selected_id,
+            "poi_name": selected.get("name"),
+        }
+        return {**call, "arguments": repaired}
+
+    def _repair_charging_station_plug_pair(self, call: dict[str, Any]) -> dict[str, Any]:
+        if call.get("tool_name") not in {
+            "calculate_charging_time_by_soc",
+            "calculate_charging_soc_by_time",
+        }:
+            return call
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return call
+        station_id = arguments.get("charging_station_id")
+        plug_id = arguments.get("charging_station_plug_id")
+        if not isinstance(station_id, str) or not station_id:
+            return call
+        if not isinstance(plug_id, str) or not plug_id:
+            return call
+        poi = self._known_poi_by_id(station_id)
+        if not isinstance(poi, dict):
+            return call
+        known_plug_ids = self._known_plug_ids_for_poi(poi)
+        if not known_plug_ids or plug_id in known_plug_ids:
+            return call
+        selected_plug = self.select_charging_plug(pois=[poi])
+        selected = (
+            selected_plug.get("selected")
+            if isinstance(selected_plug, dict)
+            else None
+        )
+        repaired_plug_id = None
+        if isinstance(selected, dict):
+            repaired_plug_id = (
+                selected.get("charging_station_plug_id")
+                or selected.get("plug_id")
+            )
+        if not isinstance(repaired_plug_id, str) or not repaired_plug_id:
+            return call
+        repaired = dict(arguments, charging_station_plug_id=repaired_plug_id)
+        self.scratchpad["gates"]["charging_station_plug_pair_guard"] = {
+            "status": "REPAIRED",
+            "charging_station_id": station_id,
+            "from_charging_station_plug_id": plug_id,
+            "to_charging_station_plug_id": repaired_plug_id,
+            "reason": "requested plug is not one of the known plugs for the requested charging station",
+        }
+        return {**call, "arguments": repaired}
+
+    def _known_poi_by_id(self, poi_id: str) -> dict[str, Any] | None:
+        entities = self.scratchpad.get("entities", {})
+        pois_by_id = entities.get("pois_by_id") if isinstance(entities, dict) else None
+        if isinstance(pois_by_id, dict):
+            poi = pois_by_id.get(poi_id)
+            if isinstance(poi, dict):
+                return poi
+        for key in ("selected_charging_poi", "selected_poi"):
+            selected = entities.get(key) if isinstance(entities, dict) else None
+            if not isinstance(selected, dict):
+                continue
+            poi = selected.get("poi") if isinstance(selected.get("poi"), dict) else selected
+            if not isinstance(poi, dict):
+                continue
+            known_id = poi.get("poi_id") or poi.get("id") or poi.get("navigation_id")
+            if known_id == poi_id:
+                return poi
+        return None
+
+    @staticmethod
+    def _known_plug_ids_for_poi(poi: dict[str, Any]) -> set[str]:
+        plug_ids: set[str] = set()
+        for key in ("plug_ids", "available_plug_ids"):
+            value = poi.get(key)
+            if isinstance(value, list):
+                plug_ids.update(item for item in value if isinstance(item, str))
+        plugs = poi.get("charging_plugs")
+        if isinstance(plugs, list):
+            for plug in plugs:
+                if not isinstance(plug, dict):
+                    continue
+                plug_id = plug.get("plug_id")
+                if isinstance(plug_id, str):
+                    plug_ids.add(plug_id)
+        return plug_ids
+
+    def _repair_route_endpoint_to_selected_poi(
+        self,
+        call: dict[str, Any],
+        selected: dict[str, Any],
+        selected_id: str,
+    ) -> dict[str, Any]:
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            return call
+        repaired = dict(arguments)
+        repairs: dict[str, Any] = {}
+        for key in ("start_id", "destination_id"):
+            value = repaired.get(key)
+            if value == selected_id:
+                continue
+            if (
+                isinstance(value, str)
+                and value
+                and isinstance(self._known_poi_by_id(value), dict)
+            ):
+                continue
+            if isinstance(value, str) and self._is_charging_poi_id(value):
+                repairs[key] = {"from": value, "to": selected_id}
+                repaired[key] = selected_id
+        if not repairs:
+            return call
+        self.scratchpad["gates"]["explicit_poi_identity_guard"] = {
+            "status": "REPAIRED_ROUTE_ENDPOINT",
+            "repairs": repairs,
+            "poi_name": selected.get("name"),
+        }
+        return {**call, "arguments": repaired}
+
     @staticmethod
     def _restore_raw_result_order(
         results: list[dict[str, Any]],
@@ -5350,152 +8069,71 @@ class CoroutineWorkspace:
             slots[index] = result
         return [result for result in slots if result is not None]
 
-    def _repair_climate_sync_inverse_calls(
-        self,
-        calls: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        intent = self._explicit_climate_sync_intent()
-        if intent is None:
-            return calls
-        source_zone, target_zone = intent
-        entities = self.scratchpad.get("entities", {})
-        repairs: list[dict[str, Any]] = []
-        repaired_calls: list[dict[str, Any]] = []
-        for call in calls:
-            tool_name = call.get("tool_name")
-            arguments = call.get("arguments")
-            if not isinstance(arguments, dict):
-                repaired_calls.append(call)
-                continue
-            repaired_arguments = dict(arguments)
-            if tool_name == "set_climate_temperature":
-                temp_state = entities.get("last_temperature_state")
-                replacement = self._inverse_climate_temperature_repair(
-                    arguments,
-                    temp_state,
-                    source_zone,
-                    target_zone,
-                )
-                if replacement is not None:
-                    repaired_arguments = replacement
-            elif tool_name == "set_seat_heating":
-                heat_state = entities.get("last_seat_heating_state")
-                replacement = self._inverse_seat_heating_repair(
-                    arguments,
-                    heat_state,
-                    source_zone,
-                    target_zone,
-                )
-                if replacement is not None:
-                    repaired_arguments = replacement
-            if repaired_arguments != arguments:
-                repairs.append(
-                    {
-                        "tool_name": str(tool_name),
-                        "from_arguments": copy.deepcopy(arguments),
-                        "to_arguments": copy.deepcopy(repaired_arguments),
-                        "source_zone": source_zone,
-                        "target_zone": target_zone,
-                    }
-                )
-                call = dict(call, arguments=repaired_arguments)
-            repaired_calls.append(call)
-        if repairs:
-            self.scratchpad["gates"]["climate_sync_guard"] = {
-                "status": "REPAIRED",
-                "repairs": repairs,
-            }
-        return repaired_calls
+    def _preferred_air_circulation_mode(self, *, ac_on: bool = False) -> str | None:
+        ac_known_on = ac_on
+        climate = self.scratchpad.get("entities", {}).get("last_climate_settings")
+        if isinstance(climate, dict) and climate.get("air_conditioning") is True:
+            ac_known_on = True
 
-    def _explicit_climate_sync_intent(self) -> tuple[str, str] | None:
-        text = " ".join(str(self.last_user_message or "").casefold().split())
-        if not ("driver" in text and "passenger" in text):
-            return None
-        if not any(word in text for word in ("sync", "copy", "match", "same as")):
-            return None
-        for target_word, target_zone, source_word, source_zone in (
-            ("driver", "DRIVER", "passenger", "PASSENGER"),
-            ("passenger", "PASSENGER", "driver", "DRIVER"),
-        ):
-            if self._text_order(text, target_word, "match", source_word):
-                return source_zone, target_zone
-            if self._text_order(text, target_word, "same as", source_word):
-                return source_zone, target_zone
-            if self._text_order(text, target_word, "like", source_word):
-                return source_zone, target_zone
-            if "copy" in text and self._text_order(text, "copy", source_word, target_word):
-                return source_zone, target_zone
+        for preference_text in self._air_circulation_preference_texts():
+            mode = self._parse_air_circulation_preference_mode(
+                preference_text,
+                ac_on=ac_known_on,
+            )
+            if mode is not None:
+                return mode
         return None
+
+    def _air_circulation_preference_texts(self) -> list[str]:
+        entities = self.scratchpad.get("entities", {})
+        stored = entities.get("user_preferences")
+        preferences = stored.get("preferences") if isinstance(stored, dict) else None
+        texts: list[str] = []
+        if isinstance(preferences, dict):
+            vehicle = (
+                preferences.get("vehicle_settings")
+                if isinstance(preferences.get("vehicle_settings"), dict)
+                else {}
+            )
+            climate_control = vehicle.get("climate_control") if isinstance(vehicle, dict) else None
+            if isinstance(climate_control, str) and climate_control.strip():
+                texts.append(climate_control.strip())
+            elif isinstance(climate_control, list):
+                texts.extend(
+                    str(item).strip()
+                    for item in climate_control
+                    if str(item).strip()
+                )
+        if isinstance(stored, dict):
+            summary = stored.get("summary")
+            if isinstance(summary, list):
+                texts.extend(
+                    str(item).split(":", 1)[-1].strip()
+                    for item in summary
+                    if "air circulation" in str(item).casefold()
+                    and str(item).strip()
+                )
+        return texts
 
     @staticmethod
-    def _text_order(text: str, *terms: str) -> bool:
-        offset = 0
-        for term in terms:
-            index = text.find(term, offset)
-            if index < 0:
-                return False
-            offset = index + len(term)
-        return True
+    def _parse_air_circulation_preference_mode(text: str, *, ac_on: bool) -> str | None:
+        cleaned = " ".join(str(text or "").replace("_", " ").upper().split())
 
-    def _inverse_climate_temperature_repair(
-        self,
-        arguments: dict[str, Any],
-        temp_state: Any,
-        source_zone: str,
-        target_zone: str,
-    ) -> dict[str, Any] | None:
-        if not isinstance(temp_state, dict):
+        def find_mode(fragment: str) -> str | None:
+            if "FRESH AIR" in fragment:
+                return "FRESH_AIR"
+            if "RECIRCULATION" in fragment or "RECIRCULATE" in fragment:
+                return "RECIRCULATION"
+            if "AUTO" in fragment or "AUTOMATIC" in fragment:
+                return "AUTO"
             return None
-        seat_zone = str(arguments.get("seat_zone") or "").upper()
-        requested_temp = arguments.get("temperature")
-        source_temp = temp_state.get(f"climate_temperature_{source_zone.lower()}")
-        target_temp = temp_state.get(f"climate_temperature_{target_zone.lower()}")
-        if not all(
-            isinstance(value, (int, float)) and not isinstance(value, bool)
-            for value in (requested_temp, source_temp, target_temp)
-        ):
-            return None
-        if (
-            seat_zone == source_zone
-            and _numbers_equal(requested_temp, target_temp)
-            and not _numbers_equal(source_temp, target_temp)
-        ):
-            return {
-                **arguments,
-                "seat_zone": target_zone,
-                "temperature": float(source_temp),
-            }
-        return None
 
-    def _inverse_seat_heating_repair(
-        self,
-        arguments: dict[str, Any],
-        heat_state: Any,
-        source_zone: str,
-        target_zone: str,
-    ) -> dict[str, Any] | None:
-        if not isinstance(heat_state, dict):
-            return None
-        seat_zone = str(arguments.get("seat_zone") or "").upper()
-        requested_level = arguments.get("level")
-        source_level = heat_state.get(f"seat_heating_{source_zone.lower()}")
-        target_level = heat_state.get(f"seat_heating_{target_zone.lower()}")
-        if not all(
-            isinstance(value, (int, float)) and not isinstance(value, bool)
-            for value in (requested_level, source_level, target_level)
-        ):
-            return None
-        if (
-            seat_zone == source_zone
-            and _numbers_equal(requested_level, target_level)
-            and not _numbers_equal(source_level, target_level)
-        ):
-            return {
-                **arguments,
-                "seat_zone": target_zone,
-                "level": int(source_level),
-            }
-        return None
+        if ac_on and "THEN" in cleaned:
+            after_then = cleaned.split("THEN", 1)[1]
+            mode = find_mode(after_then)
+            if mode is not None:
+                return mode
+        return find_mode(cleaned)
 
     def _read_cache_key(self, call: dict[str, Any]) -> str | None:
         if call.get("tool_name") in MUTATING_TOOL_NAMES:
@@ -5594,8 +8232,151 @@ class CoroutineWorkspace:
             if call.get("tool_name") != "send_email":
                 repaired.append(call)
                 continue
-            repaired.append(self._repair_send_email_contact_recipient(call))
+            email_call = self._repair_send_email_contact_recipient(call)
+            email_call = self._repair_send_email_charging_details(email_call)
+            repaired.append(email_call)
         return repaired
+
+    def _repair_send_email_charging_details(
+        self,
+        call: dict[str, Any],
+    ) -> dict[str, Any]:
+        args = call.get("arguments")
+        if not isinstance(args, dict):
+            return call
+        content = args.get("content_message")
+        if not isinstance(content, str) or not content.strip():
+            return call
+        details = self._same_turn_charging_email_details(content)
+        if not details:
+            return call
+        new_call = copy.deepcopy(call)
+        new_args = dict(args)
+        new_args["content_message"] = content.rstrip().rstrip(".") + ". " + details
+        new_call["arguments"] = new_args
+        self.scratchpad["gates"]["charging_email_detail_guard"] = {
+            "status": "REPAIRED",
+            "tool_name": "send_email",
+            "reason": (
+                "Same-turn charging station search was grounded, and the email "
+                "content was route/travel related but omitted the found station."
+            ),
+            "added_details": details,
+        }
+        return new_call
+
+    def _same_turn_charging_email_details(self, content: str) -> str | None:
+        if not self._email_content_is_route_or_charging_related(content):
+            return None
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        search = entities.get("last_poi_search")
+        if not isinstance(search, dict):
+            return None
+        if search.get("turn") != self.last_user_message:
+            return None
+        category = str(search.get("category_poi") or "").casefold()
+        if "charging" not in category:
+            return None
+        pois = search.get("pois")
+        if not isinstance(pois, list) or not pois:
+            return None
+        content_folded = content.casefold()
+        for poi in pois:
+            if not isinstance(poi, dict):
+                continue
+            name = poi.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if name.strip().casefold() in content_folded:
+                return None
+            details = self._charging_poi_email_detail_text(poi, search)
+            if details:
+                return details
+        return None
+
+    @staticmethod
+    def _email_content_is_route_or_charging_related(content: str) -> bool:
+        folded = content.casefold()
+        triggers = (
+            "travel time",
+            "trip",
+            "route",
+            "journey",
+            "drive",
+            "arrival",
+            "charging",
+            "charger",
+            "station",
+        )
+        return any(trigger in folded for trigger in triggers)
+
+    def _charging_poi_email_detail_text(
+        self,
+        poi: dict[str, Any],
+        search: dict[str, Any],
+    ) -> str | None:
+        name = poi.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return None
+        arguments = search.get("arguments")
+        arguments = arguments if isinstance(arguments, dict) else {}
+        kilometer = self._parse_first_number(arguments.get("at_kilometer"))
+        route_id = arguments.get("route_id")
+        if kilometer is None and isinstance(route_id, str):
+            kilometer = self._poi_route_position_km(poi, route_id)
+
+        first = f"Charging station: {name.strip()}"
+        if isinstance(kilometer, (int, float)) and not isinstance(kilometer, bool):
+            first += f" near the {float(kilometer):g}-km point"
+        parts = [first]
+
+        phone = poi.get("phone_number") or poi.get("phone")
+        if isinstance(phone, str) and phone.strip():
+            parts.append(f"Phone: {phone.strip()}")
+
+        plug = self._highest_power_charging_plug(poi)
+        if plug:
+            plug_parts: list[str] = []
+            power = self._parse_first_number(plug.get("power_kw"))
+            if isinstance(power, (int, float)) and not isinstance(power, bool):
+                plug_parts.append(f"{float(power):g} kW")
+            power_type = plug.get("power_type")
+            if isinstance(power_type, str) and power_type.strip():
+                plug_parts.append(power_type.strip())
+            availability = plug.get("availability")
+            if isinstance(availability, str) and availability.strip():
+                plug_parts.append(f"({availability.strip()})")
+            if plug_parts:
+                parts.append("Plug: " + " ".join(plug_parts))
+
+        detour = self._parse_first_number(poi.get("detour_km"))
+        if isinstance(detour, (int, float)) and not isinstance(detour, bool):
+            detour_text = f"Detour: {float(detour):g} km"
+            minutes = self._parse_first_number(poi.get("detour_minutes"))
+            if isinstance(minutes, (int, float)) and not isinstance(minutes, bool):
+                detour_text += f", about {int(minutes)} min"
+            parts.append(detour_text)
+
+        return ". ".join(parts) + "."
+
+    @staticmethod
+    def _highest_power_charging_plug(poi: dict[str, Any]) -> dict[str, Any] | None:
+        plugs = poi.get("charging_plugs")
+        if not isinstance(plugs, list):
+            return None
+        candidates = [plug for plug in plugs if isinstance(plug, dict)]
+        if not candidates:
+            return None
+
+        def sort_key(plug: dict[str, Any]) -> float:
+            power = CoroutineWorkspace._parse_first_number(plug.get("power_kw"))
+            if isinstance(power, (int, float)) and not isinstance(power, bool):
+                return float(power)
+            return -1.0
+
+        return max(candidates, key=sort_key)
 
     def _repair_send_email_contact_recipient(
         self,
@@ -5614,6 +8395,14 @@ class CoroutineWorkspace:
         if not isinstance(selected_contact, dict):
             return call
         selected_id = selected_contact.get("contact_id") or selected_contact.get("id")
+        role_repaired = self._repair_send_email_contact_recipient_from_roles(
+            call,
+            args,
+            selected_email,
+            selected_id,
+        )
+        if role_repaired is not call:
+            return role_repaired
         target_id = self._unique_contact_intersection_id()
         if not (
             isinstance(selected_id, str)
@@ -5644,6 +8433,78 @@ class CoroutineWorkspace:
             ),
         }
         return new_call
+
+    def _repair_send_email_contact_recipient_from_roles(
+        self,
+        call: dict[str, Any],
+        args: dict[str, Any],
+        selected_email: str,
+        selected_id: Any,
+    ) -> dict[str, Any]:
+        if not isinstance(selected_id, str) or not selected_id:
+            return call
+        target_id = self._contact_role_id(
+            "email_recipient",
+            "message_recipient",
+            "recipient_contact",
+            "recipient",
+        )
+        if not isinstance(target_id, str) or target_id == selected_id:
+            return call
+        subject_id = self._contact_role_id(
+            "contact_details_subject",
+            "details_subject",
+            "email_subject_contact",
+            "subject_contact",
+            "subject",
+        )
+        if subject_id != selected_id:
+            return call
+        target_contact = self._contact_record_by_id(target_id)
+        if not isinstance(target_contact, dict):
+            return call
+        target_email = target_contact.get("email")
+        if not isinstance(target_email, str) or not target_email.strip():
+            return call
+        new_call = copy.deepcopy(call)
+        new_args = dict(args)
+        new_args["email_addresses"] = [target_email.strip()]
+        new_call["arguments"] = new_args
+        self.scratchpad["gates"]["contact_recipient_role_guard"] = {
+            "status": "REPAIRED",
+            "tool_name": "send_email",
+            "from_contact_id": selected_id,
+            "to_contact_id": target_id,
+            "from_email": selected_email,
+            "to_email": target_email.strip(),
+            "reason": (
+                "Current-turn contact roles marked a different email recipient, "
+                "and the selected address belonged to the contact-details subject."
+            ),
+        }
+        return new_call
+
+    def _contact_role_id(self, *roles: str) -> str | None:
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return None
+        role_store = entities.get("contact_roles")
+        if not isinstance(role_store, dict):
+            return None
+        for role in roles:
+            role_key = self._normalize_contact_role(role)
+            entry = role_store.get(role_key)
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("turn") != self.last_user_message:
+                continue
+            contact_ids = entry.get("contact_ids")
+            if not isinstance(contact_ids, list) or len(contact_ids) != 1:
+                continue
+            contact_id = contact_ids[0]
+            if isinstance(contact_id, str) and contact_id:
+                return contact_id
+        return None
 
     def _unique_contact_intersection_id(self) -> str | None:
         entities = self.scratchpad.get("entities", {})
@@ -5701,6 +8562,11 @@ class CoroutineWorkspace:
         unresolved_text_patterns = (
             re.compile(r"^(?:none|null|unknown|n/?a|tbd)$", re.IGNORECASE),
             re.compile(
+                r"\b(?:none|null|unknown|n/?a|tbd)\s*"
+                r"(?:h|hr|hrs|hour|hours|m|min|mins|minute|minutes|km|kilometers?)\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
                 r"\b(?:approximately|about|around)\s+(?:none|null|unknown)\b",
                 re.IGNORECASE,
             ),
@@ -5750,13 +8616,13 @@ class CoroutineWorkspace:
                     return unresolved
         return None
 
-    @staticmethod
-    def _confirmation_prompt_for_calls(calls: list[dict[str, Any]]) -> str:
+    def _confirmation_prompt_for_calls(self, calls: list[dict[str, Any]]) -> str:
+        context_prefix = self._confirmation_context_prefix_for_calls(calls)
         if len(calls) == 1:
             call = calls[0]
             summary = CoroutineWorkspace._confirmation_action_summary_for_call(call)
             return (
-                "This action requires confirmation. I will "
+                f"{context_prefix}This action requires confirmation. I will "
                 f"{summary}. Please confirm with yes."
             )
         summaries = [
@@ -5764,9 +8630,46 @@ class CoroutineWorkspace:
             for call in calls
         ]
         return (
-            "These actions require confirmation: "
+            f"{context_prefix}These actions require confirmation: "
             f"{_human_join(summaries)}. Please confirm with yes."
         )
+
+    def _confirmation_context_prefix_for_calls(self, calls: list[dict[str, Any]]) -> str:
+        if not any(call.get("tool_name") == "send_email" for call in calls):
+            return ""
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return ""
+        search = entities.get("last_poi_search")
+        if not isinstance(search, dict):
+            return ""
+        if search.get("turn") != self.last_user_message:
+            return ""
+        category = str(search.get("category_poi") or "").lower()
+        if "charging" not in category:
+            return ""
+        pois = search.get("pois")
+        if not isinstance(pois, list) or not pois:
+            return ""
+        names = [
+            str(poi.get("name")).strip()
+            for poi in pois[:3]
+            if isinstance(poi, dict)
+            and isinstance(poi.get("name"), str)
+            and str(poi.get("name")).strip()
+        ]
+        if not names:
+            return ""
+        arguments = search.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        location = ""
+        kilometer = self._parse_first_number(arguments.get("at_kilometer"))
+        if isinstance(kilometer, (int, float)):
+            location = f" near the {kilometer:g}-km point"
+        elif isinstance(arguments.get("route_id"), str):
+            location = " along the route"
+        return f"I found {_human_join(names)}{location}. "
 
     @staticmethod
     def _confirmation_action_summary_for_call(call: dict[str, Any]) -> str:
@@ -5901,10 +8804,15 @@ class CoroutineWorkspace:
         if blocker:
             return blocker
 
+        allow_full_window_open = pending.get("allow_full_window_open") is True
         self._confirmation_execution_depth += 1
+        if allow_full_window_open:
+            self._explicit_full_window_open_depth += 1
         try:
             results = self._call_raw_tools_sync(calls)
         finally:
+            if allow_full_window_open:
+                self._explicit_full_window_open_depth -= 1
             self._confirmation_execution_depth -= 1
         for result in results:
             if result.get("status") != "SUCCESS":
@@ -5932,8 +8840,7 @@ class CoroutineWorkspace:
             or self._confirmation_success_message_for_calls(calls)
         )
         report["message"] = message
-        self._respond_locked(message)
-        return {"status": "SUCCESS", "actions": results, "report": report, "message": message}
+        self._abort_with_response(message)
 
     def _current_policy_context(self) -> dict[str, Any]:
         def load_object(name: str) -> dict[str, Any] | None:
@@ -6213,6 +9120,7 @@ class CoroutineWorkspace:
         self,
         contact_ids: str | list[str],
         required_fields: list[str] | tuple[str, ...] | None = None,
+        role: str | None = None,
     ) -> dict[str, Any]:
         """Return contact information in a stable list and ID map."""
 
@@ -6303,6 +9211,9 @@ class CoroutineWorkspace:
             "first": contacts[0],
             "raw_result": result,
         }
+        role_key = self._normalize_contact_role(role)
+        if role_key:
+            normalized["role"] = role_key
         if len(contacts) == 1:
             for field in (
                 "email",
@@ -6315,8 +9226,104 @@ class CoroutineWorkspace:
                 if field in contacts[0]:
                     normalized[field] = contacts[0][field]
         self.remember_entity("last_contacts", contacts)
+        self._remember_contact_role(role, ids, contacts, fields)
         self._store_helper_report(gate_name, normalized)
         return normalized
+
+    def send_contact_details_to_contact(
+        self,
+        recipient_contact_id: str,
+        subject_contact_id: str,
+        required_fields: list[str] | tuple[str, ...] | None = None,
+        intro: str | None = None,
+    ) -> dict[str, Any]:
+        """Send one contact's grounded details to another explicit contact."""
+
+        gate_name = "send_contact_details_to_contact"
+        if not isinstance(recipient_contact_id, str) or not recipient_contact_id.strip():
+            raise ValueError("recipient_contact_id must be a grounded contact ID")
+        if not isinstance(subject_contact_id, str) or not subject_contact_id.strip():
+            raise ValueError("subject_contact_id must be a grounded contact ID")
+        recipient_contact_id = recipient_contact_id.strip()
+        subject_contact_id = subject_contact_id.strip()
+
+        fields = [
+            str(field).strip()
+            for field in (required_fields or [])
+            if isinstance(field, str) and str(field).strip()
+        ]
+        recipient = self.get_contact_details(recipient_contact_id, required_fields=["email"])
+        if recipient.get("status") != "SUCCESS":
+            return recipient
+        subject_required = fields if fields else None
+        subject = self.get_contact_details(
+            subject_contact_id,
+            required_fields=subject_required,
+        )
+        if subject.get("status") != "SUCCESS":
+            return subject
+
+        recipient_email = recipient.get("email")
+        recipient_record = recipient.get("first")
+        subject_record = subject.get("first")
+        if not isinstance(recipient_email, str) or not recipient_email.strip():
+            return self._limitation_response(
+                gate_name,
+                "send the contact details",
+                reason="the recipient contact email was unavailable",
+            )
+        if not isinstance(recipient_record, dict) or not isinstance(subject_record, dict):
+            return self._limitation_response(
+                gate_name,
+                "send the contact details",
+                reason="the contact detail result had an unexpected shape",
+            )
+
+        candidate_fields = fields or ["phone_number", "email"]
+        detail_parts: list[str] = []
+        for field in candidate_fields:
+            value = self._response_path_value(subject_record, field)
+            value = self._plain_value(value)
+            if value is None:
+                continue
+            label = field.rsplit(".", 1)[-1].replace("_", " ")
+            detail_parts.append(f"{label}: {value}")
+        if not detail_parts:
+            return self._limitation_response(
+                gate_name,
+                "send the contact details",
+                reason="no requested subject contact details were available",
+            )
+
+        subject_name = (
+            _clean_string(subject_record.get("display_name"))
+            or _clean_string(subject_record.get("name"))
+            or subject_contact_id
+        )
+        prefix = _clean_string(intro)
+        if not prefix:
+            prefix = f"Here are the contact details for {subject_name}:"
+        content_message = f"{prefix} " + "; ".join(detail_parts)
+        call = (
+            "send_email",
+            {
+                "email_addresses": [recipient_email.strip()],
+                "content_message": content_message,
+            },
+        )
+        self._store_helper_report(
+            gate_name,
+            {
+                "helper": gate_name,
+                "status": "READY_TO_SEND",
+                "recipient_contact_id": recipient_contact_id,
+                "subject_contact_id": subject_contact_id,
+                "email_addresses": [recipient_email.strip()],
+                "included_fields": candidate_fields,
+                "content_message": content_message,
+            },
+        )
+        return self._call_raw_tool_sync(*call)
 
     def get_next_calendar_entry(self) -> dict[str, Any]:
         """Return current-day calendar entries and the next chronological entry."""
@@ -6755,6 +9762,342 @@ class CoroutineWorkspace:
             "message": message,
         }
 
+    def set_exterior_lights_safe(self, intent: str) -> dict[str, Any]:
+        """Handle broad exterior-light requests after intent is model-resolved."""
+
+        gate_name = "set_exterior_lights_safe"
+        resolved_intent = self._normalize_exterior_lights_intent(intent)
+        if resolved_intent is None:
+            return self._limitation_response(
+                gate_name,
+                "handle the exterior-light request safely",
+                reason=(
+                    "set_exterior_lights_safe requires intent to be one of "
+                    "improve_visibility, turn_on_headlights, or turn_off_exterior_lights"
+                ),
+            )
+        if resolved_intent == "improve_visibility":
+            return self.set_fog_lights_on_safe()
+
+        read_call = ("get_exterior_lights_status", {})
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "handle the exterior-light request safely",
+            [read_call],
+        )
+        if blocker:
+            return blocker
+        result = self._call_raw_tool_sync(*read_call)
+        if result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "handle the exterior-light request safely",
+                result,
+            )
+        lights = result_value(result)
+        if not isinstance(lights, dict):
+            return self._limitation_response(
+                gate_name,
+                "handle the exterior-light request safely",
+                reason="the exterior-light result had an unexpected shape",
+            )
+        states = self._exterior_light_bool_states(gate_name, lights)
+        if resolved_intent == "turn_on_headlights":
+            return self._set_headlights_from_state(states)
+        return self._turn_off_exterior_lights_from_state(states)
+
+    @staticmethod
+    def _normalize_exterior_lights_intent(intent: Any) -> str | None:
+        if not isinstance(intent, str):
+            return None
+        normalized = intent.strip().casefold().replace("-", "_").replace(" ", "_")
+        if normalized in {
+            "improve_visibility",
+            "turn_on_headlights",
+            "turn_off_exterior_lights",
+        }:
+            return normalized
+        return None
+
+    def _exterior_light_bool_states(
+        self,
+        gate_name: str,
+        lights: dict[str, Any],
+    ) -> dict[str, bool]:
+        fields = {
+            "fog_lights": "fog-light state",
+            "head_lights_low_beams": "low-beam state",
+            "head_lights_high_beams": "high-beam state",
+        }
+        states: dict[str, bool] = {}
+        unknown_response_fields: list[str] = []
+        for field, label in fields.items():
+            value = lights.get(field)
+            if isinstance(value, UnknownToolResponseValue) or field not in lights:
+                unknown_response_fields.append(f"result.get_exterior_lights_status.{field}")
+                continue
+            if not isinstance(value, bool):
+                return self._limitation_response(
+                    gate_name,
+                    "handle the exterior-light request safely",
+                    reason=f"the {label} was not a boolean value",
+                )
+            states[field] = value
+        if unknown_response_fields:
+            return self._limitation_response(
+                gate_name,
+                "handle the exterior-light request safely",
+                reason=(
+                    "the car system did not provide all required exterior-light "
+                    f"fields: {', '.join(unknown_response_fields)}"
+                ),
+            )
+        return states
+
+    def _set_headlights_from_state(self, states: dict[str, bool]) -> dict[str, Any]:
+        gate_name = "set_exterior_lights_safe"
+        fog_on = states["fog_lights"]
+        low_on = states["head_lights_low_beams"]
+        high_on = states["head_lights_high_beams"]
+        if low_on is not True:
+            action_call = ("set_head_lights_low_beams", {"on": True})
+            blocker = self._require_tool_surface_for_calls(
+                gate_name,
+                "turn on the headlights safely",
+                [action_call],
+            )
+            if blocker:
+                return blocker
+            action_result = self._call_raw_tool_sync(*action_call)
+            if action_result.get("status") != "SUCCESS":
+                return self._failed_tool_response(
+                    gate_name,
+                    "turn on the headlights safely",
+                    action_result,
+                )
+            message = "Low-beam headlights turned on."
+            report = {
+                "helper": gate_name,
+                "status": "SUCCESS",
+                "intent": "turn_on_headlights",
+                "actions": ["set_head_lights_low_beams"],
+                "results": [action_result],
+                "message": message,
+            }
+            self._store_helper_report(gate_name, report)
+            self._helper_message(message)
+            return {
+                "status": "SUCCESS",
+                "actions": [action_result],
+                "report": report,
+                "message": message,
+            }
+        if high_on is True:
+            message = "The headlights are already on."
+            report = {
+                "helper": gate_name,
+                "status": "SUCCESS",
+                "intent": "turn_on_headlights",
+                "actions": [],
+                "message": message,
+            }
+            self._store_helper_report(gate_name, report)
+            self._helper_message(message)
+            return {"status": "SUCCESS", "actions": [], "report": report, "message": message}
+        if fog_on is True:
+            message = (
+                "I can't turn on the high beams while the fog lights are on because policy 014 "
+                "prohibits that combination."
+            )
+            report = {
+                "helper": gate_name,
+                "status": "BLOCKED",
+                "intent": "turn_on_headlights",
+                "policy": "014",
+                "message": message,
+            }
+            self.scratchpad["gates"][gate_name] = {
+                "status": "NO",
+                "policy": "014",
+                "reason": "fog lights are on",
+            }
+            self._store_helper_report(gate_name, report)
+            self._abort_with_response(message)
+
+        action_call = ("set_head_lights_high_beams", {"on": True})
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "turn on the high beams safely",
+            [action_call],
+        )
+        if blocker:
+            return blocker
+        if self._tool_requires_confirmation("set_head_lights_high_beams"):
+            prompt = (
+                "Your low-beam headlights are already on. This action requires "
+                "confirmation. I checked the exterior lights: fog lights are off, "
+                "and high beams are currently off. I will turn the high beam "
+                "headlights on (on=True). Please confirm with yes."
+            )
+            pending = {
+                "type": "high_beams_confirmation",
+                "gate_name": gate_name,
+                "policy": "004_014",
+                "action": "turn on the high beams safely",
+                "on_confirm_calls": [action_call],
+                "confirmation_prompt": prompt,
+                "confirmation_retry_prompt": (
+                    "Please confirm with yes if you want me to turn on the high beams."
+                ),
+                "response_on_cancel": "Okay, I won't turn on the high beams.",
+                "response_on_success": "High beams turned on.",
+            }
+            self.remember("pending_confirmation", pending)
+            report = {
+                "helper": gate_name,
+                "status": "WAITING_CONFIRMATION",
+                "intent": "turn_on_headlights",
+                "policy": "004_014",
+                "actions": ["set_head_lights_high_beams"],
+                "arguments": [{"on": True}],
+                "message": prompt,
+            }
+            self.scratchpad["gates"][gate_name] = {
+                "status": "WAITING_CONFIRMATION",
+                "policy": "004_014",
+                "actions": report["actions"],
+                "arguments": report["arguments"],
+            }
+            self._store_helper_report(gate_name, report)
+            self._abort_with_response(prompt)
+        action_result = self._call_raw_tool_sync(*action_call)
+        if action_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "turn on the high beams safely",
+                action_result,
+            )
+        message = "High beams turned on."
+        report = {
+            "helper": gate_name,
+            "status": "SUCCESS",
+            "intent": "turn_on_headlights",
+            "policy": "014",
+            "actions": ["set_head_lights_high_beams"],
+            "results": [action_result],
+            "message": message,
+        }
+        self._store_helper_report(gate_name, report)
+        self._helper_message(message)
+        return {
+            "status": "SUCCESS",
+            "actions": [action_result],
+            "report": report,
+            "message": message,
+        }
+
+    def _turn_off_exterior_lights_from_state(
+        self,
+        states: dict[str, bool],
+    ) -> dict[str, Any]:
+        gate_name = "set_exterior_lights_safe"
+        action_calls: list[tuple[str, dict[str, Any]]] = []
+        if states["fog_lights"] is True:
+            action_calls.append(("set_fog_lights", {"on": False}))
+        if states["head_lights_low_beams"] is True:
+            action_calls.append(("set_head_lights_low_beams", {"on": False}))
+        if states["head_lights_high_beams"] is True:
+            action_calls.append(("set_head_lights_high_beams", {"on": False}))
+        if not action_calls:
+            message = "The exterior lights are already off."
+            report = {
+                "helper": gate_name,
+                "status": "SUCCESS",
+                "intent": "turn_off_exterior_lights",
+                "actions": [],
+                "message": message,
+            }
+            self._store_helper_report(gate_name, report)
+            self._helper_message(message)
+            return {"status": "SUCCESS", "actions": [], "report": report, "message": message}
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "turn off the exterior lights safely",
+            action_calls,
+        )
+        if blocker:
+            return blocker
+        if (
+            any(name == "set_head_lights_high_beams" for name, _ in action_calls)
+            and self._tool_requires_confirmation("set_head_lights_high_beams")
+        ):
+            changes = [
+                "turn off the fog lights" if name == "set_fog_lights"
+                else "turn off the low-beam headlights" if name == "set_head_lights_low_beams"
+                else "turn off the high-beam headlights"
+                for name, _ in action_calls
+            ]
+            prompt = (
+                "This action requires confirmation. I checked the exterior lights "
+                f"and will {_human_join(changes)}. Please confirm with yes."
+            )
+            pending = {
+                "type": "exterior_lights_confirmation",
+                "gate_name": gate_name,
+                "policy": "004",
+                "action": "turn off the exterior lights safely",
+                "on_confirm_calls": action_calls,
+                "confirmation_prompt": prompt,
+                "confirmation_retry_prompt": (
+                    "Please confirm with yes if you want me to turn off those exterior lights."
+                ),
+                "response_on_cancel": "Okay, I won't turn off the exterior lights.",
+                "response_on_success": "Exterior lights turned off.",
+            }
+            self.remember("pending_confirmation", pending)
+            report = {
+                "helper": gate_name,
+                "status": "WAITING_CONFIRMATION",
+                "intent": "turn_off_exterior_lights",
+                "policy": "004",
+                "actions": [name for name, _ in action_calls],
+                "arguments": [arguments for _, arguments in action_calls],
+                "message": prompt,
+            }
+            self.scratchpad["gates"][gate_name] = {
+                "status": "WAITING_CONFIRMATION",
+                "policy": "004",
+                "actions": report["actions"],
+                "arguments": report["arguments"],
+            }
+            self._store_helper_report(gate_name, report)
+            self._abort_with_response(prompt)
+        results = self._call_raw_tools_sync(action_calls)
+        for result in results:
+            if result.get("status") != "SUCCESS":
+                return self._failed_tool_response(
+                    gate_name,
+                    "turn off the exterior lights safely",
+                    result,
+                )
+        message = "Exterior lights turned off."
+        report = {
+            "helper": gate_name,
+            "status": "SUCCESS",
+            "intent": "turn_off_exterior_lights",
+            "actions": [name for name, _ in action_calls],
+            "results": results,
+            "message": message,
+        }
+        self._store_helper_report(gate_name, report)
+        self._helper_message(message)
+        return {
+            "status": "SUCCESS",
+            "actions": results,
+            "report": report,
+            "message": message,
+        }
+
     @staticmethod
     def _high_beam_confirmation_prompt(*, fog_on: Any, high_on: Any) -> str:
         if fog_on is True:
@@ -6777,7 +10120,11 @@ class CoroutineWorkspace:
             "on (on=True). Please confirm with yes."
         )
 
-    def open_sunroof_safe(self, percentage: int | float) -> dict[str, Any]:
+    def open_sunroof_safe(
+        self,
+        percentage: int | float,
+        target_is_explicit: bool = False,
+    ) -> dict[str, Any]:
         """Set sunroof position while applying policies 005 and 008/009."""
 
         gate_name = "open_sunroof_safe"
@@ -6810,6 +10157,22 @@ class CoroutineWorkspace:
         opening = target > 0 and (
             not isinstance(current_sunroof, (int, float)) or target > float(current_sunroof)
         )
+        if opening and target == 100 and not target_is_explicit:
+            message = "What percentage should I set the sunroof to?"
+            self.scratchpad["gates"][gate_name] = {
+                "status": "NEEDS_USER_INPUT",
+                "reason": "sunroof target percentage is unresolved",
+            }
+            self._store_helper_report(
+                gate_name,
+                {
+                    "helper": gate_name,
+                    "status": "NEEDS_USER_INPUT",
+                    "reason": "sunroof target percentage is unresolved",
+                    "message": message,
+                },
+            )
+            self._abort_with_response(message)
         action_calls: list[tuple[str, dict[str, Any]]] = []
         adjusted_sunshade = False
         if opening and (not isinstance(current_sunshade, (int, float)) or float(current_sunshade) < 100):
@@ -6939,7 +10302,12 @@ class CoroutineWorkspace:
             self._helper_message(f"Sunroof set to {target_arg:g}%.")
         return {"status": "SUCCESS", "actions": results, "report": report}
 
-    def open_close_window_safe(self, window: str, percentage: int | float) -> dict[str, Any]:
+    def open_close_window_safe(
+        self,
+        window: str,
+        percentage: int | float,
+        target_is_explicit: bool = False,
+    ) -> dict[str, Any]:
         """Move a window while applying CAR-bench policy 007."""
 
         gate_name = "open_close_window_safe"
@@ -6957,6 +10325,28 @@ class CoroutineWorkspace:
                 "move the window",
                 reason="the requested window percentage is outside the supported 0 to 100 range",
             )
+        if target >= 100 and target_is_explicit is not True:
+            prompt = (
+                "What percentage should I open the window to? Please specify a "
+                "target from 0 to 100%."
+            )
+            self.scratchpad["gates"][gate_name] = {
+                "status": "NEEDS_CLARIFICATION",
+                "policy": "window_percentage",
+                "requested_window": window,
+                "blocked_default_percentage": target,
+            }
+            self._store_helper_report(
+                gate_name,
+                {
+                    "helper": gate_name,
+                    "status": "NEEDS_CLARIFICATION",
+                    "window": window,
+                    "blocked_default_percentage": target,
+                    "message": prompt,
+                },
+            )
+            self._abort_with_response(prompt)
         target_arg: int | float = int(target) if target.is_integer() else target
         action_args = {"window": window, "percentage": target_arg}
         if self.tool_available("open_close_window"):
@@ -7022,6 +10412,7 @@ class CoroutineWorkspace:
                 "policy": "007",
                 "action": "move the window safely under policy 007",
                 "on_confirm_calls": [action_call],
+                "allow_full_window_open": target >= 100 and target_is_explicit is True,
                 "confirmation_prompt": prompt,
                 "confirmation_retry_prompt": (
                     "Please confirm with yes if you want me to move the window."
@@ -7054,7 +10445,14 @@ class CoroutineWorkspace:
             )
             self._abort_with_response(prompt)
 
-        result = self._call_raw_tool_sync(*action_call)
+        if target >= 100 and target_is_explicit is True:
+            self._explicit_full_window_open_depth += 1
+            try:
+                result = self._call_raw_tool_sync(*action_call)
+            finally:
+                self._explicit_full_window_open_depth -= 1
+        else:
+            result = self._call_raw_tool_sync(*action_call)
         if result.get("status") != "SUCCESS":
             return self._failed_tool_response(gate_name, "move the window", result)
         message = f"Window {action_args.get('window')} set to {target_arg:g}%."
@@ -7174,8 +10572,15 @@ class CoroutineWorkspace:
         if climate.get("fan_speed", 0) < 2:
             action_calls.append(("set_fan_speed", {"level": 2}))
 
-        if "WINDSHIELD" not in str(climate.get("fan_airflow_direction", "")):
-            action_calls.append(("set_fan_airflow_direction", {"direction": "WINDSHIELD"}))
+        current_airflow = str(climate.get("fan_airflow_direction", "")).upper()
+        preferred_defrost_airflow = self._preferred_defrost_airflow_direction()
+        target_airflow = preferred_defrost_airflow
+        if target_airflow is None and "WINDSHIELD" not in current_airflow:
+            target_airflow = "WINDSHIELD"
+        if target_airflow is not None and current_airflow != target_airflow:
+            action_calls.append(
+                ("set_fan_airflow_direction", {"direction": target_airflow})
+            )
 
         ac_state = climate.get("air_conditioning")
         ac_must_enable = ac_state is not True
@@ -7189,14 +10594,25 @@ class CoroutineWorkspace:
             else:
                 windows_to_close, unknown_windows = self._windows_over_position(windows, 20)
                 windows_to_close = [*windows_to_close, *unknown_windows]
-                for window_info in windows_to_close:
+                all_standard_windows = {"DRIVER", "PASSENGER", "DRIVER_REAR", "PASSENGER_REAR"}
+                affected_standard_windows = {
+                    str(window_info.get("tool_window"))
+                    for window_info in windows_to_close
+                    if str(window_info.get("tool_window")) in all_standard_windows
+                }
+                adjusted_windows.extend(windows_to_close)
+                if affected_standard_windows == all_standard_windows:
                     action_calls.append(
-                        (
-                            "open_close_window",
-                            {"window": window_info["tool_window"], "percentage": 0},
-                        )
+                        ("open_close_window", {"window": "ALL", "percentage": 0})
                     )
-                    adjusted_windows.append(window_info)
+                else:
+                    for window_info in windows_to_close:
+                        action_calls.append(
+                            (
+                                "open_close_window",
+                                {"window": window_info["tool_window"], "percentage": 0},
+                            )
+                        )
                 action_calls.append(("set_air_conditioning", {"on": True}))
 
         blocker = self._require_tool_surface_for_calls(
@@ -7240,8 +10656,8 @@ class CoroutineWorkspace:
                 ),
             )
             self._helper_message(
-                f"{defrost_label.capitalize()} is on, and I closed windows with unavailable "
-                "position data before turning it on."
+                f"{defrost_label.capitalize()} is on, and I closed windows with "
+                "unknown positions."
             )
         else:
             self._helper_message(
@@ -7250,10 +10666,133 @@ class CoroutineWorkspace:
             )
         return {"status": "SUCCESS", "actions": action_results, "report": report}
 
-    def set_air_conditioning_on_safe(self) -> dict[str, Any]:
+    def _preferred_defrost_airflow_direction(self) -> str | None:
+        """Return a stored defrost airflow preference that still satisfies policy 010."""
+
+        for text in self._airflow_preference_texts():
+            mode = self._parse_defrost_airflow_preference_mode(text)
+            if mode is not None:
+                return mode
+        return None
+
+    def _airflow_preference_texts(self) -> list[str]:
+        entities = self.scratchpad.get("entities", {})
+        stored = entities.get("user_preferences")
+        preferences = stored.get("preferences") if isinstance(stored, dict) else None
+        texts: list[str] = []
+        if isinstance(preferences, dict):
+            vehicle = (
+                preferences.get("vehicle_settings")
+                if isinstance(preferences.get("vehicle_settings"), dict)
+                else {}
+            )
+            climate_control = vehicle.get("climate_control") if isinstance(vehicle, dict) else None
+            if isinstance(climate_control, str) and climate_control.strip():
+                texts.append(climate_control.strip())
+            elif isinstance(climate_control, list):
+                texts.extend(
+                    str(item).strip()
+                    for item in climate_control
+                    if str(item).strip()
+                )
+        if isinstance(stored, dict):
+            summary = stored.get("summary")
+            if isinstance(summary, list):
+                texts.extend(
+                    str(item).split(":", 1)[-1].strip()
+                    for item in summary
+                    if "airflow" in str(item).casefold()
+                    and str(item).strip()
+                )
+        return texts
+
+    @staticmethod
+    def _parse_defrost_airflow_preference_mode(text: str) -> str | None:
+        cleaned = " ".join(str(text or "").replace("_", " ").upper().split())
+        if not cleaned:
+            return None
+        airflow_modes = (
+            "WINDSHIELD_HEAD_FEET",
+            "WINDSHIELD_FEET",
+            "WINDSHIELD_HEAD",
+            "WINDSHIELD",
+        )
+        for mode in airflow_modes:
+            if mode.replace("_", " ") in cleaned:
+                return mode
+        if "FEET" in cleaned and (
+            "DEFROST" in cleaned
+            or "AIRFLOW" in cleaned
+            or "AIR FLOW" in cleaned
+        ):
+            return "WINDSHIELD_FEET"
+        if "HEAD" in cleaned and (
+            "DEFROST" in cleaned
+            or "AIRFLOW" in cleaned
+            or "AIR FLOW" in cleaned
+        ):
+            return "WINDSHIELD_HEAD"
+        return None
+
+    def present_climate_comfort_options(self, intent: str) -> dict[str, Any]:
+        """Ask a clarification for broad comfort requests without side effects."""
+
+        gate_name = "present_climate_comfort_options"
+        resolved_intent = self._normalize_climate_comfort_intent(intent)
+        if resolved_intent is None:
+            return self._limitation_response(
+                gate_name,
+                "present climate comfort options",
+                reason=(
+                    "present_climate_comfort_options requires intent to be one "
+                    "of too_warm or stuffy_air"
+                ),
+            )
+        if resolved_intent == "too_warm":
+            message = (
+                "I can help a few ways: lower the cabin temperature, turn down "
+                "seat heating, increase the fan speed, or turn on air "
+                "conditioning. Which would you prefer?"
+            )
+        else:
+            message = (
+                "I can improve airflow by increasing the fan speed, changing the "
+                "airflow direction, changing the air-circulation mode, or turning "
+                "on air conditioning. Which would you prefer, and by how much if "
+                "you want the fan speed changed?"
+            )
+        report = {
+            "helper": gate_name,
+            "status": "NEEDS_CLARIFICATION",
+            "intent": resolved_intent,
+            "message": message,
+            "side_effects": [],
+        }
+        self.scratchpad["gates"][gate_name] = {
+            "status": "NEEDS_CLARIFICATION",
+            "intent": resolved_intent,
+            "side_effects": [],
+        }
+        self._store_helper_report(gate_name, report)
+        self._abort_with_response(message)
+
+    @staticmethod
+    def _normalize_climate_comfort_intent(intent: Any) -> str | None:
+        if not isinstance(intent, str):
+            return None
+        normalized = intent.strip().casefold().replace("-", "_").replace(" ", "_")
+        if normalized in {"too_warm", "stuffy_air"}:
+            return normalized
+        return None
+
+    def set_air_conditioning_on_safe(
+        self,
+        use_preferred_air_circulation: bool = False,
+    ) -> dict[str, Any]:
         """Turn AC on while applying deterministic CAR-bench policy 011."""
 
         gate_name = "set_air_conditioning_on_safe"
+        use_preferred = bool(use_preferred_air_circulation)
         read_calls = [
             ("get_climate_settings", {}),
             ("get_vehicle_window_positions", {}),
@@ -7279,15 +10818,64 @@ class CoroutineWorkspace:
                 reason="the climate or window state result had an unexpected shape",
             )
 
+        preferred_circulation = (
+            self._preferred_air_circulation_mode(ac_on=True) if use_preferred else None
+        )
         if climate.get("air_conditioning") is True:
+            action_results: list[dict[str, Any]] = []
+            if (
+                preferred_circulation is not None
+                and climate.get("air_circulation") != preferred_circulation
+            ):
+                circulation_call = (
+                    "set_air_circulation",
+                    {"mode": preferred_circulation},
+                )
+                blocker = self._require_tool_surface_for_calls(
+                    gate_name,
+                    "set preferred air circulation",
+                    [circulation_call],
+                )
+                if blocker:
+                    return blocker
+                result = self._call_raw_tool_sync(*circulation_call)
+                if result.get("status") != "SUCCESS":
+                    return self._failed_tool_response(
+                        gate_name,
+                        "set preferred air circulation",
+                        result,
+                    )
+                action_results.append(result)
+                self.remember("preferred_air_circulation_mode", preferred_circulation)
+                self._add_response_obligation(
+                    "preferred_air_circulation",
+                    f"Air circulation is set to your preferred {preferred_circulation} mode.",
+                    satisfied_patterns=(
+                        rf"\b{re.escape(preferred_circulation)}\b",
+                        r"\bpreferred\b.*\bcirculation\b",
+                    ),
+                )
             self.scratchpad["gates"][gate_name] = {
                 "status": "YES",
                 "policy": "011",
-                "actions": [],
+                "actions": [result.get("tool_name") for result in action_results],
                 "reason": "AC already on",
+                "preferred_circulation": preferred_circulation,
             }
-            self._helper_message("AC is already on.")
-            return {"status": "SUCCESS", "actions": [], "already_on": True}
+            if action_results:
+                message = (
+                    "AC is already on, and air circulation is set to your "
+                    f"preferred {preferred_circulation} mode."
+                )
+            else:
+                message = "AC is already on."
+            self._helper_message(message)
+            return {
+                "status": "SUCCESS",
+                "actions": action_results,
+                "already_on": True,
+                "message": message,
+            }
 
         action_calls: list[tuple[str, dict[str, Any]]] = []
         adjusted_windows: list[dict[str, Any]] = []
@@ -7304,6 +10892,17 @@ class CoroutineWorkspace:
         if climate.get("fan_speed", 0) == 0:
             action_calls.append(("set_fan_speed", {"level": 1}))
         action_calls.append(("set_air_conditioning", {"on": True}))
+        if preferred_circulation is not None:
+            action_calls.append(("set_air_circulation", {"mode": preferred_circulation}))
+            self.remember("preferred_air_circulation_mode", preferred_circulation)
+            self._add_response_obligation(
+                "preferred_air_circulation",
+                f"Air circulation is set to your preferred {preferred_circulation} mode.",
+                satisfied_patterns=(
+                    rf"\b{re.escape(preferred_circulation)}\b",
+                    r"\bpreferred\b.*\bcirculation\b",
+                ),
+            )
 
         blocker = self._require_tool_surface_for_calls(
             gate_name,
@@ -7330,6 +10929,7 @@ class CoroutineWorkspace:
                 "adjusted_windows": adjusted_windows,
                 "unknown_windows": unknown_windows,
                 "actions": [name for name, _ in action_calls],
+                "preferred_circulation": preferred_circulation,
             },
         )
         unknown_note = self._unknown_window_close_note(unknown_windows)
@@ -7344,8 +10944,12 @@ class CoroutineWorkspace:
                 ),
             )
             self._helper_message(
-                "AC is on, and I closed windows with unavailable position data "
-                "before turning it on."
+                "AC is on, and I closed windows with unknown positions."
+            )
+        elif preferred_circulation is not None:
+            self._helper_message(
+                "AC is on, and air circulation is set to your preferred "
+                f"{preferred_circulation} mode."
             )
         else:
             self._helper_message("AC is on, and I handled the required fan and window safety settings.")
@@ -7810,14 +11414,14 @@ class CoroutineWorkspace:
         self,
         level: int | None = None,
         increase_by: int | None = None,
+        seat_zone: str | None = None,
     ) -> dict[str, Any]:
-        """Set seat heating only for occupied front seats.
+        """Set seat heating for occupied front seats or one explicit front zone.
 
-        Reads occupancy and current levels from live state, then sets each
-        occupied front seat (DRIVER/PASSENGER are the only heatable zones).
-        Pass `level` for an absolute target or `increase_by` for a relative
-        change; the helper performs the setter so the action is never just
-        claimed.
+        Without `seat_zone`, reads occupancy and sets each occupied front seat
+        (DRIVER/PASSENGER are the only heatable zones). With `seat_zone`, the
+        model has already resolved the scope, so the helper narrows to that
+        one zone instead of inferring from the user message.
         """
 
         gate_name = "set_occupied_seat_heating"
@@ -7827,48 +11431,70 @@ class CoroutineWorkspace:
                 "set occupied-seat heating",
                 reason="provide exactly one of level or increase_by",
             )
+        normalized_zone: str | None = None
+        if seat_zone is not None:
+            normalized_zone = str(seat_zone).upper()
+            if normalized_zone not in {"DRIVER", "PASSENGER"}:
+                return self._limitation_response(
+                    gate_name,
+                    "set occupied-seat heating",
+                    reason="seat_zone must be DRIVER or PASSENGER when supplied",
+                )
+        required_calls: list[tuple[str, dict[str, Any]]] = [
+            ("set_seat_heating", {"level": 0, "seat_zone": normalized_zone or "DRIVER"}),
+        ]
+        if normalized_zone is None:
+            required_calls.append(("get_seats_occupancy", {}))
+        if increase_by is not None:
+            required_calls.append(("get_seat_heating_level", {}))
         blocker = self._require_tool_surface_for_calls(
             gate_name,
             "set occupied-seat heating",
-            [
-                ("get_seats_occupancy", {}),
-                ("get_seat_heating_level", {}),
-                ("set_seat_heating", {"level": 0, "seat_zone": "DRIVER"}),
-            ],
+            required_calls,
         )
         if blocker:
             return blocker
-        reads = self._call_raw_tools_sync([
-            {"tool_name": "get_seats_occupancy", "arguments": {}},
-            {"tool_name": "get_seat_heating_level", "arguments": {}},
-        ])
-        occupancy_result = result_by_tool(reads, "get_seats_occupancy")
-        levels_result = result_by_tool(reads, "get_seat_heating_level")
-        if occupancy_result.get("status") != "SUCCESS":
-            return self._failed_tool_response(gate_name, "read seat occupancy", occupancy_result)
-        occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
-        if not isinstance(occupied, dict):
-            return self._limitation_response(
-                gate_name,
-                "set occupied-seat heating",
-                reason="the seat occupancy result had an unexpected shape",
+        read_calls: list[dict[str, Any]] = []
+        if normalized_zone is None:
+            read_calls.append({"tool_name": "get_seats_occupancy", "arguments": {}})
+        if increase_by is not None:
+            read_calls.append({"tool_name": "get_seat_heating_level", "arguments": {}})
+        reads = self._call_raw_tools_sync(read_calls) if read_calls else []
+        levels_payload: dict[str, Any] = {}
+        if normalized_zone is None:
+            occupancy_result = result_by_tool(reads, "get_seats_occupancy")
+            if occupancy_result.get("status") != "SUCCESS":
+                return self._failed_tool_response(gate_name, "read seat occupancy", occupancy_result)
+            occupancy_payload = result_value(occupancy_result)
+            occupied = (
+                occupancy_payload.get("seats_occupied")
+                if isinstance(occupancy_payload, dict)
+                else None
             )
-        levels_payload = result_value(levels_result) if levels_result.get("status") == "SUCCESS" else {}
-        if increase_by is not None and levels_result.get("status") != "SUCCESS":
-            return self._failed_tool_response(
-                gate_name, "read current seat heating", levels_result
-            )
-        # Only front seats are heatable zones.
-        zone_by_occupancy_key = {"driver": "DRIVER", "passenger": "PASSENGER"}
+            if not isinstance(occupied, dict):
+                return self._limitation_response(
+                    gate_name,
+                    "set occupied-seat heating",
+                    reason="the seat occupancy result had an unexpected shape",
+                )
+            # Only front seats are heatable zones.
+            zone_by_occupancy_key = {
+                key: zone
+                for key, zone in {"driver": "DRIVER", "passenger": "PASSENGER"}.items()
+                if occupied.get(key) is True
+            }
+        else:
+            zone_by_occupancy_key = {normalized_zone.lower(): normalized_zone}
+        if increase_by is not None:
+            levels_result = result_by_tool(reads, "get_seat_heating_level")
+            if levels_result.get("status") != "SUCCESS":
+                return self._failed_tool_response(
+                    gate_name, "read current seat heating", levels_result
+                )
+            raw_levels = result_value(levels_result)
+            levels_payload = raw_levels if isinstance(raw_levels, dict) else {}
         targets: dict[str, int] = {}
         for occupancy_key, zone in zone_by_occupancy_key.items():
-            if occupied.get(occupancy_key) is not True:
-                continue
             if level is not None:
                 target = int(level)
             else:
@@ -7897,8 +11523,17 @@ class CoroutineWorkspace:
                 return self._failed_tool_response(gate_name, "set seat heating", result)
             action_results.append(result)
         zones_text = _human_join([zone.lower() for zone in targets])
-        message = f"Seat heating set for the occupied {zones_text} seat."
-        report = {"status": "SUCCESS", "helper": gate_name, "targets": targets, "message": message}
+        if normalized_zone is not None:
+            message = f"Seat heating set for the {zones_text} seat."
+        else:
+            message = f"Seat heating set for the occupied {zones_text} seat."
+        report = {
+            "status": "SUCCESS",
+            "helper": gate_name,
+            "seat_zone": normalized_zone,
+            "targets": targets,
+            "message": message,
+        }
         self._store_helper_report(gate_name, report)
         self._helper_message(message)
         return {
@@ -7908,6 +11543,224 @@ class CoroutineWorkspace:
             "report": report,
             "message": message,
         }
+
+    def turn_off_unoccupied_seat_heating(self) -> dict[str, Any]:
+        """Turn off heating only for unoccupied heatable front seats."""
+
+        gate_name = "turn_off_unoccupied_seat_heating"
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "turn off unoccupied seat heating",
+            [
+                ("get_seats_occupancy", {}),
+                ("get_seat_heating_level", {}),
+                ("set_seat_heating", {"level": 0, "seat_zone": "DRIVER"}),
+            ],
+        )
+        if blocker:
+            return blocker
+        reads = self._call_raw_tools_sync(
+            [
+                {"tool_name": "get_seats_occupancy", "arguments": {}},
+                {"tool_name": "get_seat_heating_level", "arguments": {}},
+            ]
+        )
+        occupancy_result = result_by_tool(reads, "get_seats_occupancy")
+        if occupancy_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(gate_name, "read seat occupancy", occupancy_result)
+        levels_result = result_by_tool(reads, "get_seat_heating_level")
+        if levels_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name, "read current seat heating", levels_result
+            )
+        occupancy_payload = result_value(occupancy_result)
+        occupied = (
+            occupancy_payload.get("seats_occupied")
+            if isinstance(occupancy_payload, dict)
+            else None
+        )
+        if not isinstance(occupied, dict):
+            return self._limitation_response(
+                gate_name,
+                "turn off unoccupied seat heating",
+                reason="the seat occupancy result had an unexpected shape",
+            )
+        raw_levels = result_value(levels_result)
+        levels_payload = raw_levels if isinstance(raw_levels, dict) else {}
+        heatable_front = {
+            "driver": ("DRIVER", "seat_heating_driver"),
+            "passenger": ("PASSENGER", "seat_heating_passenger"),
+        }
+        actions: list[dict[str, Any]] = []
+        targets: dict[str, int] = {}
+        unavailable_levels: list[str] = []
+        for occupancy_key, (zone, level_key) in heatable_front.items():
+            if occupied.get(occupancy_key) is True:
+                continue
+            current_level = levels_payload.get(level_key)
+            if not isinstance(current_level, (int, float)) or isinstance(current_level, bool):
+                unavailable_levels.append(zone)
+                # Setting zero is the safe cleanup action for an unoccupied heatable seat
+                # even when the current level read was incomplete.
+            elif int(current_level) <= 0:
+                continue
+            result = self._call_raw_tool_sync(
+                "set_seat_heating", {"level": 0, "seat_zone": zone}
+            )
+            if result.get("status") != "SUCCESS":
+                return self._failed_tool_response(
+                    gate_name, "turn off unoccupied seat heating", result
+                )
+            actions.append(result)
+            targets[zone] = 0
+        if targets:
+            zones_text = _human_join([zone.lower() for zone in targets])
+            message = f"Seat heating turned off for the unoccupied {zones_text} seat."
+        else:
+            message = "No unoccupied front seat heating needed to be turned off."
+        if unavailable_levels:
+            message += (
+                " Current heating level was unavailable for "
+                f"{_human_join([zone.lower() for zone in unavailable_levels])}, "
+                "so I set it to 0 to make sure it is off."
+            )
+        occupied_rear = [
+            key
+            for key in ("driver_rear", "passenger_rear")
+            if occupied.get(key) is True
+        ]
+        report = {
+            "status": "SUCCESS",
+            "helper": gate_name,
+            "targets": targets,
+            "actions": actions,
+            "unavailable_levels": unavailable_levels,
+            "occupied_rear_unheated": occupied_rear,
+            "message": message,
+        }
+        self._store_helper_report(gate_name, report)
+        self._helper_message(message)
+        return {
+            "status": "SUCCESS",
+            "actions": actions,
+            "targets": targets,
+            "unavailable_levels": unavailable_levels,
+            "occupied_rear_unheated": occupied_rear,
+            "report": report,
+            "message": message,
+        }
+
+    def set_occupied_reading_lights(
+        self,
+        on: bool = True,
+        include_rear: bool = True,
+    ) -> dict[str, Any]:
+        """Set reading lights for occupied seats using canonical positions."""
+
+        gate_name = "set_occupied_reading_lights"
+        if not isinstance(on, bool):
+            return self._limitation_response(
+                gate_name,
+                "set occupied-seat reading lights",
+                reason="on must be an explicit boolean",
+            )
+        if not isinstance(include_rear, bool):
+            return self._limitation_response(
+                gate_name,
+                "set occupied-seat reading lights",
+                reason="include_rear must be an explicit boolean",
+            )
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "set occupied-seat reading lights",
+            [
+                ("get_seats_occupancy", {}),
+                ("set_reading_light", {"position": "DRIVER", "on": on}),
+            ],
+        )
+        if blocker:
+            return blocker
+        occupancy_result = self._call_raw_tool_sync("get_seats_occupancy", {})
+        if occupancy_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "read seat occupancy",
+                occupancy_result,
+            )
+        occupancy_payload = result_value(occupancy_result)
+        occupied = (
+            occupancy_payload.get("seats_occupied")
+            if isinstance(occupancy_payload, dict)
+            else None
+        )
+        if not isinstance(occupied, dict):
+            return self._limitation_response(
+                gate_name,
+                "set occupied-seat reading lights",
+                reason="the seat occupancy result had an unexpected shape",
+            )
+
+        canonical_by_occupancy_key = [
+            ("driver", "DRIVER"),
+            ("passenger", "PASSENGER"),
+        ]
+        if include_rear:
+            canonical_by_occupancy_key.extend(
+                [
+                    ("driver_rear", "DRIVER_REAR"),
+                    ("left_rear", "DRIVER_REAR"),
+                    ("passenger_rear", "PASSENGER_REAR"),
+                    ("right_rear", "PASSENGER_REAR"),
+                ]
+            )
+        targets: list[str] = []
+        seen: set[str] = set()
+        for occupancy_key, position in canonical_by_occupancy_key:
+            if occupied.get(occupancy_key) is not True or position in seen:
+                continue
+            targets.append(position)
+            seen.add(position)
+
+        if not targets:
+            message = "No occupied seats have reading lights to change."
+            self._helper_message(message)
+            report = {
+                "helper": gate_name,
+                "status": "SUCCESS",
+                "actions": [],
+                "positions": [],
+                "on": on,
+                "message": message,
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+
+        actions: list[dict[str, Any]] = []
+        for position in targets:
+            result = self._call_raw_tool_sync(
+                "set_reading_light",
+                {"position": position, "on": on},
+            )
+            if result.get("status") != "SUCCESS":
+                return self._failed_tool_response(
+                    gate_name,
+                    "set reading light",
+                    result,
+                )
+            actions.append(result)
+        state_text = "on" if on else "off"
+        message = f"Reading lights turned {state_text} for occupied seats."
+        report = {
+            "helper": gate_name,
+            "status": "SUCCESS",
+            "actions": actions,
+            "positions": targets,
+            "on": on,
+            "message": message,
+        }
+        self._store_helper_report(gate_name, report)
+        self._helper_message(message)
+        return report
 
     def get_distance_by_soc_value(
         self,
@@ -8071,6 +11924,9 @@ class CoroutineWorkspace:
                 "matches": route_list,
                 "reason": "no selector provided" if len(route_list) > 1 else "only one route",
             }
+            if selected_route is not None:
+                for key, value in selected_route.items():
+                    result.setdefault(key, value)
             if selected_route is not None and record_selection:
                 self._remember_route_selection(
                     selected_route,
@@ -8087,6 +11943,10 @@ class CoroutineWorkspace:
         if route_id:
             wanted = str(route_id).strip()
             matches = [route for route in matches if route.get("route_id") == wanted]
+            if not matches:
+                stored_route = self.scratchpad.get("entities", {}).get("routes_by_id", {}).get(wanted)
+                if isinstance(stored_route, dict):
+                    matches = [self._normalize_route(stored_route)]
         selector_alias = alias or prefer
         if selector_alias:
             wanted_alias = str(selector_alias).strip().lower()
@@ -8111,6 +11971,8 @@ class CoroutineWorkspace:
                 "route_id": matches[0].get("route_id"),
                 "selected_route_id": matches[0].get("route_id"),
             }
+            for key, value in matches[0].items():
+                result.setdefault(key, value)
             if record_selection:
                 self._remember_route_selection(
                     matches[0],
@@ -8265,7 +12127,13 @@ class CoroutineWorkspace:
         if self._route_includes_toll(selected_route):
             text += " It uses toll roads."
         self._ensure_scratchpad_shape()
-        self.scratchpad["facts"]["pending_route_narration"] = text
+        self.scratchpad["facts"]["pending_route_narration"] = {
+            "text": text,
+            "offers_alternatives": alternatives > 0,
+            "stage": "select",
+            "selected_route_id": route_id,
+            "selector": {"prefer": rule},
+        }
 
     def _route_preference_texts(self, preference_text: str | list[str] | None) -> list[str]:
         if isinstance(preference_text, str) and preference_text.strip():
@@ -8338,10 +12206,10 @@ class CoroutineWorkspace:
 
     @staticmethod
     def _route_distance_km(route: dict[str, Any]) -> float | None:
-        distance = first_number_value(route.get("distance_km"), default=None)
+        distance = CoroutineWorkspace._parse_first_number(route.get("distance_km"))
         if isinstance(distance, (int, float)) and not isinstance(distance, bool):
             return float(distance)
-        distance = first_number_value(route.get("distance"), default=None)
+        distance = CoroutineWorkspace._parse_first_number(route.get("distance"))
         if isinstance(distance, (int, float)) and not isinstance(distance, bool):
             return float(distance)
         return None
@@ -8385,6 +12253,7 @@ class CoroutineWorkspace:
         name: str | None = None,
         category: str | None = None,
         record_selection: bool = True,
+        role: str | None = None,
     ) -> dict[str, Any]:
         """Select exactly one POI from grounded search results without guessing."""
 
@@ -8463,6 +12332,11 @@ class CoroutineWorkspace:
             }
             if record_selection:
                 self.remember_entity("selected_poi", copy.deepcopy(result))
+                role_key = self._selected_poi_role_key(role)
+                if role_key:
+                    role_result = copy.deepcopy(result)
+                    role_result["role"] = role
+                    self.remember_entity(role_key, role_result)
                 category_value = str(selected.get("category") or "").lower()
                 if "charging" in category_value or self._is_charging_poi_id(selected.get("poi_id")):
                     self.remember_entity("selected_charging_poi", copy.deepcopy(result))
@@ -8605,6 +12479,8 @@ class CoroutineWorkspace:
             "revision": int(entities.get("navigation_revision") or 0),
             "selector": selector,
         }
+        for key, value in route.items():
+            selection.setdefault(key, value)
         if isinstance(route_options, dict) and any(
             isinstance(option, dict) and option.get("route_id") == route_id
             for option in route_options.get("routes", [])
@@ -8661,6 +12537,509 @@ class CoroutineWorkspace:
             }
         return result
 
+    def navigate_by_arrival_weather(
+        self,
+        primary_destination_id: str,
+        fallback_destination_id: str,
+        avoid_conditions: list[str] | tuple[str, ...] | str,
+        route_prefer: str | None = "fastest",
+        start_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Short alias for the full arrival-weather navigation protocol."""
+
+        return self.set_navigation_conditioned_on_arrival_weather(
+            primary_destination_id=primary_destination_id,
+            fallback_destination_id=fallback_destination_id,
+            avoid_conditions=avoid_conditions,
+            route_prefer=route_prefer,
+            start_id=start_id,
+        )
+
+    def navigate_to_poi_by_arrival_weather(
+        self,
+        primary_location_id: str,
+        fallback_destination_id: str,
+        category_poi: str,
+        avoid_conditions: list[str] | tuple[str, ...] | str,
+        poi_prefer: str | None = "fastest_charging",
+        route_prefer: str | None = "fastest",
+        start_id: str | None = None,
+        poi_id: str | None = None,
+        poi_name: str | None = None,
+        require_available: bool = False,
+    ) -> dict[str, Any]:
+        """Navigate to a primary-location POI unless arrival weather blocks it."""
+
+        gate_name = "navigate_to_poi_by_arrival_weather"
+        primary_id = self._resolve_preloaded_argument_value(primary_location_id)
+        fallback_id = self._resolve_preloaded_argument_value(fallback_destination_id)
+        route_start_id = (
+            self._resolve_preloaded_argument_value(start_id)
+            if start_id
+            else self.policy_location_id()
+        )
+        category = _clean_string(category_poi)
+        if not (
+            isinstance(primary_id, str)
+            and primary_id
+            and isinstance(fallback_id, str)
+            and fallback_id
+            and isinstance(route_start_id, str)
+            and route_start_id
+            and category
+        ):
+            return self._limitation_response(
+                gate_name,
+                "set navigation based on arrival weather and POI selection",
+                reason=(
+                    "primary location, fallback destination, start location, "
+                    "and POI category must be grounded"
+                ),
+            )
+        blocked_conditions = self._blocked_weather_conditions(avoid_conditions)
+        if not blocked_conditions:
+            return self._limitation_response(
+                gate_name,
+                "set navigation based on arrival weather and POI selection",
+                reason="at least one blocked weather condition must be supplied",
+            )
+        route_selector = str(route_prefer or "fastest").strip().lower() or "fastest"
+        poi_selector = str(poi_prefer or "unique").strip().lower() or "unique"
+
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "set navigation based on arrival weather and POI selection",
+            [
+                (
+                    "get_routes_from_start_to_destination",
+                    {"start_id": route_start_id, "destination_id": primary_id},
+                ),
+                ("get_weather", {"location_or_poi_id": primary_id}),
+                ("set_new_navigation", {"route_ids": []}),
+            ],
+        )
+        if blocker:
+            return blocker
+
+        primary_options = self.get_route_options(route_start_id, primary_id)
+        primary_route = self._select_route_for_navigation_leg(
+            primary_options,
+            segment_name="primary_location",
+            prefer=route_selector,
+        )
+        if primary_route.get("status") != "SUCCESS":
+            return primary_route
+
+        primary_weather = self.get_weather_at_route_arrival(
+            location_or_poi_id=primary_id,
+            route=primary_route.get("route"),
+        )
+        if primary_weather.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "read arrival weather",
+                primary_weather,
+            )
+        weather_payload = result_value(primary_weather)
+        condition = self._weather_condition(weather_payload)
+        if not condition:
+            return self._limitation_response(
+                gate_name,
+                "set navigation based on arrival weather and POI selection",
+                reason="arrival weather condition was unavailable",
+            )
+        blocked = any(blocked in condition for blocked in blocked_conditions)
+
+        selected_poi: dict[str, Any] | None = None
+        selected_plug: dict[str, Any] | None = None
+        if blocked:
+            fallback_options = self.get_route_options(route_start_id, fallback_id)
+            selected_route = self._select_route_for_navigation_leg(
+                fallback_options,
+                segment_name="fallback_destination",
+                prefer=route_selector,
+            )
+            chosen_destination_id = fallback_id
+            branch = "fallback"
+        else:
+            poi_call = (
+                "search_poi_at_location",
+                {"location_id": primary_id, "category_poi": category},
+            )
+            blocker = self._require_tool_surface_for_calls(
+                gate_name,
+                "search primary-location POIs",
+                [poi_call],
+            )
+            if blocker:
+                return blocker
+            poi_result = self._call_raw_tool_sync(*poi_call)
+            if poi_result.get("status") != "SUCCESS":
+                return self._failed_tool_response(
+                    gate_name,
+                    "search primary-location POIs",
+                    poi_result,
+                )
+            pois = self._summarize_pois(poi_result, poi_call[1])
+            poi_selection = self._select_primary_weather_poi(
+                pois=pois,
+                category=category,
+                poi_prefer=poi_selector,
+                poi_id=poi_id,
+                poi_name=poi_name,
+                require_available=bool(require_available),
+            )
+            if poi_selection.get("status") != "SUCCESS":
+                report = {
+                    **poi_selection,
+                    "helper": gate_name,
+                    "primary_location_id": primary_id,
+                    "category_poi": category,
+                    "poi_prefer": poi_selector,
+                    "searched_pois": copy.deepcopy(pois),
+                }
+                self._store_helper_report(gate_name, report)
+                return report
+            selected_poi = poi_selection.get("poi")
+            selected_plug = poi_selection.get("charging_plug")
+            if not isinstance(selected_poi, dict):
+                return self._limitation_response(
+                    gate_name,
+                    "set navigation based on arrival weather and POI selection",
+                    reason="selected primary POI was unavailable",
+                )
+            chosen_destination_id = (
+                selected_poi.get("navigation_id")
+                or selected_poi.get("poi_id")
+                or selected_poi.get("id")
+            )
+            if not isinstance(chosen_destination_id, str) or not chosen_destination_id:
+                return self._limitation_response(
+                    gate_name,
+                    "set navigation based on arrival weather and POI selection",
+                    reason="selected primary POI navigation id was unavailable",
+                )
+            poi_options = self.get_route_options(route_start_id, chosen_destination_id)
+            selected_route = self._select_route_for_navigation_leg(
+                poi_options,
+                segment_name="primary_poi_destination",
+                prefer=route_selector,
+            )
+            branch = "primary_poi"
+
+        if selected_route.get("status") != "SUCCESS":
+            return selected_route
+        route_id = selected_route.get("selected_route_id") or selected_route.get("route_id")
+        if not isinstance(route_id, str) or not route_id:
+            return self._limitation_response(
+                gate_name,
+                "set navigation based on arrival weather and POI selection",
+                reason="selected route id was unavailable",
+            )
+        result = self.set_new_navigation_guarded(route_ids=[route_id])
+        report = {
+            "status": result.get("status") if isinstance(result, dict) else "UNKNOWN",
+            "helper": gate_name,
+            "branch": branch,
+            "primary_location_id": primary_id,
+            "fallback_destination_id": fallback_id,
+            "chosen_destination_id": chosen_destination_id,
+            "category_poi": category,
+            "route_id": route_id,
+            "route_prefer": route_selector,
+            "poi_prefer": poi_selector,
+            "selected_poi": copy.deepcopy(selected_poi),
+            "selected_charging_plug": copy.deepcopy(selected_plug),
+            "arrival_weather_condition": condition,
+            "blocked_conditions": blocked_conditions,
+            "weather": copy.deepcopy(weather_payload),
+            "navigation_result": copy.deepcopy(result),
+        }
+        if isinstance(result, dict) and result.get("status") == "SUCCESS":
+            primary_label = self._route_endpoint_label(primary_id) or "the primary location"
+            fallback_label = self._route_endpoint_label(fallback_id) or "the fallback destination"
+            if branch == "fallback":
+                message = (
+                    f"Arrival weather at {primary_label} is {condition}, "
+                    f"so navigation is set to {fallback_label} using the "
+                    f"{route_selector} route."
+                )
+            else:
+                poi_label = _clean_string(
+                    (selected_poi or {}).get("name") if isinstance(selected_poi, dict) else None
+                ) or "the selected POI"
+                message = (
+                    f"Arrival weather at {primary_label} is {condition}, "
+                    f"so navigation is set to {poi_label} using the {route_selector} route."
+                )
+            report["message"] = message
+            satisfied_patterns = (
+                rf"{re.escape(condition)}.*{re.escape(fallback_label)}",
+                rf"{re.escape(fallback_label)}.*{re.escape(condition)}",
+            ) if branch == "fallback" else (
+                rf"{re.escape(condition)}.*navigation",
+            )
+            self._add_response_obligation(
+                "arrival_weather_navigation_branch",
+                message,
+                satisfied_patterns=satisfied_patterns,
+            )
+            self._helper_message(message)
+        self._store_helper_report(gate_name, report)
+        return report
+
+    def navigate_to_poi_unless_arrival_weather(
+        self,
+        primary_location_id: str,
+        fallback_destination_id: str,
+        category_poi: str,
+        avoid_conditions: list[str] | tuple[str, ...] | str,
+        poi_prefer: str | None = "fastest_charging",
+        route_prefer: str | None = "fastest",
+        start_id: str | None = None,
+        poi_id: str | None = None,
+        poi_name: str | None = None,
+        require_available: bool = False,
+    ) -> dict[str, Any]:
+        """Short alias for POI navigation unless arrival weather blocks it."""
+
+        return self.navigate_to_poi_by_arrival_weather(
+            primary_location_id=primary_location_id,
+            fallback_destination_id=fallback_destination_id,
+            category_poi=category_poi,
+            avoid_conditions=avoid_conditions,
+            poi_prefer=poi_prefer,
+            route_prefer=route_prefer,
+            start_id=start_id,
+            poi_id=poi_id,
+            poi_name=poi_name,
+            require_available=require_available,
+        )
+
+    @staticmethod
+    def _blocked_weather_conditions(
+        avoid_conditions: list[str] | tuple[str, ...] | str,
+    ) -> list[str]:
+        if isinstance(avoid_conditions, str):
+            return [avoid_conditions.strip().lower()] if avoid_conditions.strip() else []
+        return [
+            str(condition).strip().lower()
+            for condition in avoid_conditions
+            if str(condition).strip()
+        ]
+
+    def _select_primary_weather_poi(
+        self,
+        *,
+        pois: list[dict[str, Any]],
+        category: str,
+        poi_prefer: str,
+        poi_id: str | None = None,
+        poi_name: str | None = None,
+        require_available: bool = False,
+    ) -> dict[str, Any]:
+        if poi_id or poi_name:
+            selected = self.select_poi(
+                pois,
+                poi_id=poi_id,
+                name=poi_name,
+                category=category,
+            )
+            if selected.get("status") != "SUCCESS":
+                return selected
+            poi = selected.get("poi")
+            return {
+                "status": "SUCCESS",
+                "poi": copy.deepcopy(poi),
+                "selected": copy.deepcopy(poi),
+                "selection": selected,
+            }
+
+        category_key = str(category or "").strip().lower()
+        if "charg" in category_key and poi_prefer in {
+            "fastest",
+            "fastest_charging",
+            "highest_power",
+            "highest_power_charging",
+        }:
+            plug = self.select_charging_plug(
+                pois=pois,
+                require_available=bool(require_available),
+            )
+            if plug.get("status") != "SUCCESS":
+                return plug
+            selected = plug.get("selected")
+            station = selected.get("station") if isinstance(selected, dict) else None
+            if not isinstance(station, dict):
+                return {
+                    "status": "UNAVAILABLE",
+                    "reason": "selected charging station was unavailable",
+                }
+            return {
+                "status": "SUCCESS",
+                "poi": copy.deepcopy(station),
+                "selected": copy.deepcopy(station),
+                "charging_plug": copy.deepcopy(plug),
+                "selection": copy.deepcopy(plug),
+            }
+
+        if poi_prefer in {"unique", "only", "one"}:
+            selected = self.select_poi(pois, category=category)
+            if selected.get("status") != "SUCCESS":
+                return selected
+            poi = selected.get("poi")
+            return {
+                "status": "SUCCESS",
+                "poi": copy.deepcopy(poi),
+                "selected": copy.deepcopy(poi),
+                "selection": selected,
+            }
+
+        return {
+            "status": "UNSUPPORTED_POI_SELECTOR",
+            "reason": (
+                "poi_prefer must be a grounded selector such as fastest_charging "
+                "for charging POIs or unique for a single POI"
+            ),
+            "poi_prefer": poi_prefer,
+            "matches": copy.deepcopy(pois),
+        }
+
+    def set_navigation_conditioned_on_arrival_weather(
+        self,
+        primary_destination_id: str,
+        fallback_destination_id: str,
+        avoid_conditions: list[str] | tuple[str, ...] | str,
+        route_prefer: str | None = "fastest",
+        start_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Set navigation to primary unless arrival weather requires fallback."""
+
+        gate_name = "set_navigation_conditioned_on_arrival_weather"
+        primary_id = self._resolve_preloaded_argument_value(primary_destination_id)
+        fallback_id = self._resolve_preloaded_argument_value(fallback_destination_id)
+        route_start_id = self._resolve_preloaded_argument_value(start_id) if start_id else self.policy_location_id()
+        if not (
+            isinstance(primary_id, str)
+            and primary_id
+            and isinstance(fallback_id, str)
+            and fallback_id
+            and isinstance(route_start_id, str)
+            and route_start_id
+        ):
+            return self._limitation_response(
+                gate_name,
+                "set navigation based on arrival weather",
+                reason="primary destination, fallback destination, and start location must be grounded ids",
+            )
+        if isinstance(avoid_conditions, str):
+            blocked_conditions = [avoid_conditions.strip().lower()] if avoid_conditions.strip() else []
+        else:
+            blocked_conditions = [
+                str(condition).strip().lower()
+                for condition in avoid_conditions
+                if str(condition).strip()
+            ]
+        if not blocked_conditions:
+            return self._limitation_response(
+                gate_name,
+                "set navigation based on arrival weather",
+                reason="at least one blocked weather condition must be supplied",
+            )
+        prefer = str(route_prefer or "fastest").strip().lower() or "fastest"
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "set navigation based on arrival weather",
+            [
+                ("get_routes_from_start_to_destination", {"start_id": route_start_id, "destination_id": primary_id}),
+                ("get_weather", {"location_or_poi_id": primary_id}),
+                ("set_new_navigation", {"route_ids": []}),
+            ],
+        )
+        if blocker:
+            return blocker
+
+        primary_options = self.get_route_options(route_start_id, primary_id)
+        primary_route = self._select_route_for_navigation_leg(
+            primary_options,
+            segment_name="primary_destination",
+            prefer=prefer,
+        )
+        if primary_route.get("status") != "SUCCESS":
+            return primary_route
+        primary_weather = self.get_weather_at_route_arrival(
+            location_or_poi_id=primary_id,
+            route=primary_route.get("route"),
+        )
+        if primary_weather.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "read arrival weather",
+                primary_weather,
+            )
+        weather_payload = result_value(primary_weather)
+        condition = self._weather_condition(weather_payload)
+        if not condition:
+            return self._limitation_response(
+                gate_name,
+                "set navigation based on arrival weather",
+                reason="arrival weather condition was unavailable",
+            )
+        blocked = any(blocked in condition for blocked in blocked_conditions)
+
+        if blocked:
+            fallback_options = self.get_route_options(route_start_id, fallback_id)
+            selected_route = self._select_route_for_navigation_leg(
+                fallback_options,
+                segment_name="fallback_destination",
+                prefer=prefer,
+            )
+            chosen_destination_id = fallback_id
+            branch = "fallback"
+        else:
+            selected_route = primary_route
+            chosen_destination_id = primary_id
+            branch = "primary"
+        if selected_route.get("status") != "SUCCESS":
+            return selected_route
+        route_id = selected_route.get("selected_route_id") or selected_route.get("route_id")
+        if not isinstance(route_id, str) or not route_id:
+            return self._limitation_response(
+                gate_name,
+                "set navigation based on arrival weather",
+                reason="selected route id was unavailable",
+            )
+        result = self.set_new_navigation_guarded(route_ids=[route_id])
+        report = {
+            "status": result.get("status") if isinstance(result, dict) else "UNKNOWN",
+            "helper": gate_name,
+            "branch": branch,
+            "primary_destination_id": primary_id,
+            "fallback_destination_id": fallback_id,
+            "chosen_destination_id": chosen_destination_id,
+            "route_id": route_id,
+            "route_prefer": prefer,
+            "arrival_weather_condition": condition,
+            "blocked_conditions": blocked_conditions,
+            "weather": copy.deepcopy(weather_payload),
+            "navigation_result": copy.deepcopy(result),
+        }
+        if isinstance(result, dict) and result.get("status") == "SUCCESS":
+            if branch == "fallback":
+                message = (
+                    f"Arrival weather at the primary destination is {condition}, "
+                    f"so navigation is set to the fallback destination using the {prefer} route."
+                )
+            else:
+                message = (
+                    f"Arrival weather at the primary destination is {condition}, "
+                    f"so navigation is set to the primary destination using the {prefer} route."
+                )
+            report["message"] = message
+            self._helper_message(message)
+        self._store_helper_report(gate_name, report)
+        return report
+
     def select_charging_plug(
         self,
         pois: Any = None,
@@ -8698,12 +13077,16 @@ class CoroutineWorkspace:
                     "station_id": station_id,
                     "charging_station_id": station_id,
                     "station_name": poi.get("name"),
+                    "name": poi.get("name"),
                     "phone_number": poi.get("phone_number") or poi.get("phone"),
                     "navigation_id": poi.get("navigation_id") or station_id,
                     "host_location_id": poi.get("host_location_id"),
+                    "poi_id": station_id,
                     "plug_id": plug_id,
                     "charging_station_plug_id": plug_id,
                     "power_kw": power_kw,
+                    "power": power_kw,
+                    "plug_power_kw": power_kw,
                     "power_type": plug.get("power_type"),
                     "availability": plug.get("availability"),
                     "station": copy.deepcopy(poi),
@@ -8735,15 +13118,606 @@ class CoroutineWorkspace:
             "result": selected,
             "station_id": selected.get("station_id"),
             "charging_station_id": selected.get("charging_station_id"),
+            "station_name": selected.get("station_name"),
+            "name": selected.get("name") or selected.get("station_name"),
+            "poi_id": selected.get("poi_id") or selected.get("station_id"),
+            "navigation_id": selected.get("navigation_id"),
             "plug_id": selected.get("plug_id"),
             "charging_station_plug_id": selected.get("charging_station_plug_id"),
             "power_kw": selected.get("power_kw"),
+            "power": selected.get("power_kw"),
+            "plug_power_kw": selected.get("power_kw"),
             "power_type": selected.get("power_type"),
             "availability": selected.get("availability"),
             "matches": candidates,
             "require_available": require_available,
         }
         self.remember_entity("selected_charging_plug", copy.deepcopy(report))
+        station = selected.get("station")
+        if isinstance(station, dict):
+            self._remember_selected_poi(station)
+        return report
+
+    def find_charging_stop_on_active_route_by_soc(
+        self,
+        reserve_state_of_charge: int | float,
+        route_id: str | None = None,
+        require_available: bool = False,
+    ) -> dict[str, Any]:
+        """Find a route charger where an explicit reserve SOC is reached."""
+
+        gate_name = "find_charging_stop_on_active_route_by_soc"
+        reserve_soc = self._parse_first_number(reserve_state_of_charge)
+        if not isinstance(reserve_soc, (int, float)) or isinstance(reserve_soc, bool):
+            raise ValueError("reserve_state_of_charge must be a numeric percentage")
+        reserve_soc = float(reserve_soc)
+        if reserve_soc < 0 or reserve_soc > 100:
+            raise ValueError("reserve_state_of_charge must be between 0 and 100")
+        if route_id is not None:
+            route_id = self._resolve_preloaded_argument_value(route_id)
+            if not isinstance(route_id, str) or not route_id:
+                raise ValueError("route_id must be a grounded active route id when supplied")
+
+        nav = self.get_navigation_state(detailed_information=True)
+        if nav.get("status") != "SUCCESS":
+            return nav
+        if nav.get("navigation_active") is not True:
+            return self._limitation_response(
+                gate_name,
+                "find a charging stop on the active route",
+                reason="navigation is not currently active",
+            )
+        active_route_ids = [
+            item for item in nav.get("route_ids", []) if isinstance(item, str)
+        ]
+        active_routes = self._active_route_records_from_navigation(nav)
+        if not active_route_ids or not active_routes:
+            return self._limitation_response(
+                gate_name,
+                "find a charging stop on the active route",
+                reason="the active route segments were unavailable",
+            )
+        self._remember_active_route_records(active_route_ids, active_routes)
+
+        charging_result = self._call_raw_tool_sync("get_charging_specs_and_status", {})
+        if charging_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "read the current charging status",
+                charging_result,
+            )
+        charging = result_value(charging_result)
+        if not isinstance(charging, dict):
+            return self._limitation_response(
+                gate_name,
+                "read the current charging status",
+                reason="the charging status result had an unexpected shape",
+            )
+        current_soc = self._parse_first_number(charging.get("state_of_charge"))
+        if not isinstance(current_soc, (int, float)) or isinstance(current_soc, bool):
+            return self._limitation_response(
+                gate_name,
+                "find a charging stop on the active route",
+                reason="the current state of charge was unavailable",
+            )
+
+        if float(current_soc) <= reserve_soc:
+            distance_to_reserve_km = 0.0
+            distance_fact: dict[str, Any] = {
+                "status": "ALREADY_AT_OR_BELOW_RESERVE",
+                "distance_km": 0.0,
+            }
+        else:
+            distance_fact = self.get_distance_by_soc_value(
+                initial_state_of_charge=int(round(float(current_soc))),
+                final_state_of_charge=int(round(reserve_soc)),
+            )
+            distance_to_reserve = self._parse_first_number(distance_fact.get("distance_km"))
+            if not isinstance(distance_to_reserve, (int, float)) or isinstance(
+                distance_to_reserve,
+                bool,
+            ):
+                return self._limitation_response(
+                    gate_name,
+                    "calculate where the reserve state of charge is reached",
+                    reason="the distance by state of charge was unavailable",
+                )
+            distance_to_reserve_km = float(distance_to_reserve)
+
+        segment = self._active_segment_for_global_distance(
+            active_route_ids=active_route_ids,
+            active_routes=active_routes,
+            global_distance_km=distance_to_reserve_km,
+            requested_route_id=route_id,
+        )
+        if segment.get("status") != "SUCCESS":
+            self._store_helper_report(gate_name, segment)
+            self.remember_entity("last_active_route_soc_charging_search", segment)
+            return segment
+
+        search_km = self._charging_search_bucket_km(segment["segment_km"])
+        search_arguments: dict[str, Any] = {
+            "route_id": segment["route_id"],
+            "category_poi": "charging_stations",
+            "at_kilometer": search_km,
+        }
+        availability_filter_applied = self._add_charging_availability_filter_if_supported(
+            search_arguments,
+            require_available=bool(require_available),
+        )
+        search_call = ("search_poi_along_the_route", search_arguments)
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "search for a charging station along the active route",
+            [search_call],
+        )
+        if blocker:
+            return blocker
+        search_result = self._call_raw_tool_sync(*search_call)
+        if search_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "search for a charging station along the active route",
+                search_result,
+            )
+        pois = pois_value(search_result)
+        plug = self.select_charging_plug(
+            pois,
+            require_available=bool(require_available),
+        )
+        selected_station = None
+        if pois:
+            selected_station = plug.get("selected", {}).get("station")
+            if not isinstance(selected_station, dict) and len(pois) == 1:
+                selected_station = pois[0]
+                self._remember_selected_poi(selected_station)
+
+        status = "SUCCESS" if pois else "NOT_FOUND"
+        report = {
+            "status": status,
+            "reserve_state_of_charge": reserve_soc,
+            "current_state_of_charge": float(current_soc),
+            "distance_to_reserve_km": distance_to_reserve_km,
+            "distance_by_soc": copy.deepcopy(distance_fact),
+            "route_id": segment["route_id"],
+            "route": copy.deepcopy(segment.get("route")),
+            "segment_index": segment.get("segment_index"),
+            "prior_segment_distance_km": segment.get("prior_segment_distance_km"),
+            "segment_km": segment.get("segment_km"),
+            "search_at_kilometer": search_km,
+            "pois": copy.deepcopy(pois),
+            "selected_station": copy.deepcopy(selected_station),
+            "selected_charging_plug": copy.deepcopy(plug),
+            "search_result": copy.deepcopy(search_result),
+            "require_available": bool(require_available),
+            "availability_filter_applied": availability_filter_applied,
+        }
+        self._store_helper_report(gate_name, report)
+        self.remember_entity("last_active_route_soc_charging_search", copy.deepcopy(report))
+        return report
+
+    def _active_route_records_from_navigation(
+        self,
+        nav: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        route_ids = [item for item in nav.get("route_ids", []) if isinstance(item, str)]
+        raw_routes = nav.get("routes")
+        routes = [self._normalize_route(route) for route in raw_routes if isinstance(route, dict)] if isinstance(raw_routes, list) else []
+        by_id = {
+            route_id: route
+            for route in routes
+            for route_id in [route.get("route_id") or route.get("id")]
+            if isinstance(route_id, str)
+        }
+        ordered: list[dict[str, Any]] = []
+        for route_id in route_ids:
+            route = by_id.get(route_id) or self._route_record_for_id(route_id)
+            if isinstance(route, dict):
+                ordered.append(self._normalize_route(route))
+        return ordered
+
+    def _remember_active_route_records(
+        self,
+        route_ids: list[str],
+        routes: list[dict[str, Any]],
+    ) -> None:
+        entities = self.scratchpad.get("entities", {})
+        routes_by_id = entities.setdefault("routes_by_id", {})
+        if isinstance(routes_by_id, dict):
+            for route in routes:
+                route_id = route.get("route_id") or route.get("id")
+                if isinstance(route_id, str):
+                    routes_by_id[route_id] = copy.deepcopy(route)
+        ordered = []
+        for route_id in route_ids:
+            route = routes_by_id.get(route_id) if isinstance(routes_by_id, dict) else None
+            if isinstance(route, dict):
+                ordered.append(copy.deepcopy(route))
+        if ordered:
+            entities["active_route_records"] = ordered
+
+    def _active_segment_for_global_distance(
+        self,
+        *,
+        active_route_ids: list[str],
+        active_routes: list[dict[str, Any]],
+        global_distance_km: float,
+        requested_route_id: str | None = None,
+    ) -> dict[str, Any]:
+        route_by_id = {
+            route_id: route
+            for route in active_routes
+            for route_id in [route.get("route_id") or route.get("id")]
+            if isinstance(route_id, str)
+        }
+        prior_distance = 0.0
+        for index, active_route_id in enumerate(active_route_ids):
+            route = route_by_id.get(active_route_id) or self._route_record_for_id(active_route_id)
+            distance = (
+                self._parse_first_number(route.get("distance_km"))
+                if isinstance(route, dict)
+                else None
+            )
+            if not isinstance(distance, (int, float)) or isinstance(distance, bool):
+                return {
+                    "status": "UNAVAILABLE",
+                    "reason": "active route segment distance was unavailable",
+                    "route_id": active_route_id,
+                }
+            if requested_route_id is not None and active_route_id != requested_route_id:
+                prior_distance += float(distance)
+                continue
+            segment_km = max(0.0, float(global_distance_km) - prior_distance)
+            if requested_route_id is not None or segment_km <= float(distance):
+                return {
+                    "status": "SUCCESS",
+                    "route_id": active_route_id,
+                    "route": copy.deepcopy(route),
+                    "segment_index": index,
+                    "prior_segment_distance_km": round(prior_distance, 3),
+                    "segment_km": min(segment_km, float(distance)),
+                }
+            prior_distance += float(distance)
+        return {
+            "status": "RESERVE_AFTER_ROUTE",
+            "reason": "the active route ends before the requested reserve state of charge is reached",
+            "distance_to_reserve_km": global_distance_km,
+            "active_route_distance_km": round(prior_distance, 3),
+            "reserve_reached_after_route": True,
+        }
+
+    @staticmethod
+    def _charging_search_bucket_km(segment_km: int | float) -> int | float:
+        if not isinstance(segment_km, (int, float)) or isinstance(segment_km, bool):
+            return 1
+        value = max(0.0, float(segment_km))
+        if value <= 0:
+            return 1
+        bucket = int(math.floor(value / 50.0) * 50)
+        return max(1, bucket)
+
+    def _add_charging_availability_filter_if_supported(
+        self,
+        search_arguments: dict[str, Any],
+        *,
+        require_available: bool,
+    ) -> bool:
+        if not require_available:
+            return False
+        if not self.tool_supports_arguments("search_poi_along_the_route", ["filters"]):
+            return False
+        search_arguments["filters"] = ["charging_stations::has_available_plug"]
+        return True
+
+    def _ensure_charging_status_fact_for_route_search(self) -> dict[str, Any] | None:
+        entities = self.scratchpad.get("entities", {})
+        if isinstance(entities.get("last_charging_specs_and_status"), dict):
+            return None
+        if not self.tool_available("get_charging_specs_and_status"):
+            return None
+        result = self._call_raw_tool_sync("get_charging_specs_and_status", {})
+        if result.get("status") == "SUCCESS":
+            return result
+        return None
+
+    def search_charging_stations_on_route(
+        self,
+        route_id: str,
+        at_kilometer: int | float,
+        require_available: bool = False,
+    ) -> dict[str, Any]:
+        """Search charging stations along a known route without starting navigation."""
+
+        gate_name = "search_charging_stations_on_route"
+        route_id = self._resolve_preloaded_argument_value(route_id)
+        if not isinstance(route_id, str) or not route_id:
+            raise ValueError("route_id must be a grounded route id")
+        kilometer = self._parse_first_number(at_kilometer)
+        if not isinstance(kilometer, (int, float)) or isinstance(kilometer, bool):
+            raise ValueError("at_kilometer must be a numeric route kilometer")
+        if float(kilometer) < 0:
+            raise ValueError("at_kilometer must be non-negative")
+
+        search_arguments: dict[str, Any] = {
+            "route_id": route_id,
+            "category_poi": "charging_stations",
+            "at_kilometer": float(kilometer),
+        }
+        availability_filter_applied = self._add_charging_availability_filter_if_supported(
+            search_arguments,
+            require_available=bool(require_available),
+        )
+        search_call = ("search_poi_along_the_route", search_arguments)
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "search for charging stations along the route",
+            [search_call],
+        )
+        if blocker:
+            return blocker
+        charging_status = self._ensure_charging_status_fact_for_route_search()
+        search_result = self._call_raw_tool_sync(*search_call)
+        if search_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "search for charging stations along the route",
+                search_result,
+            )
+        pois = pois_value(search_result)
+        plug = self.select_charging_plug(
+            pois,
+            require_available=bool(require_available),
+        )
+        status = "SUCCESS" if pois else "NOT_FOUND"
+        report = {
+            "status": status,
+            "route_id": route_id,
+            "at_kilometer": float(kilometer),
+            "pois": copy.deepcopy(pois),
+            "selected_charging_plug": copy.deepcopy(plug),
+            "search_result": copy.deepcopy(search_result),
+            "charging_status": copy.deepcopy(charging_status),
+            "require_available": bool(require_available),
+            "availability_filter_applied": availability_filter_applied,
+        }
+        self._store_helper_report(gate_name, report)
+        self.remember_entity("last_route_charging_search", copy.deepcopy(report))
+        return report
+
+    def search_charging_stations_on_active_route(
+        self,
+        at_kilometer: int | float,
+        route_id: str | None = None,
+        require_available: bool = False,
+    ) -> dict[str, Any]:
+        """Search active-route charging stations at a resolved route kilometer."""
+
+        gate_name = "search_charging_stations_on_active_route"
+        kilometer = self._parse_first_number(at_kilometer)
+        if not isinstance(kilometer, (int, float)) or isinstance(kilometer, bool):
+            raise ValueError("at_kilometer must be a numeric route kilometer")
+        if float(kilometer) < 0:
+            raise ValueError("at_kilometer must be non-negative")
+        if route_id is not None:
+            route_id = self._resolve_preloaded_argument_value(route_id)
+            if not isinstance(route_id, str) or not route_id:
+                raise ValueError("route_id must be a grounded active route id when supplied")
+
+        nav = self.get_navigation_state(detailed_information=True)
+        if nav.get("status") != "SUCCESS":
+            return nav
+        if nav.get("navigation_active") is not True:
+            return self._limitation_response(
+                gate_name,
+                "search charging stations on the active route",
+                reason="navigation is not currently active",
+            )
+        active_route_ids = [
+            item for item in nav.get("route_ids", []) if isinstance(item, str)
+        ]
+        if not active_route_ids:
+            return self._limitation_response(
+                gate_name,
+                "search charging stations on the active route",
+                reason="the active route segments were unavailable",
+            )
+        selected_route_id = route_id or active_route_ids[0]
+        if selected_route_id not in active_route_ids:
+            return self._limitation_response(
+                gate_name,
+                "search charging stations on the active route",
+                reason="the requested route id is not part of the active route",
+            )
+
+        active_routes = self._active_route_records_from_navigation(nav)
+        if active_routes:
+            self._remember_active_route_records(active_route_ids, active_routes)
+
+        search_arguments: dict[str, Any] = {
+            "route_id": selected_route_id,
+            "category_poi": "charging_stations",
+            "at_kilometer": float(kilometer),
+        }
+        availability_filter_applied = self._add_charging_availability_filter_if_supported(
+            search_arguments,
+            require_available=bool(require_available),
+        )
+        search_call = ("search_poi_along_the_route", search_arguments)
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "search for charging stations on the active route",
+            [search_call],
+        )
+        if blocker:
+            return blocker
+        charging_status = self._ensure_charging_status_fact_for_route_search()
+        search_result = self._call_raw_tool_sync(*search_call)
+        if search_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "search for charging stations on the active route",
+                search_result,
+            )
+        pois = pois_value(search_result)
+        plug = self.select_charging_plug(
+            pois,
+            require_available=bool(require_available),
+        )
+        status = "SUCCESS" if pois else "NOT_FOUND"
+        report = {
+            "status": status,
+            "route_id": selected_route_id,
+            "route_index": active_route_ids.index(selected_route_id),
+            "at_kilometer": float(kilometer),
+            "pois": copy.deepcopy(pois),
+            "selected_charging_plug": copy.deepcopy(plug),
+            "search_result": copy.deepcopy(search_result),
+            "charging_status": copy.deepcopy(charging_status),
+            "require_available": bool(require_available),
+            "availability_filter_applied": availability_filter_applied,
+        }
+        self._store_helper_report(gate_name, report)
+        self.remember_entity("last_active_route_charging_search", copy.deepcopy(report))
+        return report
+
+    def estimate_charging_stops_for_route_by_soc_window(
+        self,
+        destination_id: str,
+        charge_from_state_of_charge: int | float,
+        charge_to_state_of_charge: int | float,
+        start_id: str | None = None,
+        route_prefer: str | None = None,
+    ) -> dict[str, Any]:
+        """Estimate route charging stops from an explicit SOC driving window."""
+
+        gate_name = "estimate_charging_stops_for_route_by_soc_window"
+        destination_id = self._resolve_preloaded_argument_value(destination_id)
+        start_id = (
+            self.policy_location_id()
+            if start_id is None
+            else self._resolve_preloaded_argument_value(start_id)
+        )
+        if not isinstance(destination_id, str) or not destination_id:
+            raise ValueError("destination_id must be a grounded location id")
+        if not isinstance(start_id, str) or not start_id:
+            return self._limitation_response(
+                gate_name,
+                "estimate charging stops for the route",
+                reason="the start location is unavailable",
+            )
+
+        lower_soc = self._parse_first_number(charge_from_state_of_charge)
+        upper_soc = self._parse_first_number(charge_to_state_of_charge)
+        if (
+            not isinstance(lower_soc, (int, float))
+            or isinstance(lower_soc, bool)
+            or not isinstance(upper_soc, (int, float))
+            or isinstance(upper_soc, bool)
+        ):
+            raise ValueError("charge_from_state_of_charge and charge_to_state_of_charge must be numeric percentages")
+        requested_lower_soc = float(lower_soc)
+        requested_upper_soc = float(upper_soc)
+        if (
+            requested_lower_soc < 0
+            or requested_lower_soc > 100
+            or requested_upper_soc < 0
+            or requested_upper_soc > 100
+        ):
+            raise ValueError("state of charge percentages must be between 0 and 100")
+        if requested_upper_soc == requested_lower_soc:
+            return self._limitation_response(
+                gate_name,
+                "estimate charging stops for the route",
+                reason="the two state-of-charge bounds must be different",
+            )
+        lower_soc = min(requested_lower_soc, requested_upper_soc)
+        upper_soc = max(requested_lower_soc, requested_upper_soc)
+
+        route_options = self.get_route_options(start_id=start_id, destination_id=destination_id)
+        if route_options.get("status") != "SUCCESS":
+            return route_options
+        selector = (
+            str(route_prefer).strip().lower()
+            if route_prefer is not None and str(route_prefer).strip()
+            else None
+        )
+        selected_route = self.select_route(
+            route_options.get("routes"),
+            prefer=selector,
+            record_selection=False,
+        )
+        if selected_route.get("status") != "SUCCESS":
+            report = {
+                "status": selected_route.get("status") or "AMBIGUOUS",
+                "reason": selected_route.get("reason") or "route preference is unresolved",
+                "start_id": start_id,
+                "destination_id": destination_id,
+                "routes": copy.deepcopy(route_options.get("routes")),
+                "matches": copy.deepcopy(selected_route.get("matches")),
+            }
+            self._store_helper_report(gate_name, report)
+            self.remember_entity("last_charging_stop_estimate", copy.deepcopy(report))
+            return report
+
+        route = selected_route.get("route")
+        if not isinstance(route, dict):
+            return self._limitation_response(
+                gate_name,
+                "estimate charging stops for the route",
+                reason="the selected route was unavailable",
+            )
+        route_distance = first_number_value(route.get("distance_km"))
+        if not isinstance(route_distance, (int, float)) or isinstance(route_distance, bool):
+            return self._limitation_response(
+                gate_name,
+                "estimate charging stops for the route",
+                reason="the selected route distance was unavailable",
+            )
+
+        distance_fact = self.get_distance_by_soc_value(
+            initial_state_of_charge=int(round(upper_soc)),
+            final_state_of_charge=int(round(lower_soc)),
+        )
+        window_range = first_number_value(distance_fact.get("distance_km"))
+        if (
+            not isinstance(window_range, (int, float))
+            or isinstance(window_range, bool)
+            or window_range <= 0
+        ):
+            return self._limitation_response(
+                gate_name,
+                "estimate charging stops for the route",
+                reason="the range for the requested state-of-charge window was unavailable",
+            )
+
+        estimated_stops = int(math.ceil(float(route_distance) / float(window_range)))
+        report = {
+            "status": "SUCCESS",
+            "start_id": start_id,
+            "destination_id": destination_id,
+            "route_prefer": selector,
+            "route": copy.deepcopy(route),
+            "route_id": route.get("route_id") or route.get("id"),
+            "route_distance_km": float(route_distance),
+            "charge_from_state_of_charge": lower_soc,
+            "charge_to_state_of_charge": upper_soc,
+            "requested_charge_from_state_of_charge": requested_lower_soc,
+            "requested_charge_to_state_of_charge": requested_upper_soc,
+            "soc_bounds_reordered": (
+                requested_lower_soc != lower_soc or requested_upper_soc != upper_soc
+            ),
+            "range_per_charge_window_km": float(window_range),
+            "distance_by_soc": copy.deepcopy(distance_fact),
+            "estimated_charging_stops": estimated_stops,
+            "estimated_drive_windows_required": estimated_stops,
+            "assumption": (
+                "Counts the number of lower-to-upper SOC charging windows needed "
+                "to cover the selected route distance; explain separately if an "
+                "initial charge has already been completed."
+            ),
+        }
+        self._store_helper_report(gate_name, report)
+        self.remember_entity("last_charging_stop_estimate", copy.deepcopy(report))
         return report
 
     def plan_charging_for_next_meeting(
@@ -8797,7 +13771,11 @@ class CoroutineWorkspace:
             start_id=current_location_id,
             destination_id=meeting_location_id,
         )
-        selected_route = self.select_route(route_options, prefer="fastest")
+        selected_route = self.select_route(
+            route_options.get("routes"),
+            prefer="fastest",
+            record_selection=False,
+        )
         if selected_route.get("status") != "SUCCESS":
             return selected_route
         route = selected_route.get("route")
@@ -8852,6 +13830,11 @@ class CoroutineWorkspace:
         plug = self.select_charging_plug(pois_result)
         if plug.get("status") != "SUCCESS":
             return plug
+        station_navigation_id = (
+            plug.get("charging_station_navigation_id")
+            or plug.get("station_id")
+            or plug.get("charging_station_id")
+        )
         charge_time_result = self._call_raw_tool_sync(
             "calculate_charging_time_by_soc",
             {
@@ -8877,6 +13860,61 @@ class CoroutineWorkspace:
         )
         max_charging_minutes = max(0, int(max_charging_minutes))
 
+        route_to_station: dict[str, Any] | None = None
+        route_station_to_meeting: dict[str, Any] | None = None
+        navigation_route_ids: list[str] = []
+        if isinstance(station_navigation_id, str) and station_navigation_id:
+            to_station_options = self.get_route_options(
+                start_id=current_location_id,
+                destination_id=station_navigation_id,
+            )
+            to_station = self.select_route(
+                (
+                    to_station_options.get("routes")
+                    if isinstance(to_station_options, dict)
+                    else None
+                ),
+                prefer="fastest",
+                record_selection=False,
+            )
+            if (
+                to_station.get("status") == "SUCCESS"
+                and isinstance(to_station.get("route"), dict)
+            ):
+                route_to_station = to_station["route"]
+                route_to_station_id = (
+                    route_to_station.get("route_id") or route_to_station.get("id")
+                )
+                if isinstance(route_to_station_id, str):
+                    navigation_route_ids.append(route_to_station_id)
+
+            station_to_meeting_options = self.get_route_options(
+                start_id=station_navigation_id,
+                destination_id=meeting_location_id,
+            )
+            station_to_meeting = self.select_route(
+                (
+                    station_to_meeting_options.get("routes")
+                    if isinstance(station_to_meeting_options, dict)
+                    else None
+                ),
+                prefer="fastest",
+                record_selection=False,
+            )
+            if (
+                station_to_meeting.get("status") == "SUCCESS"
+                and isinstance(station_to_meeting.get("route"), dict)
+            ):
+                route_station_to_meeting = station_to_meeting["route"]
+                station_to_meeting_id = (
+                    route_station_to_meeting.get("route_id")
+                    or route_station_to_meeting.get("id")
+                )
+                if isinstance(station_to_meeting_id, str):
+                    navigation_route_ids.append(station_to_meeting_id)
+        self._ensure_scratchpad_shape()
+        self.scratchpad["facts"].pop("pending_route_narration", None)
+
         report = {
             "status": "SUCCESS",
             "min_charging_minutes": int(min_charging_minutes),
@@ -8896,6 +13934,25 @@ class CoroutineWorkspace:
             "charging_station_plug_id": plug.get("charging_station_plug_id"),
             "charging_station_navigation_id": plug.get("selected", {}).get("navigation_id"),
             "charging_station_phone_number": plug.get("selected", {}).get("phone_number"),
+            "final_destination_id": meeting_location_id,
+            "route_to_charging_station": copy.deepcopy(route_to_station),
+            "route_charging_station_to_destination": copy.deepcopy(route_station_to_meeting),
+            "route_to_charging_station_id": (
+                route_to_station.get("route_id") or route_to_station.get("id")
+                if isinstance(route_to_station, dict)
+                else None
+            ),
+            "route_charging_station_to_destination_id": (
+                route_station_to_meeting.get("route_id") or route_station_to_meeting.get("id")
+                if isinstance(route_station_to_meeting, dict)
+                else None
+            ),
+            "route_charging_station_to_meeting_id": (
+                route_station_to_meeting.get("route_id") or route_station_to_meeting.get("id")
+                if isinstance(route_station_to_meeting, dict)
+                else None
+            ),
+            "navigation_route_ids": navigation_route_ids if len(navigation_route_ids) == 2 else [],
         }
         self.remember("last_charging_time_plan", copy.deepcopy(report))
         self.remember_entity("selected_charging_plan", copy.deepcopy(report))
@@ -9083,6 +14140,14 @@ class CoroutineWorkspace:
         if isinstance(aliases, str):
             aliases = [aliases]
         normalized["alias"] = [str(alias).lower() for alias in aliases]
+        distance_km = CoroutineWorkspace._parse_first_number(normalized.get("distance_km"))
+        if distance_km is None:
+            distance_km = CoroutineWorkspace._parse_first_number(normalized.get("distance"))
+        if distance_km is not None:
+            if isinstance(normalized.get("distance"), str):
+                normalized.setdefault("distance_raw", normalized["distance"])
+            normalized["distance_km"] = distance_km
+            normalized["distance"] = distance_km
         hours = normalized.get("duration_hours")
         minutes = normalized.get("duration_minutes")
         if isinstance(hours, (int, float)) and isinstance(minutes, (int, float)):
@@ -9684,14 +14749,104 @@ class CoroutineWorkspace:
         normalized.setdefault("status", "SUCCESS")
         if tool_name == "get_location_id_by_location_name" and isinstance(normalized.get("id"), str):
             normalized.setdefault("location_id", normalized["id"])
+        if tool_name == "get_charging_specs_and_status":
+            remaining_range = normalized.get("remaining_range")
+            parsed_range = self._parse_first_number(remaining_range)
+            if parsed_range is None:
+                parsed_range = self._parse_first_number(normalized.get("remaining_range_km"))
+            if parsed_range is not None:
+                normalized.setdefault("remaining_range_raw", remaining_range)
+                normalized["remaining_range"] = parsed_range
+                normalized["remaining_range_km"] = parsed_range
+            else:
+                unknown_range = UnknownToolResponseValue(
+                    self,
+                    "result.get_charging_specs_and_status.remaining_range",
+                )
+                if "remaining_range" in normalized and not isinstance(
+                    remaining_range,
+                    UnknownToolResponseValue,
+                ):
+                    normalized.setdefault("remaining_range_raw", remaining_range)
+                normalized["remaining_range"] = unknown_range
+                normalized["remaining_range_km"] = unknown_range
+        if tool_name == "get_weather":
+            current_slot = normalized.get("current_slot")
+            if isinstance(current_slot, dict):
+                normalized.setdefault("current_weather_slot", current_slot)
+                for key in (
+                    "condition",
+                    "temperature_c",
+                    "wind_speed_kph",
+                    "humidity_percent",
+                    "start_time",
+                    "end_time",
+                ):
+                    if key in current_slot:
+                        normalized.setdefault(key, current_slot[key])
+                if "condition" in current_slot:
+                    normalized.setdefault("current_condition", current_slot["condition"])
+                if "temperature_c" in current_slot:
+                    normalized.setdefault(
+                        "current_temperature_c",
+                        current_slot["temperature_c"],
+                    )
         if tool_name == "get_entries_from_calendar":
             meetings = normalized.get("meetings")
             if isinstance(meetings, list):
                 entries = self._normalize_calendar_entries(meetings)
                 normalized["meetings"] = entries
                 normalized["entries"] = entries
+        for poi_key in ("pois_found", "pois_found_along_route", "pois"):
+            pois = normalized.get(poi_key)
+            if isinstance(pois, list):
+                normalized[poi_key] = [
+                    self._normalize_poi_result_record(poi)
+                    for poi in pois
+                    if isinstance(poi, dict)
+                ]
         if "pois_found" in normalized:
             normalized.setdefault("pois", normalized["pois_found"])
+        if "pois_found_along_route" in normalized:
+            normalized.setdefault("pois", normalized["pois_found_along_route"])
+        return normalized
+
+    @staticmethod
+    def _normalize_poi_result_record(poi: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(poi)
+        poi_id = normalized.get("poi_id") or normalized.get("id") or normalized.get("navigation_id")
+        if isinstance(poi_id, str) and poi_id:
+            normalized.setdefault("poi_id", poi_id)
+            normalized.setdefault("navigation_id", poi_id)
+        host_location_id = normalized.get("host_location_id") or normalized.get(
+            "corresponding_location_id"
+        )
+        if isinstance(host_location_id, str) and host_location_id:
+            normalized.setdefault("host_location_id", host_location_id)
+
+        charging_plugs = normalized.get("charging_plugs")
+        if isinstance(charging_plugs, list):
+            normalized_plugs = [
+                dict(plug)
+                for plug in charging_plugs
+                if isinstance(plug, dict)
+            ]
+            normalized["charging_plugs"] = normalized_plugs
+            plug_ids = [
+                plug.get("plug_id")
+                for plug in normalized_plugs
+                if isinstance(plug.get("plug_id"), str)
+            ]
+            if plug_ids:
+                normalized.setdefault("plug_ids", plug_ids)
+            available_plug_ids = [
+                plug.get("plug_id")
+                for plug in normalized_plugs
+                if isinstance(plug.get("plug_id"), str)
+                and str(plug.get("availability") or "").lower() == "available"
+            ]
+            if available_plug_ids:
+                normalized.setdefault("available_plug_ids", available_plug_ids)
         return normalized
 
     def _normalize_result_value(
@@ -9773,6 +14928,8 @@ class CoroutineWorkspace:
             if key == "remaining_range":
                 remaining_range = CoroutineWorkspace._parse_first_number(value)
                 if remaining_range is not None:
+                    parsed.setdefault("remaining_range_raw", value)
+                    parsed["remaining_range"] = remaining_range
                     parsed.setdefault("remaining_range_km", remaining_range)
             if "charging_time" in key or key.startswith("time_") or key.endswith("_time"):
                 minutes = CoroutineWorkspace._parse_first_number(value)
@@ -9787,11 +14944,15 @@ class CoroutineWorkspace:
             if key.startswith("distance") and ("_until_" in key or "_for_" in key):
                 km = CoroutineWorkspace._parse_first_number(value)
                 if km is not None:
+                    if isinstance(value, str):
+                        parsed.setdefault("distance_raw", value)
                     parsed.setdefault("distance_km", km)
-                    parsed.setdefault("distance", value)
+                    parsed.setdefault("distance", km)
 
     @staticmethod
     def _parse_first_number(value: Any) -> int | float | None:
+        if isinstance(value, UnknownToolResponseValue):
+            return None
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return value
         if not isinstance(value, str):
@@ -10002,6 +15163,8 @@ def first_number_value(value: Any, *, default: int | float | None = None) -> int
     if isinstance(data, dict):
         for key in (
             "distance_km",
+            "remaining_range_km",
+            "remaining_range",
             "duration_total_minutes",
             "time_minutes",
             "minutes",
@@ -10070,11 +15233,15 @@ class BlockingPythonExecutor:
             "handle_pending_confirmation": ws.handle_pending_confirmation,
             "defrost_front_window": ws.defrost_front_window,
             "open_sunroof_safe": ws.open_sunroof_safe,
+            "open_close_window_safe": ws.open_close_window_safe,
             "set_fog_lights_on_safe": ws.set_fog_lights_on_safe,
             "set_high_beams_on_safe": ws.set_high_beams_on_safe,
+            "set_exterior_lights_safe": ws.set_exterior_lights_safe,
+            "present_climate_comfort_options": ws.present_climate_comfort_options,
             "get_distance_by_soc_value": ws.get_distance_by_soc_value,
             "get_navigation_state": ws.get_navigation_state,
             "get_contact_details": ws.get_contact_details,
+            "send_contact_details_to_contact": ws.send_contact_details_to_contact,
             "get_next_calendar_entry": ws.get_next_calendar_entry,
             "set_air_conditioning_on_safe": ws.set_air_conditioning_on_safe,
             "close_known_windows_for_blocked_ac": ws.close_known_windows_for_blocked_ac,
@@ -10083,13 +15250,24 @@ class BlockingPythonExecutor:
             "increase_fan_speed": ws.increase_fan_speed,
             "decrease_fan_speed": ws.decrease_fan_speed,
             "set_occupied_seat_heating": ws.set_occupied_seat_heating,
+            "turn_off_unoccupied_seat_heating": ws.turn_off_unoccupied_seat_heating,
+            "set_occupied_reading_lights": ws.set_occupied_reading_lights,
             "get_route_options": ws.get_route_options,
             "select_route": ws.select_route,
             "select_route_by_user_preferences": ws.select_route_by_user_preferences,
             "select_poi": ws.select_poi,
             "get_weather_at_route_arrival": ws.get_weather_at_route_arrival,
+            "navigate_by_arrival_weather": ws.navigate_by_arrival_weather,
+            "navigate_to_poi_by_arrival_weather": ws.navigate_to_poi_by_arrival_weather,
+            "navigate_to_poi_unless_arrival_weather": ws.navigate_to_poi_unless_arrival_weather,
+            "set_navigation_conditioned_on_arrival_weather": ws.set_navigation_conditioned_on_arrival_weather,
             "select_poi_at_location_open_at_route_arrival": ws.select_poi_at_location_open_at_route_arrival,
             "select_charging_plug": ws.select_charging_plug,
+            "find_charging_stop_on_active_route_by_soc": ws.find_charging_stop_on_active_route_by_soc,
+            "search_charging_stations_on_route": ws.search_charging_stations_on_route,
+            "search_charging_stations_on_active_route": ws.search_charging_stations_on_active_route,
+            "estimate_charging_stops_for_route_by_soc_window": ws.estimate_charging_stops_for_route_by_soc_window,
+            "set_navigation_via_route_stop_with_open_poi": ws.set_navigation_via_route_stop_with_open_poi,
             "set_new_navigation_via_stop": ws.set_new_navigation_via_stop,
             "plan_charging_for_next_meeting": ws.plan_charging_for_next_meeting,
             "call_selected_charging_provider": ws.call_selected_charging_provider,
@@ -10172,12 +15350,43 @@ class BlockingPythonExecutor:
             "batch(...), and the preloaded CAR-bench tool functions."
         )
 
+    @staticmethod
+    def _repair_trailing_unmatched_brace(code: str) -> str:
+        try:
+            compile(code, "<string>", "exec")
+            return code
+        except SyntaxError as exc:
+            if "unmatched '}'" not in str(exc):
+                return code
+
+        trailing_whitespace = code[len(code.rstrip()):]
+        candidate = code.rstrip()
+        while candidate.endswith("}"):
+            candidate = candidate[:-1].rstrip()
+            try:
+                compile(candidate, "<string>", "exec")
+                return candidate + trailing_whitespace
+            except SyntaxError as exc:
+                if "unmatched '}'" not in str(exc):
+                    return code
+        return code
+
+    def _sync_scratchpad_globals(self) -> None:
+        self.workspace._ensure_scratchpad_shape()
+        for key in SCRATCHPAD_ENTITY_ALIASES:
+            if key in self.workspace.scratchpad:
+                self._globals[key] = self.workspace.scratchpad[key]
+            else:
+                self._globals.pop(key, None)
+
     def run(self, code: str) -> ExecutionResult:
         self.workspace.reset_actions()
         stdout = io.StringIO()
         error = None
         self._active_stdout = stdout
         try:
+            self._sync_scratchpad_globals()
+            code = self._repair_trailing_unmatched_brace(code)
             exec(code, self._globals, self._globals)
         except ResponseReady:
             pass

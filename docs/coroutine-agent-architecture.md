@@ -1,7 +1,7 @@
 # Coroutine Agent Architecture and Reliability Techniques
 
 Status: active implementation reference
-Last verified against code: 2026-06-22
+Last verified against code: 2026-06-26
 Agent package: `src/track_1_agent_coroutine_under_test/`
 
 Recent deltas (2026-06-21) — the **facts-vs-intention** refactor: the runtime
@@ -18,7 +18,8 @@ conditions (missing capability, confirmation ask, policy block, info
 unavailable, unrecoverable failure). (4) Route narration is staged
 (`search`=offer, `select`="selected for this segment",
 `navigate`="this route segment is now using") so a read is never narrated as an
-action. (5) Contacts/POIs are normalized
+action; multi-segment waypoint edits can store one grounded narration per new
+segment so the response covers both sides of the edit. (5) Contacts/POIs are normalized
 additively (`get_contact_id_by_contact_name` to `contact_ids`/`by_id`; POIs gain
 `poi_id`/`plug_ids`) preserving the raw result. (6) Batched helper results hoist
 non-reserved keys onto the envelope, now tagged with the name the model called
@@ -36,21 +37,31 @@ options. Nested contact names and charging-plug lists are normalized additively.
 Mixed batches preserve the model's original result order. A second ergonomics
 pass adds `ws.facts`/`ws.entities`/`ws.gates`, stable route aliases
 (`selected_route_id`, fastest/shortest IDs), normalized contact `matches`,
-POI `navigation_id` vs `host_location_id`, numeric `remaining_range_km`, and
-safe serialization of arbitrary model-owned scratchpad values. Known pure
-context callables are resolved before helper execution and persistence. Final
-destination replacement keeps a valid model-supplied route ID or fills the route
-only when exactly one option exists; it does not parse user language or
-preferences. Before the first model decision, navigation state is refreshed per
-user turn and user preferences are read once per task when the official
-preference tool is exposed. Both are stored as facts. After serializing the
-scratchpad, the agent appends **preflight attention messages**: short static
-policy reminders placed next to the fields they apply to. The reminders do not
-derive an answer from those values, parse user wording, or block a tool. The
-model remains responsible for interpreting the request and choosing the action.
-This mechanism can be extended to other frequently relevant grounded state,
-including disambiguation facts, while preserving the same facts-vs-intention
-boundary.
+POI `navigation_id` vs `host_location_id`, numeric `remaining_range_km`, a
+terminal unavailable-range sentinel when `remaining_range` is missing or
+`None` or cannot be parsed, numeric route `distance_km` plus a numeric
+`distance` alias, and safe serialization of arbitrary model-owned scratchpad
+values.
+Selected
+grounded entities such as `last_routes`, `last_route_options`, `last_pois`,
+`last_charging_specs_and_status`, `selected_route`, selected POIs, selected
+charging plugs, and recent location lookups are also mirrored at scratchpad top
+level and refreshed as Python globals before each code block. These names are
+only aliases for facts already stored under
+`scratchpad["entities"]`; if the entity disappears, the alias is removed before
+the next execution. Known pure context callables are resolved before helper
+execution and persistence. Final destination replacement keeps a valid
+model-supplied route ID or fills the route only when exactly one option exists;
+it does not parse user language or preferences. Before the first model
+decision, navigation state is refreshed per user turn and user preferences are
+read once per task when the official preference tool is exposed. Both are
+stored as facts. After serializing the scratchpad, the agent appends
+**preflight attention messages**: short static policy reminders placed next to
+the fields they apply to. The reminders do not derive an answer from those
+values, parse user wording, or block a tool. The model remains responsible for
+interpreting the request and choosing the action. This mechanism can be
+extended to other frequently relevant grounded state, including disambiguation
+facts, while preserving the same facts-vs-intention boundary.
 `set_new_navigation(...)` on an active route remains a fact-only
 `NEEDS_ACTIVE_ROUTE_EDIT` result and does not redirect to a mutation.
 Confirmation-required wrappers store the fully grounded action before asking,
@@ -67,6 +78,133 @@ stale/base route ID only when there is a unique known connecting route. If route
 facts are incomplete, the model's call is left alone; if all facts are known and
 the chain is impossible with no unique repair, the wrapper returns
 `ROUTE_CHAIN_MISMATCH` rather than emitting a guaranteed-invalid evaluator call.
+Recent helper reliability additions keep the same boundary. Unknown
+`remaining_range` from `get_charging_specs_and_status(...)` is stored as a
+terminal fact for range/charging math in that user request, blocking downstream
+charging calculations instead of allowing `unknown km` answers. The user-facing
+limitation also says charging-stop planning cannot be completed from available
+car data, which keeps long-route planning and email flows from sounding like a
+narrow range-only answer. Helpers that derive charging-search positions from
+state use the same rule: numeric strings such as `155.0km` are parsed, but a
+missing, `None`, or unparseable stored range does not fall back to a guessed
+route midpoint. Long-route
+email confirmation uses the same fact boundary: when a known route is long and
+charging facts have not been read, `send_email(...)` returns a local
+`NEEDS_MORE_FACTS` result so the model can read charging status before asking
+for confirmation. This check uses structured route distance and stored charging
+facts, not user-message keywords. Applied route records are preserved separately
+from stale route-option lists as `active_route_records`, so clearing old choices
+after a navigation mutation does not delete the distance facts needed by later
+guards. Local control results such as `NEEDS_MORE_FACTS`,
+`NEEDS_CLARIFICATION`, and `NEEDS_ACTIVE_ROUTE_EDIT` are not treated as failed
+mutations because no evaluator side effect was attempted. For post-charge
+route emails, `get_distance_by_soc(...)` results are normalized and persisted
+as `last_distance_by_soc`; if the model has already calculated a charging plan
+to a target SOC, confirmation-required `send_email(...)` can require that
+official target-SOC range fact before the email is confirmed. This only applies
+after a selected charging plan exists; the wrapper does not choose whether the
+charging strategy should be current-location or along-route. Full-window opening
+is also guarded at the
+argument boundary: raw/default `percentage=100` window and sunroof calls ask for
+a target percentage unless `open_close_window_safe(..., target_is_explicit=True)`
+or `open_sunroof_safe(..., target_is_explicit=True)` marks the exact value as
+already resolved. Defrost helpers apply a stored defrost
+airflow preference only when it still includes `WINDSHIELD`; otherwise they
+preserve an existing airflow mode that already includes `WINDSHIELD`, and only
+set plain `WINDSHIELD` when the current mode lacks windshield airflow. The
+charging boundary now checks grounded station/plug consistency: if a charging
+calculation pairs a known station ID with a plug ID that is not one of that
+station's known plugs, the call is repaired to that station's best known plug
+before it reaches the evaluator. Route selection by explicit route ID also
+falls back to the grounded `routes_by_id` registry when the supplied route list
+has been overwritten by a later lookup. Navigation completion guarding covers
+full navigation claims and route-leg setup claims, so text such as `I've set up
+the first leg` is replaced by the grounded missing-control response unless a
+navigation mutation actually succeeded. The
+next-meeting charging planner now stores the selected charger, plug, provider
+phone, and executable two-leg `navigation_route_ids`. The runtime no longer
+repairs a direct destination route to those stored charging-stop route IDs by
+reading the current user message; the model must call the explicit route-stop
+helper or pass the two grounded route IDs itself.
+Route-leg repair can also use explicit via-road wording from the current user
+message, but only against already fetched route alternatives for the same
+start/destination. This is a deliberate narrow exception to the "no missing
+parameter inference from user text" helper rule: the helper is preserving an
+explicit candidate label the user supplied in that turn, not inventing a missing
+parameter or selecting a default. It does not carry previous raw wording through
+a bare follow-up such as "continue"; cross-turn preservation should come from a
+recorded `select_route(...)` fact. If no unique fetched route candidate matches,
+the call is left alone. After a waypoint edit, route-based charging searches can
+reuse the newly created route segment and grounded range facts only inside the
+same user turn that created the route-edit context. Cross-turn charging-search
+repair no longer scans the follow-up wording; the model should call
+`search_charging_stations_on_route(...)` or pass an explicit route ID/kilometer.
+For charging searches on a later active route segment, the wrapper can also
+convert a recent official `get_distance_by_soc(...)` distance from global
+current-location coordinates into segment-local `at_kilometer` coordinates by
+subtracting earlier active segment distances. This repair only fires when the
+model's requested kilometer already matches the grounded SOC-distance fact; it
+does not parse the user message to discover a target SOC or invent a charger
+search point.
+The explicit helper
+`find_charging_stop_on_active_route_by_soc(reserve_state_of_charge, ...)`
+exposes the same boundary in a form the model can choose directly. The model
+must supply the resolved reserve SOC number. The helper then reads active
+navigation, charging status, official distance-by-SOC facts, converts the
+current-location distance into the active segment coordinate system, calls
+`search_poi_along_the_route(...)`, and stores selected charging/provider facts.
+It never inspects raw user text or decides which SOC the user meant.
+`search_charging_stations_on_active_route(at_kilometer, ...)` follows the same
+rule for route-kilometer charger searches. The model must supply the resolved
+kilometer, for example `100`; the helper reads active navigation, defaults to
+the current first active segment unless a grounded route id is supplied, and
+emits the real `search_poi_along_the_route(...)` call. If navigation is not
+active and the model already has a grounded planned route id,
+`search_charging_stations_on_route(route_id, at_kilometer, ...)` provides the
+same route-search and charger/plug normalization without calling
+`set_new_navigation(...)`. Both helpers can translate an explicit
+`require_available=True` argument into the official availability filter when the
+live task schema exposes that parameter, and neither helper infers route id,
+kilometer, SOC, or availability intent from raw user text.
+`estimate_charging_stops_for_route_by_soc_window(...)` similarly requires the
+model to supply a grounded destination id, lower SOC, upper SOC, and any
+resolved route preference. It calls route lookup plus official
+`get_distance_by_soc(upper, lower)` and returns facts for the model to explain.
+It does not derive SOC values or route preferences from task wording.
+Route-edit narration uses the same grounded-facts boundary. For
+`navigation_replace_one_waypoint(...)`, the guard records the selected route for
+the segment into the replacement waypoint and the selected route for the
+segment away from it, using only route IDs and aliases returned by
+`get_routes_from_start_to_destination(...)`. After the mutation succeeds, the
+response obligation appends both segment facts and a general alternatives
+question when alternatives existed. It does not inspect user text to decide
+which segment matters.
+Weather lookup normalization follows the same shape-only principle:
+`get_weather_guarded(...)` clamps month/day to the policy date, preserves an
+explicit hour/minute chosen by the model or helper, hoists active-slot fields
+such as `condition` and `temperature_c` to stable top-level aliases, and stores
+`scratchpad["entities"]["last_weather"]`. It does not infer a weather branch
+from user-message keywords.
+Arrival-weather navigation helpers use response obligations for the same
+fact-only purpose: after `navigate_to_poi_by_arrival_weather(...)` or
+`navigate_to_poi_unless_arrival_weather(...)` chooses the fallback branch from
+grounded arrival-weather facts, the final answer must include the blocked
+weather condition and fallback destination. The obligation does not choose the
+branch; it only prevents the model from omitting the branch reason after the
+helper has already made the evaluator-visible navigation call.
+Successful climate-temperature setters also have a narrow response repair:
+if the model says "degrees" without Celsius after a successful
+`set_climate_temperature(...)`, `respond(...)` rewrites the assistant's own
+wording to "degrees Celsius". This enforces the unit policy on completed
+temperature actions without reading user wording or changing tool arguments.
+Contact lookup normalization also stays grounded in existing tool state. After a
+calendar read, `get_contact_id_by_contact_name_guarded(...)` intersects same-name
+contact candidates with recent calendar attendee IDs. A unique attendee match is
+ranked first while `unconstrained_contact_ids` preserves the raw candidate
+order. If the model explicitly passes
+`constrain_to_recent_calendar_attendees=True`, the wrapper narrows the normalized
+result to that attendee subset before the model asks for contact details. The
+raw evaluator still receives only the official contact-name arguments.
 
 Prior deltas (2026-06-20): removed the catalog-diff missing-capability
 inference for compliance (now reactive live-membership, see Competition
@@ -128,6 +266,22 @@ The rules below were clarified directly with the organizers (2026-06; see
 - **Membership checks against the live per-task list**: "is the specific tool/
   parameter I need present in this task?" (`A in live_tools`). One list, one
   lookup.
+
+Organizer Q&A evidence for this boundary:
+
+```text
+Participant follow-up, 2026-06-19:
+I have an internal helper function AX (evaluator never sees AX by name) that my
+agent uses. AX runs some logic, checks whether tool A is present in the per-task
+tool list evaluator sent in first turn of task, calls the real tool A if it's
+there (evaluator receives the normal A call), or skips it and reports it can't
+if it isn't, then post-processes A's result. AX only ever checks evaluator's
+per-task first-turn list and it never compares against any full/external tool
+list. Allowed?
+
+Johannes, 2026-06-19 18:07:
+Yes, that's fine. And don't worry. Keep the questions coming if unsure!
+```
 
 ### Not allowed
 
@@ -304,6 +458,15 @@ Two transport modes are supported:
 
 Malformed actions are repaired through a bounded schema retry loop. Provider
 errors use a separate bounded retry loop with backoff for retryable failures.
+Malformed Python that reaches the persistent REPL has its own guard: if the same
+`SyntaxError`, `IndentationError`, or `TabError` repeats, the runtime stops the
+turn instead of letting the model burn internal calls on near-identical broken
+code. Non-Cerebras providers keep the guard simple and break after two identical
+REPL errors without changing sampling settings. Cerebras gets one tested escape
+hatch before that final stop: repeated identical REPL syntax failures retry with
+the `CAR_AGENT_STORM_RETRY_TEMPERATURES` ladder, defaulting to `0.15,0.4,0.8`.
+The per-call temperature override is scoped to Cerebras because that path was
+tested and other APIs may process temperature differently.
 
 ### System Prompt Composition
 
@@ -327,17 +490,17 @@ what was removed.
 
 ### Callable Surface
 
-The model-facing prompt documents 76 callable entries:
+The model-facing prompt documents 104 callable entries:
 
 - 57 public CAR-bench wrappers.
-- 15 model-facing workspace/policy helpers.
+- 43 model-facing workspace/policy helpers.
 - 4 pure extraction helpers (`id_value`, `pois_value`, `routes_value`, and
   `first_number_value`).
 
-The tool/helper dispatch registry contains 81 known names: the 57 public
-wrappers, 15 model-facing workspace helpers, and nine internal `*_guarded`
-targets. Including the four pure extraction helpers, the REPL therefore has 85
-relevant callable names, of which 76 are documented choices for the model.
+The tool/helper dispatch registry contains 109 known names: the 57 public
+wrappers, 43 model-facing workspace helpers, and nine internal `*_guarded`
+targets. Including the four pure extraction helpers, the REPL therefore has 113
+relevant callable names, of which 104 are documented choices for the model.
 The guard targets are internal implementations, not separately documented
 choices. The model calls the corresponding public wrapper, and dispatch
 transparently applies the guard.
@@ -463,6 +626,15 @@ on the presence or category of grounded preflight state, and may point out
 simple decision dimensions such as `is_multi_stop` or candidate count. It must
 not parse task wording, identify a benchmark task, encode a destination/contact
 answer, or decide which valid action the user intended.
+One current static reminder says that if active navigation exists and the user
+asks for charging stations at a route distance, the model should use
+`search_charging_stations_on_active_route(at_kilometer=...)` rather than a
+current-location POI search. The reminder does not extract the kilometer; the
+model still supplies it explicitly. A paired reminder covers inactive planned
+routes: if the user only asked to plan, inspect, email, or search along a known
+route, the model should use
+`search_charging_stations_on_route(route_id=..., at_kilometer=...)` instead of
+starting navigation solely to make the route active.
 
 Current navigation example:
 
@@ -473,11 +645,14 @@ segment_count = 1
 is_multi_stop = false
 
 Attention:
-For final-destination replacement, if the user asked to change/update/replace
-the destination and did not ask to see or choose route options first, perform the
-edit with the policy-resolved route, normally fastest. Present alternatives and
-wait only when the user asked for options/choice/details before the edit or when
-the route remains unresolved after policy, preferences, and route metadata.
+For a single-segment final-destination replacement, route lookup can return
+multiple alternatives. If no explicit model-resolved route choice, stored
+preference, or unique route metadata selects exactly one route, present the
+fastest/shortest route information and wait before calling the replacement tool.
+If the route is uniquely selected, or only one route exists, call the edit
+wrapper with that grounded route. For multi-stop route construction or
+replacement, policy 022 supplies the proactive-fastest default per new segment
+unless the user or stored preferences specify another route.
 ```
 
 User preference example:
@@ -556,9 +731,10 @@ I acknowledge that I can't ... because the required tool parameter ... is missin
 ```
 
 The invalid tool call is never sent to the evaluator. This is the
-organizer-blessed pattern: the helper/wrapper knows the specific tool it needs
-(its name is in the code), and asks "is this name in the per-task list?"
-— it never enumerates the catalog to compute what was removed.
+organizer-confirmed AX pattern from Competition Compliance: the helper/wrapper
+knows the specific tool it needs (its name is in the code), and asks "is this
+name in the per-task list?" — it never enumerates the catalog to compute what
+was removed.
 
 A previous build inferred removals proactively by comparing the bundled catalog
 to the per-task list (matching the user request against every original schema,
@@ -644,14 +820,29 @@ Examples:
   `route_ids`, `waypoints`, and `routes`.
 - Contact information keyed by contact ID becomes `contacts`, `by_id`, and
   single-contact shortcuts such as `email`; nested names also expose
-  `first_name`, `last_name`, and `display_name`.
+  `first_name`, `last_name`, and `display_name`. `get_contact_details(...,
+  role=...)` can store same-turn roles such as `email_recipient` and
+  `contact_details_subject` after the model resolves grounded IDs; helpers do
+  not infer these roles from raw user text.
 - Charging POIs preserve normalized `charging_plugs` and expose `plug_ids` plus
   `available_plug_ids`; both `pois_found` and `pois_found_along_route` payloads
   are recognized.
+- `select_charging_plug(...)` keeps station and plug fields adjacent and
+  exposes common aliases such as `station_name`, `name`, `poi_id`,
+  `navigation_id`, `power`, `plug_power_kw`, and `power_kw`.
+- Route records expose numeric `distance_km` and numeric `distance` when either
+  field can be parsed, so helper results, raw route results, and persisted route
+  facts support the same route-distance access patterns.
 - POI summaries keep the chosen place and its containing location adjacent:
   `name`, `poi_id`, `navigation_id`, `host_location_id`,
   `host_location_name`, and a compact `display` string. Navigation targets the
   `navigation_id`; the host location is context only.
+- Selected entity facts are available as both `scratchpad["entities"][...]` and
+  short aliases such as `selected_charging_poi`, `selected_charging_plug`,
+  `selected_route`, `last_routes`, `last_route_options`,
+  `last_charging_specs_and_status`, and `last_location_lookup`.
+- `select_route(..., route_id=...)` can recover an already-grounded route from
+  `routes_by_id` when a later route lookup has overwritten `last_route_options`.
 - Loc-to-POI routes may include both a POI-specific `route_id` and a
   location-level `base_route_id`. If a model supplies the `base_route_id` while
   replacing a destination with a POI, the wrapper maps it to the unique matching
@@ -677,20 +868,35 @@ Current helpers:
 | --- | --- |
 | `defrost_front_window()` | Applies front-defrost climate and window policies. |
 | `set_window_defrost_safe(defrost_window='FRONT')` | Applies front/all defrost climate and window policies; rear defrost passes through. |
-| `open_sunroof_safe(percentage)` | Applies sunshade, weather, and confirmation rules. |
-| `open_close_window_safe(window, percentage)` | Applies AC/energy confirmation policy before opening windows above 25%. |
-| `set_air_conditioning_on_safe()` | Closes known windows over 20%, fixes fan speed, then enables AC. |
+| `open_sunroof_safe(percentage, target_is_explicit=False)` | Applies sunshade, weather, and confirmation rules; full-open targets require an explicitly resolved percentage argument rather than user-message keyword parsing. |
+| `open_close_window_safe(window, percentage, target_is_explicit=False)` | Applies AC/energy confirmation policy before opening windows above 25%; full-open targets require an explicitly resolved percentage argument rather than user-message keyword parsing. |
+| `set_air_conditioning_on_safe(use_preferred_air_circulation=False)` | Closes known windows over 20%, fixes fan speed, then enables AC. Stored circulation preference is applied only when the model passes the explicit flag. |
 | `close_known_windows_for_blocked_ac(window=None)` | Handles a narrow follow-up after incomplete window data blocked AC. |
 | `set_climate_temperature_safe(...)` | Applies the cross-zone temperature warning policy. |
-| `set_occupied_seat_heating(...)` | Reads occupancy and current levels, then sets every occupied front seat. |
+| `set_occupied_seat_heating(...)` | Reads occupancy and current levels when needed, then sets every occupied front seat; an explicitly supplied DRIVER/PASSENGER `seat_zone` narrows scope to that one model-resolved front zone. |
+| `turn_off_unoccupied_seat_heating()` | Reads occupancy plus current heating and turns off only unoccupied heatable front seats; if a current level is unavailable for an unoccupied front seat, it still sets that seat to 0 as the safe cleanup action. |
+| `set_occupied_reading_lights(on=True, include_rear=True)` | Reads occupancy and sets only occupied canonical reading-light positions, normalizing rear aliases so the runtime does not emit duplicate left/right rear calls. |
 | `set_fog_lights_on_safe()` | Checks weather and lights, applies low/high-beam prerequisites, and confirms when required. |
 | `set_high_beams_on_safe()` | Blocks high beams while fog lights are on and applies tool confirmation. |
+| `set_exterior_lights_safe(intent)` | Handles model-resolved broad exterior-light intents (`improve_visibility`, `turn_on_headlights`, `turn_off_exterior_lights`) by reading grounded light/weather state and then calling policy-safe raw light tools. |
 | `get_route_options(...)` | Normalizes route choices, aliases, durations, and toll metadata. |
 | `select_route(...)` | Selects one uniquely identified route without guessing and records revision-bound provenance. |
+| `select_poi(..., role=None)` | Selects one grounded POI without guessing; optional explicit `role` stores `selected_<role>_poi` so later steps can preserve stop, companion, destination, or charging-station identity without relying only on the latest POI alias. |
+| `navigate_by_arrival_weather(...)` | Preferred short helper for primary/fallback weather navigation; delegates to the full route-arrival weather protocol. |
+| `navigate_to_poi_by_arrival_weather(...)` | Handles primary-location POI navigation unless arrival weather blocks it; if blocked, sets the fallback route, otherwise searches/selects the model-supplied POI category and sets navigation to that POI. |
+| `navigate_to_poi_unless_arrival_weather(...)` | Short alias for `navigate_to_poi_by_arrival_weather(...)`; same helper contract, no new raw-text parsing or hidden preference repair. |
+| `set_navigation_conditioned_on_arrival_weather(...)` | Selects a primary route, checks destination weather at route-arrival time, and sets navigation to the primary or fallback destination using the model-supplied blocked weather conditions and route preference. |
+| `send_contact_details_to_contact(...)` | Sends one contact's grounded details to another explicit contact by keeping recipient and subject IDs in separate helper arguments and routing the final message through normal email confirmation. |
+| `set_navigation_via_route_stop_with_open_poi(...)` | Builds a two-leg navigation plan through a route stop when another POI category must be open at the same route position during a resolved clock window. The model supplies destination, categories, route selector, and window; the helper derives route-kilometer buckets from route facts and policy time, searches both categories, checks opening hours, calls guarded `set_new_navigation`, and reports which POI is the navigation waypoint versus the non-waypoint open companion. |
+| `set_new_navigation_via_stop(...)` | Builds a two-leg inactive-navigation route through one already grounded stop and calls guarded `set_new_navigation(...)` with the ordered current-location-to-stop and stop-to-final route IDs. The model supplies the stop, final destination, and any route selectors; the helper does not infer that the stop should be included from raw user text. |
+| `search_charging_stations_on_route(...)` | Searches charging stations along a grounded planned route without starting navigation, reads charging status when available and not already grounded, applies an explicit live-supported availability filter when requested, and stores selected charger/plug facts. |
+| `search_charging_stations_on_active_route(...)` | Searches charging stations along the current active route segment at a model-resolved kilometer, reads active navigation plus charging status when available, applies an explicit live-supported availability filter when requested, and stores selected charger/plug facts. |
+| `get_weather_guarded(...)` | Clamps weather date to policy today, preserves explicit hour/minute, normalizes active-slot fields, and stores the last weather result. |
 | `get_preferred_ambient_light_color()` | Resolves a unique stored ambient-light preference. |
 
 Normalization helpers such as `get_navigation_state(...)`,
-`get_contact_details(...)`, and `get_distance_by_soc_value(...)` are also
+`get_contact_details(...)`, `select_charging_plug(...)`, and
+`get_distance_by_soc_value(...)` are also
 model-visible, but they normalize read results rather than implement a policy
 protocol.
 
@@ -704,16 +910,23 @@ helpers. Currently:
 - `set_fog_lights(on=True)` delegates to `set_fog_lights_on_safe()`.
 - `set_head_lights_high_beams(on=True)` delegates to
   `set_high_beams_on_safe()`.
+- Broad exterior-light requests can use `set_exterior_lights_safe(intent)`.
+  The helper does not parse the user message. The model must pass a resolved
+  intent, and the helper only reads grounded weather/exterior-light state before
+  deciding which official raw light tool calls are valid.
 - `set_air_conditioning(on=True)` delegates to
-  `set_air_conditioning_on_safe()`.
+  `set_air_conditioning_on_safe()`. Stored air-circulation preference is not
+  inferred from the user message; the model must call
+  `set_air_conditioning_on_safe(use_preferred_air_circulation=True)` after
+  resolving that preference intent itself.
 - `set_window_defrost(on=True, defrost_window=FRONT|ALL)` delegates to
   `set_window_defrost_safe(...)`.
-- `open_close_sunroof(...)` delegates to `open_sunroof_safe(...)`.
-- `open_close_window(...)` delegates to `open_close_window_safe(...)`.
+- `open_close_sunroof(...)` delegates to `open_sunroof_safe(...)`, and raw/default 100% sunroof opens are stopped at the argument boundary unless a safe helper call has marked the target percentage as explicitly resolved.
+- `open_close_window(...)` delegates to `open_close_window_safe(...)`, and raw/default 100% window opens are stopped at the argument boundary unless a safe helper call has marked the target percentage as explicitly resolved.
 - `set_new_navigation(...)` delegates to `set_new_navigation_guarded(...)`.
 - `get_routes_from_start_to_destination(...)` delegates to
   `get_routes_guarded(...)`.
-- `get_weather(...)` delegates to `get_weather_guarded(...)`.
+- `get_weather(...)` delegates to `get_weather_guarded(...)`, which preserves explicit time and normalizes active-slot weather fields.
 - `search_poi_along_the_route(...)` delegates to
   `search_poi_along_route_guarded(...)`.
 - `get_contact_id_by_contact_name(...)` delegates to
@@ -722,6 +935,9 @@ helpers. Currently:
   `navigation_add_one_waypoint_guarded(...)`.
 - `navigation_delete_waypoint(...)` delegates to
   `navigation_delete_waypoint_guarded(...)`.
+  For middle-waypoint deletion, the guard preserves a supplied route only when
+  it is already grounded and connects the deleted waypoint's previous and next
+  waypoints; otherwise it derives the policy-default fastest connecting route.
 - `navigation_replace_one_waypoint(...)` delegates to
   `navigation_replace_one_waypoint_guarded(...)`.
 - `navigation_replace_final_destination(...)` delegates to
@@ -734,10 +950,11 @@ model-selected through `set_climate_temperature_safe(...)` because raw
 temperature changes can be valid only when the model has resolved the requested
 zone/target.
 
-The final-destination wrapper does not determine whether user wording authorizes
-a route choice. It validates a supplied route ID against retrieved alternatives,
-fills an omitted ID only when one route exists, and preserves the model's choice
-otherwise.
+The final-destination wrapper does not parse user wording to authorize a route
+choice. It validates a supplied route ID against retrieved alternatives, fills an
+omitted ID only when one route exists, and preserves the model's choice
+otherwise. If task wording matters, the model resolves that into an explicit
+route choice before calling the wrapper.
 
 Before the first model decision on every user turn, the worker preflights
 `get_current_navigation_state(...)` when that tool is available. `observe_user`
@@ -837,6 +1054,9 @@ The inference adapter currently supports:
 
 Model ID, provider, API base, reasoning effort, output limit, temperature,
 timeouts, retries, tool mode, and skill file are environment-configurable.
+`CAR_AGENT_TEMPERATURE` remains the normal configured temperature for every
+provider. The retry-storm temperature override is a separate Cerebras-only
+per-call override used only after repeated identical REPL syntax failures.
 
 The architecture is provider-independent above `provider.py`. Track 1 and
 Track 2 can use the same agent runtime with different provider/model routing.
@@ -924,6 +1144,7 @@ Important agent settings:
 | `CAR_AGENT_MAX_ATTEMPTS` | Provider-call retry attempts. |
 | `CAR_AGENT_MAX_OUTPUT_TOKENS` | Completion-token cap. |
 | `CAR_AGENT_REASONING_EFFORT` | Provider reasoning selector where supported. |
+| `CAR_AGENT_STORM_RETRY_TEMPERATURES` | Cerebras-only comma-separated retry-temperature ladder for repeated identical REPL syntax errors. |
 | `CAR_AGENT_TIMEOUT_SECONDS` | Model request timeout. |
 | `CAR_AGENT_RUN_ID` | Separate trace directory name for a run. |
 | `CAR_AGENT_TRACE_DIR` | Trace root, default `run_logs/car_agent`. |

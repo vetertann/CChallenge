@@ -8,7 +8,9 @@ tool call, blocks, and resumes when the evaluator sends tool results.
 from __future__ import annotations
 
 import json
+import os
 import queue
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +86,36 @@ except ValueError:
 
 
 logger = configure_logger(role="agent_under_test", context="coroutine")
+
+REPL_RETRY_STORM_ERROR_TYPES = {"SyntaxError", "IndentationError", "TabError"}
+
+
+def _storm_retry_temperatures() -> tuple[float, ...]:
+    """Cerebras-only temperature ladder for deterministic malformed-Python loops.
+
+    At temperature 0, Cerebras gpt-oss can regenerate byte-identical broken code.
+    The first retry uses a small bump, just enough sampling noise to break
+    determinism while keeping the model's reasoning mostly stable. Override with
+    CAR_AGENT_STORM_RETRY_TEMPERATURES (comma-separated, e.g. "0.1,0.4,0.8") to
+    sweep the tested Cerebras path without code edits.
+    """
+
+    raw = (os.environ.get("CAR_AGENT_STORM_RETRY_TEMPERATURES") or "").strip()
+    if raw:
+        try:
+            values = tuple(float(part) for part in raw.split(",") if part.strip())
+            if values:
+                return values
+        except ValueError:
+            pass
+    return (0.15, 0.4, 0.8)
+
+
+STORM_RETRY_TEMPERATURES = _storm_retry_temperatures()
+# Non-Cerebras providers keep the cheap breaker only. Their temperature handling
+# is less tested here, and larger models need this escape hatch less often.
+REPEATED_REPL_ERROR_LIMIT = 2
+CEREBRAS_REPEATED_REPL_ERROR_LIMIT = len(STORM_RETRY_TEMPERATURES) + 1
 
 
 @dataclass
@@ -340,8 +372,14 @@ class CoroutineAgentWorker:
         return messages
 
     def _run_until_outbound(self) -> None:
+        repeated_error_signature: tuple[str, str] | None = None
+        repeated_error_count = 0
         for step_index in range(1, MODEL_MAX_INTERNAL_STEPS + 1):
-            assistant_log, thought, code, call_id = self._next_execute_python(step_index)
+            # Cerebras-only escape hatch for deterministic malformed-code loops.
+            temperature_override = self._repl_retry_temperature_override(repeated_error_count)
+            assistant_log, thought, code, call_id = self._next_execute_python(
+                step_index, temperature_override=temperature_override
+            )
             self.metrics.add_pass()
             self.messages.append(assistant_log)
             result = self.executor.run(code)
@@ -363,18 +401,36 @@ class CoroutineAgentWorker:
             )
 
             if result.response_text:
-                self.stable_messages.append(
-                    {"role": "assistant", "content": result.response_text}
-                )
-                metadata = {TURN_METRICS_KEY: self.metrics.as_metadata(self.model)}
-                self.metrics.reset()
-                self.trace.write(
-                    "benchmark_text_ready",
+                self._emit_text_response(
+                    result.response_text,
                     step_index=step_index,
-                    response_text=result.response_text,
-                    metadata=metadata,
+                    trace_event="benchmark_text_ready",
                 )
-                self.outbox.put(OutboundAction(response_text=result.response_text, metadata=metadata))
+                return
+            error_signature = self._retry_storm_error_signature(result.error)
+            if error_signature is None:
+                repeated_error_signature = None
+                repeated_error_count = 0
+                continue
+            if error_signature == repeated_error_signature:
+                repeated_error_count += 1
+            else:
+                repeated_error_signature = error_signature
+                repeated_error_count = 1
+            if repeated_error_count >= self._repeated_repl_error_limit():
+                response_text = "I hit an internal issue while deciding the next step."
+                self.ctx_logger.warning(
+                    "Breaking repeated coroutine REPL error loop "
+                    f"step={step_index} error={result.error}"
+                )
+                self._emit_text_response(
+                    response_text,
+                    step_index=step_index,
+                    trace_event="repeated_repl_error_breaker",
+                    error_type=result.error.get("type") if result.error else None,
+                    error_message=result.error.get("message") if result.error else None,
+                    repeat_count=repeated_error_count,
+                )
                 return
 
         self.trace.write("max_internal_steps_reached", max_steps=MODEL_MAX_INTERNAL_STEPS)
@@ -382,7 +438,54 @@ class CoroutineAgentWorker:
             OutboundAction(response_text="I need a bit more information before I can continue.")
         )
 
-    def _next_execute_python(self, step_index: int) -> tuple[dict[str, Any], str, str, str]:
+    def _repl_retry_temperature_override(self, repeated_error_count: int) -> float | None:
+        if self.provider.lower() != "cerebras" or repeated_error_count < 1:
+            return None
+        return STORM_RETRY_TEMPERATURES[
+            min(repeated_error_count - 1, len(STORM_RETRY_TEMPERATURES) - 1)
+        ]
+
+    def _repeated_repl_error_limit(self) -> int:
+        if self.provider.lower() == "cerebras":
+            return CEREBRAS_REPEATED_REPL_ERROR_LIMIT
+        return REPEATED_REPL_ERROR_LIMIT
+
+    @staticmethod
+    def _retry_storm_error_signature(error: dict[str, Any] | None) -> tuple[str, str] | None:
+        if not error:
+            return None
+        error_type = str(error.get("type") or "")
+        if error_type not in REPL_RETRY_STORM_ERROR_TYPES:
+            return None
+        message = str(error.get("message") or "")
+        message = re.sub(r"\(<string>, line \d+\)", "(<string>, line ?)", message)
+        message = re.sub(r"\bon line \d+\b", "on line ?", message)
+        message = re.sub(r"\bline \d+\b", "line ?", message)
+        return error_type, " ".join(message.split())
+
+    def _emit_text_response(
+        self,
+        response_text: str,
+        *,
+        step_index: int,
+        trace_event: str,
+        **trace_fields: Any,
+    ) -> None:
+        self.stable_messages.append({"role": "assistant", "content": response_text})
+        metadata = {TURN_METRICS_KEY: self.metrics.as_metadata(self.model)}
+        self.metrics.reset()
+        self.trace.write(
+            trace_event,
+            step_index=step_index,
+            response_text=response_text,
+            metadata=metadata,
+            **trace_fields,
+        )
+        self.outbox.put(OutboundAction(response_text=response_text, metadata=metadata))
+
+    def _next_execute_python(
+        self, step_index: int, temperature_override: float | None = None
+    ) -> tuple[dict[str, Any], str, str, str]:
         for retry in range(MODEL_SCHEMA_MAX_RETRIES):
             request_messages = list(self.messages)
             if retry:
@@ -396,6 +499,7 @@ class CoroutineAgentWorker:
                 provider=self.provider,
                 model=self.model,
                 tool_mode=self.tool_mode,
+                temperature_override=temperature_override,
                 message_count=len(request_messages),
                 messages=self._messages_for_trace(request_messages),
             )
@@ -405,6 +509,7 @@ class CoroutineAgentWorker:
                 model=self.model,
                 messages=request_messages,
                 tool_mode=self.tool_mode,
+                temperature_override=temperature_override,
             )
             self.metrics.add_call(extract_usage(response), elapsed_ms)
             try:

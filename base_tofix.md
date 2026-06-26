@@ -4,7 +4,28 @@
 
 Final-submission judge: Gemini 2.5 Flash.
 
-Latest full train run:
+Current best one-trial full train run:
+`output/run_configs/20260626-225051__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
+
+Configuration:
+- Agent provider: Cerebras
+- Agent model: `gpt-oss-120b`
+- Skill: `car_domain_120b.md`
+- User simulator: `gemini/gemini-2.5-flash`
+- Policy evaluator: `gemini/gemini-2.5-flash`
+- Trials: `1`
+
+Current base result: `46/50` (`92.0%`) raw.
+
+Raw failures in this run:
+- `base_48`: all action/tool/final/user-end checks passed; raw miss is policy-only.
+- `base_74`: all action/tool/final/user-end checks passed; raw miss is policy-only.
+- `base_86`: all action/tool/final/user-end checks passed; raw miss is the organizer-confirmed explicit-route-options policy judge contradiction.
+- `base_96`: action/final mismatch; the agent chose the fastest Cologne route while the expected action wanted the shortest same-duration route. Do not add hidden shortest repair unless route preference is grounded.
+
+If the confirmed `base_86` evaluator issue is factored out, current base score is `47/50` (`94.0%`).
+
+Previous 3-trial stability reference:
 `output/run_configs/20260624-204337__run_configs-coroutine_full_train_cerebras_gemini_3__train-trials3-baseall-hallall-disall__gpt-oss-120b.json`
 
 Configuration:
@@ -15,7 +36,7 @@ Configuration:
 - Policy evaluator: `gemini/gemini-2.5-flash`
 - Trials: `3`
 
-Result for base split: `127/150` (`84.7%`) raw.
+Previous 3-trial base result: `127/150` (`84.7%`) raw.
 
 Split stability:
 - Pass^1: `43/50` (`86.0%`)
@@ -37,27 +58,109 @@ Qwen/Nebius configuration:
 
 Qwen result on base failure subset: `3/11`.
 
-Current non-solid base tasks:
+Current base tofix state:
 
 | Task | Cerebras full run | Qwen subset | Current reading |
 | --- | --- | --- | --- |
-| `base_48` | `0/3` | fail | Real action-order issue plus wrapper narration risk. The agent replaced the destination with the default fastest route before the user selected the requested second route, then later switched to the second route. Final state passed, but `r_actions=0`. The helper-generated route narration also said "fastest route" after the non-fastest second-route switch, which can make good route selection look contradictory. |
-| `base_54` | `2/3` | pass | Only one trial failed, and only policy failed. The bad response said `22 degrees` instead of `22 degrees Celsius`; tool actions were correct. This is a response-units formatting issue, not a tool-planning issue. |
-| `base_56` | `0/3` | fail | Tool actions, final state, tool execution, tool subset, and policy all passed. The failure was `r_user_end_conversation=0`: after correctly deleting Nuremberg and taking the fastest direct Paris route, helper/obligation text invited "other options", the user simulator continued, and the agent kept discussing alternatives. This is a helper-generated follow-up problem overriding an otherwise complete route-edit flow. |
+| `base_48` | latest full raw fail; action/tool/final pass | fail | Current run selected the user-requested non-default Munich route after the user asked for that route. All action, tool, final-state, and user-end checks passed. Gemini policy failed because the assistant first showed alternatives after an unqualified destination-change request instead of proactively taking fastest. Keep this as an active policy/wording risk, not a missing-tool issue. |
+| `base_54` | latest climate/seat regression pass; latest full pass | fixed | Earlier failure was response wording only: `22 degrees` instead of `22 degrees Celsius`; tool actions were correct. Runtime now repairs successful temperature-setter responses that omit Celsius. |
+| `base_56` | latest full pass | fixed/watch | Tool actions, final state, tool execution, tool subset, and policy now pass in the latest full train run. Keep watching because route-option wording has been user-simulator sensitive. |
 | `base_66` | `2/3` | pass | One policy-only failure. The destination replacement to Munich succeeded; evaluator complained the assistant did not mention tolls for the old Andorra -> Paris route that was already active before the requested edit. Treat as low-priority policy wording/evaluator sensitivity. |
-| `base_74` | `1/3` | fail | Compound route/email/charging task. One trial passed. Failures split between missing the full charging/email tool bundle and re-asking confirmation instead of sending the second email after confirmation. Needs a complete "draft email only after route + charging facts are ready" plan, without prematurely confirming incomplete email content. |
-| `base_82` | `0/3` | fail | User wanted the Berlin route via `K57, B65`. In two trials the model did eventually select that route, but it first committed the fastest route and helper narration then described the selected `K57, B65` route as "fastest". Trial 2 stopped after the first fastest replacement. Needs route-option presentation without premature commit and provenance-aware narration that does not overwrite user-selected route reasoning. |
-| `base_84` | `2/3` | pass | One trial failed after the route/charging flow had enough information. The agent set a two-leg route via Ionity, then later used `navigation_replace_final_destination`, turning a good multi-leg setup into a mismatched action sequence. Helper narration again invited route switching after an already-complete navigation setup. |
-| `base_86` | `0/3` | fail | Real downstream EV/charging failure remains. The known organizer-confirmed route-options policy contradiction appears in some trials, but the task also fails action checks: the agent finds or describes a charger inconsistently, sometimes reports a `None kW` plug, and does not complete the expected charging-station/provider flow reliably. |
-| `base_88` | `2/3` | fail | Two trials passed. The failed trial used `search_poi_at_location` instead of the expected route-based charging search after removing Bonn, so `search_poi_along_the_route` was missing. The earlier unrelated-segment policy false negative is not the current dominant issue in this 3-trial run. |
-| `base_96` | `1/3` | fail | One trial passed. Failures are branch-planning instability: one skipped `get_weather` and assumed clear weather; another hit an internal issue, then tried `navigation_replace_final_destination` while navigation was inactive before recovering with `set_new_navigation`. Needs conditional route setup to keep weather read and inactive-navigation state tied to the final action. |
-| `base_98` | `0/3` | fail | The agent computed meeting route, charging status, charger, and charging time, but then set direct navigation to Stuttgart and called the charging provider. Expected behavior is a multi-leg navigation via the charging stop. This is the strongest remaining base planning gap. |
+| `base_74` | latest full raw fail; action/tool/final pass | fail/flaky | Compound route/email/charging flow now completed the required tool bundle in the latest full run, including route facts, charging specs, charging time, range-by-SOC, charger search, and email send. Raw miss was policy-only: the judge wanted explicit fastest-route/alternatives narration earlier in the route-planning part. Keep as active wording/policy risk; do not reintroduce broad runtime plan forcing. |
+| `base_82` | latest full pass | fixed | Route-provenance repair now preserves the selected Berlin route and avoids false fastest narration in the latest full train run. |
+| `base_84` | latest full pass | fixed/watch | Latest full train run passed. Keep the selected charging-station identity and two-leg navigation guards, because earlier failures came from replacing a good multi-leg setup with a direct final-destination mutation. |
+| `base_86` | latest full raw fail; action/tool/final pass | known evaluator issue | Downstream EV/charging/provider flow is behaviorally correct in the latest full run. Raw miss is only `r_policy`, repeating the organizer-confirmed false negative where explicit route-options requests are judged as if the assistant had to proactively choose fastest first. |
+| `base_88` | latest full pass | fixed/evaluator-watch | Latest full train run passed. Earlier unrelated-segment fastest-route failures are organizer-confirmed evaluator-side; route-based charging search after waypoint deletion remains fixed. |
+| `base_96` | latest full raw fail | active/flaky | The agent correctly checked Mannheim arrival weather, branched to Cologne on rain/hail, and set navigation, but selected the fastest Cologne route. Expected action wanted the shortest same-duration route. Because the evaluator-facing request and preferences do not expose shortest preference, do not add hidden shortest/fastest repair. |
+| `base_98` | latest full pass | fixed | Latest full train run passed after selected-charging-stop and two-leg navigation repairs. |
+
+Post-reference targeted helper fixes:
+- `base_48`, `base_56`, `base_82`: base target-fixed in
+  `output/run_configs/20260625-132330__run_configs-coroutine_route_helper_fix_cerebras_gemini_1__train-trials1-base3ids-hall0-dis1ids__gpt-oss-120b.json`.
+  `base_48` no longer pre-commits the default fastest route before route choice
+  is resolved. `base_56` now names the selected fastest route via roads
+  (`A11, A51`) while keeping the policy alternatives offer. `base_82` preserves
+  user-selected route provenance instead of narrating the selected route as
+  fastest.
+- `base_84`: target-fixed in
+  `output/run_configs/20260625-134016__run_configs-coroutine_base84_cerebras_gemini_1__train-trials1-base1ids-hall0-dis0__gpt-oss-120b.json`.
+  `set_new_navigation(...)` now repairs a final-leg route when the current user
+  message explicitly names via roads that uniquely match an already fetched
+  alternative for the same segment. Raw charging-time and route-to-stop calls
+  also preserve an explicitly named charging POI, so "Ionity" is not replaced by
+  another station's higher-power plug.
+- `base_88`: action/tool/final-state fixed in
+  `output/run_configs/20260625-134501__run_configs-coroutine_helper_regression_cerebras_gemini_1__train-trials1-base6ids-hall1ids-dis5ids__gpt-oss-120b.json`.
+  The remaining reward 0 is the organizer-confirmed evaluator issue: it expects
+  changing an untouched Berlin->Leipzig segment after deleting Bonn. The helper
+  now emits the expected route-based charging search after waypoint deletion.
+- `base_98`: target-fixed in
+  `output/run_configs/20260625-124338__run_configs-coroutine_base98_cerebras_gemini_1__train-trials1-base1ids-hall0-dis0__gpt-oss-120b.json`.
+  `plan_charging_for_next_meeting(...)` now stores executable
+  current->charger->meeting route IDs and provider facts, and guarded
+  navigation can repair a mistaken direct meeting route when the user asks to
+  navigate through the selected charging stop.
+
+Latest helper-regression check:
+- `output/run_configs/20260625-134501__run_configs-coroutine_helper_regression_cerebras_gemini_1__train-trials1-base6ids-hall1ids-dis5ids__gpt-oss-120b.json`
+  scored base helper subset `5/6`: `base_48`, `base_56`, `base_82`, `base_84`,
+  and `base_98` passed. `base_88` failed only on the known policy LLM issue;
+  all action/tool/final checks passed.
+- Later active-route/charge-window slices:
+  `output/run_configs/20260625-213401__run_configs-coroutine_active_route_charging_regression_cerebras_gemini_1__train-trials1-base4ids-hall2ids-dis4ids__gpt-oss-120b.json`
+  kept `base_84`, `base_88`, and `base_98` passing while validating the
+  `disambiguation_26` charge-window fix. An intermediate one-trial slice,
+  `output/run_configs/20260625-214959__run_configs-coroutine_active_route_charging_regression_cerebras_gemini_1__train-trials1-base4ids-hall2ids-dis4ids__gpt-oss-120b.json`,
+  exposed route-edit narration as the actionable new signal: for multi-segment
+  waypoint replacement, the agent should explicitly explain the route choice
+  for both newly created segments, not only the segment after the new waypoint.
+  The final affected slice,
+  `output/run_configs/20260625-221622__run_configs-coroutine_active_route_charging_regression_cerebras_gemini_1__train-trials1-base4ids-hall2ids-dis4ids__gpt-oss-120b.json`,
+  returned to `6/10`: `base_84` and `base_98` passed; `base_86` and `base_88`
+  failed only policy LLM checks with all action/tool/final checks passing.
+  `base_88` is again the known unrelated-segment policy issue, not a missing
+  route-search tool issue.
+- Latest affected helper regression
+  `output/run_configs/20260625-225601__run_configs-coroutine_active_route_charging_regression_cerebras_gemini_1__train-trials1-base4ids-hall2ids-dis4ids__gpt-oss-120b.json`
+  scored `7/10` overall and `3/4` on the base subset. `base_84`,
+  `base_86`, and `base_98` passed. `base_88` again failed only the known
+  unrelated-segment policy LLM check with all action/tool/final checks passing.
+- Weather/route-stop regression
+  `output/run_configs/20260625-231853__run_configs-coroutine_weather_route_stop_regression_cerebras_gemini_1__train-trials1-base1ids-hall0-dis2ids__gpt-oss-120b.json`
+  passed `base_96`: the agent read Mannheim routes, checked arrival-time
+  weather, branched to Cologne because Mannheim had rain/hail, selected the
+  shortest Cologne route (`rll_ess_col_645120`), and all action/tool/policy
+  checks passed.
+- Consolidated recent affected-helper regression
+  `output/run_configs/20260625-235308__run_configs-coroutine_all_helper_affected_cerebras_gemini_1__train-trials1-base8ids-hall2ids-dis7ids__gpt-oss-120b.json`
+  scored `6/8` on the base subset. `base_54`, `base_60`, `base_76`,
+  `base_84`, `base_96`, and `base_98` passed. `base_86` and `base_88` failed
+  only policy LLM checks with all action, intermediate-action, final-action,
+  tool-execution, tool-subset, and user-end checks passing.
+- Latest helper-affected train regression
+  `output/run_configs/20260626-174607__run_configs-coroutine_all_helper_affected_cerebras_gemini_1__train-trials1-base8ids-hall2ids-dis7ids__gpt-oss-120b.json`
+  scored `7/8` on the base subset. `base_54`, `base_60`, `base_76`,
+  `base_84`, `base_88`, `base_96`, and `base_98` passed. `base_86` passed all
+  action/tool/final/user-end checks and failed only the known route-options
+  policy LLM contradiction.
+- Current helper-affected train regression after the confirmation-terminal,
+  arrival-weather branch, Celsius wording, and compound-sync prompt updates:
+  `output/run_configs/20260626-192315__run_configs-coroutine_all_helper_affected_cerebras_gemini_1__train-trials1-base8ids-hall2ids-dis7ids__gpt-oss-120b.json`
+  scored `4/8` on the base subset. `base_54`, `base_60`, `base_84`, and
+  `base_98` passed. `base_76` failed because the model again made two
+  opposite-direction `sync_climate_zone(...)` calls; targeted `base_76`
+  evidence immediately before this full run was `3/3`, so this remains a model
+  argument-selection flake rather than a safe helper repair. `base_86` and
+  `base_88` failed only known policy LLM contradictions with all action/tool
+  checks passing. `base_96` remains route-preference/evaluator unstable: the
+  target run preserved explicit shortest-route preference, but the full run
+  still failed action matching. Do not add hidden shortest/fastest repair.
 
 Helper-overrides-good-reasoning watchlist:
-- `base_56`: successful waypoint deletion was followed by helper/obligation text inviting route alternatives, causing unnecessary continuation and user-end failure. Suggested tuning: after a state-changing route edit succeeds and the user did not ask to see alternatives, helper narration should be terminal and should not append "other options" prompts.
-- `base_82`: model-selected `K57, B65` route was followed by generic "fastest route" narration, contradicting the user's selected non-default route. Suggested tuning: route narration must be provenance-aware; if the selected route came from user alias/name-via/preference, describe that basis and do not reuse default-fastest wording.
-- `base_84`: a valid two-leg charger route was later disturbed by route-switch invitation/replacement behavior. Suggested tuning: once `set_new_navigation(...)` succeeds for a complete multi-leg route, mark that navigation plan complete for the turn and suppress later final-destination replacement or route-option follow-up unless the user explicitly asks to change it.
-- `base_48`: after the model honored the user's second-route selection, generic route narration still claimed the selected route was fastest. Suggested tuning: route-edit helpers should store selected-route provenance (`fastest`, `shortest`, `alias`, `name_via`, `user_selected`) and only narrate facts true for that specific route.
+- `base_56`: keep watching because evaluator/user-simulator behavior is wording-sensitive. Current passing wording names the selected route via roads and keeps the policy alternatives offer; suppressing the alternatives offer caused policy failure.
+- `base_82`: fixed by route provenance narration. Keep selected-route provenance (`fastest`, `shortest`, `alias`, `name_via`, `user_selected`) and only narrate facts true for that specific route.
+- `base_84`: fixed in the latest helper regression by explicit POI identity repair plus continuation via-road repair. Keep the guard limited to unique grounded POI names or a previously selected charging POI; do not silently choose an unmentioned station.
+- `base_48`: fixed by blocking only the unsafe default-fastest single-segment destination replacement when multiple routes exist and no route choice is explicit. The guard must continue allowing specific non-default route IDs and POI base-route-ID mapping.
 
 Prior reference run (3-trial, post facts-vs-intention refactor — see
 `docs/facts-vs-intention-refactor-review.md`):
@@ -89,8 +192,10 @@ Targeted one-trial mechanism checks after the reliability/ergonomics pass:
   validation/repair.
 - The 2026-06-24 3-trial full run supersedes some earlier targeted uncertainty:
   `base_28` and `base_76` are stable, but `base_82` and `base_98` are now hard
-  failures again. `base_86` still has a real downstream EV/charging-station
-  failure in addition to the known route-options policy contradiction.
+  failures again. `base_86` had a real downstream EV/charging-station failure
+  in addition to the known route-options policy contradiction; the latest
+  active-route SOC helper target fixes the downstream action flow, leaving the
+  known policy contradiction as the raw-score blocker.
   `base_96` remains flaky on conditional weather/route setup.
 
 These targeted passes/failures are one-trial evidence only. They update the
@@ -186,9 +291,18 @@ Implemented:
 - Added `sync_climate_zone(source_zone, target_zone, ...)`.
 - Added explicit source/target wording: "set driver to match passenger" means
   `source_zone="PASSENGER", target_zone="DRIVER"`.
+- Added a compound-sync clarification: if multiple clauses name the same target
+  side, keep one source/target direction and include both temperature and
+  seat-heating flags instead of making a second opposite-direction call.
 - Targeted runs:
   `20260622-225815...round3...` and `20260622-230404...round4...` both passed
   `base_76`; combined targeted run `20260622-231433...final3...` also passed.
+- Latest targeted run
+  `output/run_configs/20260626-184959__run_configs-coroutine_base76_cerebras_gemini_3__train-trials3-base1ids-hall0-dis0__gpt-oss-120b.json`
+  passed `3/3` and all traces copied passenger temperature/heating to driver.
+  Latest full helper regression still saw one wrong-direction two-call split.
+  Do not repair that inside the helper, because resolving which opposite
+  direction was intended would require raw user-text or hidden task inference.
 
 ### `base_64`: waypoint flow — PREFLIGHT FIX, TARGETED 3/3
 
@@ -432,12 +546,18 @@ Fix direction:
 
 ### `base_60`: compound climate warning can be lost — PASSED LATEST FULL RUN
 
-Implemented: the prompt/skill reserve `set_occupied_seat_heating` for requests
-covering all occupied seats; explicit zones use `set_seat_heating`. Ordinary
+Implemented: the prompt/skill reserve `set_occupied_seat_heating` without
+`seat_zone` for requests covering all occupied seats; explicit zones use either
+raw `set_seat_heating` or `set_occupied_seat_heating(seat_zone=...)`. Ordinary
 helpers accumulate messages without locking compound turns. The policy-012
 warning is now a durable response obligation that `respond(...)` appends only
 when the model omitted it. Explicitly confirmed pending actions still complete
 with a grounded locked response.
+
+Latest affected regression:
+- `output/run_configs/20260625-230807__run_configs-coroutine_seat_climate_regression_cerebras_gemini_1__train-trials1-base3ids-hall0-dis2ids__gpt-oss-120b.json`
+  passed `base_54`, `base_60`, `base_76`, `disambiguation_12`, and
+  `disambiguation_38`.
 
 ### `base_70`: route/email/charging flow — PASSED LATEST FULL RUN
 
@@ -458,6 +578,24 @@ confirmation, and email flow. The failed trials either skipped required charging
 tools before email confirmation or re-asked confirmation instead of sending the
 second email after the user already confirmed.
 
+Post-reference target:
+- `output/run_configs/20260625-193519__run_configs-coroutine_base74_cerebras_gemini_3__train-trials3-base1ids-hall0-dis0__gpt-oss-120b.json`
+- Result: `1/3`.
+- The passing trial followed the desired bundle: charging status, current
+  location charger search, charging-time calculation, official
+  `get_distance_by_soc(initial_state_of_charge=100, final_state_of_charge=0)`,
+  confirmation, and `send_email`.
+- Failed trials still show model-level conversation problems: verbal email
+  confirmation before a real `send_email(...)` wrapper call, or asking for a
+  second confirmation instead of executing the pending confirmed email.
+
+Affected regression after the narrow guard/skill example:
+- `output/run_configs/20260625-193909__run_configs-coroutine_contact_calendar_regression_cerebras_gemini_1__train-trials1-base3ids-hall1ids-dis3ids__gpt-oss-120b.json`
+- Result: `5/7`; `base_20`, `base_74`, `base_78`, `disambiguation_44`, and
+  `disambiguation_54` passed. `hallucination_72` produced the established
+  correct unknown-range limitation but was judged as hallucination; `disambiguation_42`
+  omitted the found charging-station details from the email content.
+
 Earlier failure shape: the model asked for email confirmation before grounding
 the complete plan and reported `38 min` instead of `14 h 38 min`, while losing
 route and plug details.
@@ -466,6 +604,13 @@ Fix direction:
 - Preserve typed duration values rather than reconstructing them from prose.
 - Delay confirmation until all required message facts are grounded.
 - Build the final email body from structured route and charging data.
+- Implemented narrow wrapper support: `get_distance_by_soc(...)` results are
+  normalized/persisted as `last_distance_by_soc`, and after a selected charging
+  plan exists, `send_email(...)` can return `NEEDS_MORE_FACTS` until the
+  official target-SOC range has been read. A broader runtime guard that forced
+  charging-plan gathering before the user selected a current-location strategy
+  was rejected because it pushed the model toward along-route charger selection
+  and violated the helper-flexibility boundary.
 
 ### `base_84`: charging POI and two-leg navigation disturbed by route switching — FLAKY
 
@@ -524,6 +669,40 @@ contradiction was evaluator-side: the user's explicit request to see multiple
 route options overrides the default fastest-route rule. Remaining agent work, if
 any, is downstream charging/phone correctness, not suppressing route options.
 
+Targeted probe after the narrow later-segment charging-search repair:
+- `output/run_configs/20260625-195630__run_configs-coroutine_base86_cerebras_gemini_3__train-trials3-base1ids-hall0-dis0__gpt-oss-120b.json`
+- Result: `1/3`.
+- Implemented helper behavior is deliberately narrow: if the model has a recent
+  official `get_distance_by_soc(...)` result that measures distance from the
+  current vehicle position, and then uses that same number as `at_kilometer` on
+  a later active route segment, the wrapper subtracts earlier active segment
+  distances before calling `search_poi_along_the_route(...)`.
+- This keeps the helper within the current principles: it uses only active
+  route facts and an official SOC-distance fact; it does not parse the user
+  request to infer "15%" or invent a charging point.
+- The target run shows why this is only partial. One failing trial skipped the
+  SOC-distance tool and searched Frankfurt -> Barcelona at `395 km` directly,
+  so there was no grounded fact for the wrapper to reinterpret. Another branch
+  still contained route-option/policy wording sensitivity. Do not mark this
+  fixed until the model reliably gathers the SOC-distance fact or a principled
+  helper entry point is introduced.
+
+Latest targeted probe after adding the explicit active-route SOC helper:
+- `output/run_configs/20260625-211004__run_configs-coroutine_base86_cerebras_gemini_3__train-trials3-base1ids-hall0-dis0__gpt-oss-120b.json`
+- Raw result: `0/3`.
+- Action/tool/final/user-end result: `3/3`. Every trial completed the downstream
+  flow with `get_distance_by_soc(initial_state_of_charge=98,
+  final_state_of_charge=15)`, `search_poi_along_the_route(route_id=
+  "rll_fra_bar_981238", at_kilometer=50, category_poi="charging_stations")`,
+  Fastned selection, and `call_phone_by_number("+49 358 8158348")`.
+- The only failing check was `r_policy=0`: Gemini repeated the known
+  organizer-confirmed evaluator-side contradiction and said the agent should
+  have proactively selected fastest instead of presenting route options, even
+  though the user explicitly asked to see route options.
+- Current conclusion: do not tune around the route-options policy false
+  negative. Treat `base_86` action behavior as fixed by the helper; keep the
+  raw score annotated as evaluator-side.
+
 ### `base_92`: fog-light confirmation policy contradiction candidate
 
 Latest full run:
@@ -556,6 +735,12 @@ Latest full run:
 - The task preference says the user wants the shortest route, not fastest.
   Cologne's shortest route was `rll_ess_col_645120`, so final action failed.
 
+Latest weather-regression slice:
+- `output/run_configs/20260625-170413__run_configs-coroutine_weather_regression_cerebras_gemini_1__train-trials1-base4ids-hall4ids-dis5ids__gpt-oss-120b.json`
+- Same remaining failure shape: weather lookup and branch selection were correct,
+  but the agent selected fastest Cologne route `rll_ess_col_178709` instead of
+  shortest route `rll_ess_col_645120`.
+
 Implemented:
 - Added `get_weather_at_route_arrival(...)` for navigation decisions conditioned
   on destination weather.
@@ -573,6 +758,16 @@ Remaining fix direction:
   fastest-route heuristic on whichever conditional branch is actually executed.
 - This should be handled as general priority ordering: explicit user route
   preference > default fastest route.
+- Do not add a wrapper that silently forces shortest when the user-facing
+  message omits the preference and `get_user_preferences` is empty. In the
+  latest failing traces the hidden task instruction wanted shortest, but the
+  visible user message did not say it. A helper cannot infer that without
+  overfitting to train-task intent. A safe fix must either preserve an explicit
+  model-passed route preference or ask the user when route selection is genuinely
+  unresolved; it must not manufacture a hidden preference.
+- The old prompt example that hardcoded `prefer="shortest"` for the weather
+  fallback branch has been removed. The example now tries stored/explicit route
+  preference first and otherwise uses the policy default.
 
 ### `base_98`: EV charging plan loses the charging stop in navigation — ACTIVE
 

@@ -127,6 +127,7 @@ def call_model_with_retry(
     model: str,
     messages: list[dict[str, Any]],
     tool_mode: str,
+    temperature_override: float | None = None,
 ) -> tuple[Any, float]:
     last_exc: BaseException | None = None
     for attempt in range(1, MODEL_MAX_ATTEMPTS + 1):
@@ -138,6 +139,7 @@ def call_model_with_retry(
                 model=model,
                 messages=messages,
                 tool_mode=tool_mode,
+                temperature_override=temperature_override,
             )
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             return response, elapsed_ms
@@ -156,16 +158,21 @@ def _call_model(
     model: str,
     messages: list[dict[str, Any]],
     tool_mode: str,
+    temperature_override: float | None = None,
 ) -> Any:
+    provider_name = provider.lower()
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
     }
     temp = _temperature()
+    if provider_name == "cerebras" and temperature_override is not None:
+        # Only the Cerebras path is tested for per-call retry-temperature bumps.
+        temp = temperature_override
     if temp is not None:
         kwargs["temperature"] = temp
 
-    if provider == "cerebras":
+    if provider_name == "cerebras":
         kwargs["max_completion_tokens"] = MODEL_MAX_OUTPUT_TOKENS
         if MODEL_REASONING_EFFORT:
             kwargs["reasoning_effort"] = MODEL_REASONING_EFFORT
@@ -179,9 +186,9 @@ def _call_model(
             "function": {"name": "execute_python"},
         }
 
-    if provider == "openrouter":
+    if provider_name == "openrouter":
         kwargs["extra_body"] = {"reasoning": {"enabled": True}}
-    elif provider == "deepseek":
+    elif provider_name == "deepseek":
         kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
     return client.chat.completions.create(**kwargs)

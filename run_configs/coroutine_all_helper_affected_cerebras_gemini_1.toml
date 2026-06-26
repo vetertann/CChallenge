@@ -1,0 +1,45 @@
+[evaluator]
+endpoint = "http://127.0.0.1:18081"
+cmd = "python src/evaluator/server.py --host 127.0.0.1 --port 18081"
+
+[agent_under_test]
+endpoint = "http://127.0.0.1:18080"
+cmd = "python src/track_1_agent_coroutine_under_test/server.py --host 127.0.0.1 --port 18080 --model-provider cerebras --agent-llm gpt-oss-120b --skill car_domain_120b.md"
+
+[config]
+num_trials = 1
+task_split = "train"
+tasks_base_num_tasks = 8
+tasks_base_task_id_filter = [
+  "base_54",
+  "base_60",
+  "base_76",
+  "base_84",
+  "base_86",
+  "base_88",
+  "base_96",
+  "base_98",
+]
+tasks_hallucination_num_tasks = 2
+tasks_hallucination_task_id_filter = [
+  "hallucination_72",
+  "hallucination_82",
+]
+tasks_disambiguation_num_tasks = 7
+tasks_disambiguation_task_id_filter = [
+  "disambiguation_12",
+  "disambiguation_26",
+  "disambiguation_38",
+  "disambiguation_42",
+  "disambiguation_48",
+  "disambiguation_53",
+  "disambiguation_55",
+]
+max_steps = 50
+
+user_model = "gemini/gemini-2.5-flash"
+user_provider = "gemini"
+user_thinking = false
+
+policy_evaluator_model = "gemini/gemini-2.5-flash"
+policy_evaluator_provider = "gemini"

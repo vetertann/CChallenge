@@ -374,10 +374,8 @@ batch([(custom_call, {})])
         self.assertEqual(parsed["state_of_charge"], 70)
         with self.assertRaises(ResponseReady):
             f"{parsed['remaining_range']}"
-        self.assertIn(
-            "get_charging_specs_and_status.remaining_range",
-            workspace._response_text or "",
-        )
+        self.assertIn("car system did not provide the remaining range", workspace._response_text or "")
+        self.assertNotIn("get_charging_specs_and_status.remaining_range", workspace._response_text or "")
 
     def test_select_route_exposes_result_alias(self) -> None:
         workspace, _ = self.make_workspace()
