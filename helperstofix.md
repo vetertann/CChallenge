@@ -67,6 +67,21 @@ Roadmap discipline:
   retry loops, output parsing, or side-effect claim guards rather than car
   policy reasoning.
 
+Cross-model scaling signal:
+- A Kimi public-test run tied the latest Cerebras total score but changed the
+  error distribution: base improved, while disambiguation and hallucination got
+  worse.
+- Targeted GPT-5.5 reruns recovered a majority of Kimi-missed base and
+  disambiguation cases in the successful attempts. Treat these recoveries as
+  evidence that some misses are model-reasoning sensitive rather than helper
+  contract defects.
+- Do not add helper logic for a held-out case just because a smaller model
+  missed it and GPT-5.5 solved it. Prefer clearer helper exposure, better
+  examples, and scratchpad/preflight facts that make the same reasoning easier.
+- If a case still fails under GPT-5.5, or if traces show a helper prevented a
+  grounded valid choice from reaching the evaluator, keep it as a high-priority
+  helper/runtime target.
+
 ### Implementation checklist
 
 Use this as the roadmap when patching helper behavior. The issue sections below

@@ -34,6 +34,35 @@ How to read "Where this lives":
 - Response text must be generated from grounded fields, not from model memory.
 - Completion claims must be tied to successful evaluator-visible side effects.
 
+## Cross-Model Scaling Signal
+
+Recent public-test experiments compared the current helper stack with a
+Nebius-hosted Kimi run and targeted GPT-5.5 reruns on tasks Kimi missed. This
+section intentionally records only aggregate and generic signals, not held-out
+task IDs or task content.
+
+Measured pattern:
+- Kimi tied the latest Cerebras full public-test total score, but shifted the
+  error mix: stronger on base tasks, weaker on disambiguation and hallucination.
+- GPT-5.5 recovered a majority of the Kimi-missed base and disambiguation
+  subset in the successful targeted attempts.
+- The recovered cases look like model-scaling wins: longer planning, preserving
+  state across turns, choosing the intended helper path, or completing pending
+  side effects without extra task-specific code.
+- The remaining misses after GPT-5.5 are higher-signal engineering targets:
+  helper contracts that still constrain valid reasoning, route-choice/policy
+  ambiguity, completion-claim or confirmation edges, and evaluator-sensitive
+  route-policy checks.
+
+How to use this signal:
+- Do not hardcode fixes for cases a stronger model already solved. Improve
+  general prompt clarity, helper ergonomics, and scratchpad facts instead.
+- Prioritize a code/helper fix only when the failure remains under the stronger
+  model, appears on train-safe analogues, or shows a helper overriding a
+  grounded model choice.
+- Keep public-test-derived examples out of this file. Use synthetic or train
+  scenarios to validate the generalized fix.
+
 ## Concrete Patch Signals
 
 ### 1. Broad control request without value must ask, not set a guessed value

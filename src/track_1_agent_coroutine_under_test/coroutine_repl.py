@@ -100,6 +100,7 @@ WORKSPACE_HELPER_NAMES = (
     "select_route",
     "select_route_by_user_preferences",
     "select_poi",
+    "replace_final_destination_with_poi",
     "get_weather_at_route_arrival",
     "navigate_by_arrival_weather",
     "navigate_to_poi_by_arrival_weather",
@@ -1063,24 +1064,24 @@ class CoroutineWorkspace:
             "navigate_by_arrival_weather": (
                 "navigate_by_arrival_weather("
                 "primary_destination_id, fallback_destination_id, avoid_conditions, "
-                "route_prefer='fastest', start_id=None)"
+                "route_prefer=None, start_id=None)"
             ),
             "navigate_to_poi_by_arrival_weather": (
                 "navigate_to_poi_by_arrival_weather("
                 "primary_location_id, fallback_destination_id, category_poi, "
                 "avoid_conditions, poi_prefer='fastest_charging', "
-                "route_prefer='fastest', start_id=None)"
+                "route_prefer=None, start_id=None)"
             ),
             "navigate_to_poi_unless_arrival_weather": (
                 "navigate_to_poi_unless_arrival_weather("
                 "primary_location_id, fallback_destination_id, category_poi, "
                 "avoid_conditions, poi_prefer='fastest_charging', "
-                "route_prefer='fastest', start_id=None)"
+                "route_prefer=None, start_id=None)"
             ),
             "set_navigation_conditioned_on_arrival_weather": (
                 "set_navigation_conditioned_on_arrival_weather("
                 "primary_destination_id, fallback_destination_id, avoid_conditions, "
-                "route_prefer='fastest', start_id=None)"
+                "route_prefer=None, start_id=None)"
             ),
             "select_poi_at_location_open_at_route_arrival": (
                 "select_poi_at_location_open_at_route_arrival(location_id, category_poi, "
@@ -1894,7 +1895,7 @@ class CoroutineWorkspace:
                 "signature": (
                     f"{helper_name}("
                     "primary_destination_id, fallback_destination_id, avoid_conditions, "
-                    "route_prefer='fastest', start_id=None)"
+                    "route_prefer=None, start_id=None)"
                 ),
                 "confirmation_required": False,
                 "description": (
@@ -1928,7 +1929,7 @@ class CoroutineWorkspace:
                         },
                         "route_prefer": {
                             "type": ["string", "null"],
-                            "default": "fastest",
+                            "default": None,
                         },
                         "start_id": {"type": ["string", "null"]},
                     },
@@ -1937,7 +1938,7 @@ class CoroutineWorkspace:
                     "primary_destination_id": "Grounded id for the first-choice destination.",
                     "fallback_destination_id": "Grounded id for the fallback destination.",
                     "avoid_conditions": "Weather conditions that make the helper choose the fallback, e.g. ['rain', 'hail'].",
-                    "route_prefer": "Resolved route selector such as fastest or shortest; defaults to fastest when no preference is resolved.",
+                    "route_prefer": "Resolved route selector such as fastest or shortest. If omitted and multiple routes remain, the helper returns ROUTE_SELECTION_REQUIRED instead of guessing.",
                     "start_id": "Optional route start id; defaults to policy_location_id().",
                 },
             }
@@ -1952,7 +1953,7 @@ class CoroutineWorkspace:
                     f"{helper_name}("
                     "primary_location_id, fallback_destination_id, category_poi, "
                     "avoid_conditions, poi_prefer='fastest_charging', "
-                    "route_prefer='fastest', start_id=None)"
+                    "route_prefer=None, start_id=None)"
                 ),
                 "confirmation_required": False,
                 "description": (
@@ -2002,7 +2003,7 @@ class CoroutineWorkspace:
                         },
                         "route_prefer": {
                             "type": ["string", "null"],
-                            "default": "fastest",
+                            "default": None,
                         },
                         "start_id": {"type": ["string", "null"]},
                         "poi_id": {"type": ["string", "null"]},
@@ -2016,11 +2017,14 @@ class CoroutineWorkspace:
                     "category_poi": "POI category to search at the primary location if weather allows it.",
                     "avoid_conditions": "Weather conditions that make the helper choose the fallback, e.g. ['rain', 'hail'].",
                     "poi_prefer": "Resolved POI selector such as fastest_charging, highest_power, or unique.",
-                    "route_prefer": "Resolved route selector such as fastest or shortest; defaults to fastest.",
+                    "route_prefer": "Resolved route selector such as fastest or shortest. If omitted and multiple routes remain, the helper returns ROUTE_SELECTION_REQUIRED instead of guessing.",
                     "start_id": "Optional route start id; defaults to policy_location_id().",
                     "poi_id": "Optional grounded POI id if the model already selected a specific POI.",
                     "poi_name": "Optional grounded POI name selector from official POI results.",
-                    "require_available": "For charging POIs, require an available plug only when explicitly resolved.",
+                    "require_available": (
+                        "For charging POIs, require an available plug for real charging plans, "
+                        "navigation via a charger, or charge-before-trip requests."
+                    ),
                 },
             }
         if tool_name == "select_poi_at_location_open_at_route_arrival":
@@ -2070,9 +2074,9 @@ class CoroutineWorkspace:
                 "description": (
                     "Built-in selector for charging POI results. It keeps station name, station "
                     "POI id, phone number, plug id, power type, power_kw, and availability together, "
-                    "then selects the highest-power plug. By default it may select an occupied "
-                    "plug for time calculation; pass require_available=True only when current "
-                    "availability is a hard user constraint."
+                    "then selects the highest-power plug. For real charging plans, navigation "
+                    "via a charger, or charge-before-trip requests, pass require_available=True "
+                    "so an available compatible plug beats a higher-power occupied plug."
                 ),
                 "required_arguments": [],
                 "optional_arguments": ["pois", "require_available"],
@@ -4351,6 +4355,8 @@ class CoroutineWorkspace:
         alias: str | None = None,
         name_via: str | None = None,
         prefer: str | None = None,
+        default_prefer: str | None = "fastest",
+        allow_shared_fastest_shortest: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(route_options, dict) or route_options.get("status") != "SUCCESS":
             return {
@@ -4364,8 +4370,22 @@ class CoroutineWorkspace:
             "name_via": name_via,
             "prefer": prefer,
         }
-        if not any(isinstance(value, str) and value.strip() for value in selector.values()):
-            selector["prefer"] = "fastest"
+        if (
+            not any(isinstance(value, str) and value.strip() for value in selector.values())
+            and isinstance(default_prefer, str)
+            and default_prefer.strip()
+        ):
+            selector["prefer"] = default_prefer
+        if (
+            not any(isinstance(value, str) and value.strip() for value in selector.values())
+            and allow_shared_fastest_shortest
+        ):
+            fastest = route_options.get("fastest")
+            shortest = route_options.get("shortest")
+            fastest_id = fastest.get("route_id") if isinstance(fastest, dict) else None
+            shortest_id = shortest.get("route_id") if isinstance(shortest, dict) else None
+            if isinstance(fastest_id, str) and fastest_id and fastest_id == shortest_id:
+                selector["route_id"] = fastest_id
         selected = self.select_route(route_options.get("routes"), **selector)
         if selected.get("status") == "SUCCESS":
             return selected
@@ -4375,6 +4395,173 @@ class CoroutineWorkspace:
             "selection": selected,
             "route_options": copy.deepcopy(route_options),
         }
+
+    def _route_selection_required_report(
+        self,
+        *,
+        gate_name: str,
+        segment_name: str,
+        route_options: dict[str, Any],
+        route_selection: dict[str, Any],
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        selection = route_selection.get("selection")
+        status = "ROUTE_SELECTION_REQUIRED"
+        reason = "multiple routes are available and no grounded route selector was supplied"
+        if isinstance(selection, dict):
+            selection_status = selection.get("status")
+            if selection_status not in {"AMBIGUOUS", None}:
+                status = str(route_selection.get("status") or selection_status)
+                reason = str(selection.get("reason") or route_selection.get("reason") or reason)
+            elif selection.get("reason"):
+                reason = str(selection["reason"])
+        report: dict[str, Any] = {
+            "status": status,
+            "helper": gate_name,
+            "segment": segment_name,
+            "reason": reason,
+            "route_options": copy.deepcopy(route_options),
+            "route_selection": copy.deepcopy(route_selection),
+            "routes": copy.deepcopy(route_options.get("routes")),
+        }
+        if extra:
+            report.update(copy.deepcopy(extra))
+        message = self._route_selection_required_message(report)
+        if message:
+            report["message"] = message
+            self._ensure_scratchpad_shape()
+            self.scratchpad["facts"].pop("pending_route_narration", None)
+            self._add_response_obligation(
+                f"{gate_name}:route_selection_required",
+                message,
+            )
+            self._helper_message(message)
+        self._store_helper_report(gate_name, report)
+        return report
+
+    def _route_selection_required_message(self, report: dict[str, Any]) -> str | None:
+        if not isinstance(report, dict):
+            return None
+        route_options = report.get("route_options")
+        if not isinstance(route_options, dict):
+            return None
+        destination_id = self._route_selection_destination_id(report, route_options)
+        destination = self._route_endpoint_label(destination_id) if destination_id else None
+        if not destination and isinstance(destination_id, str) and destination_id:
+            destination = destination_id
+        if not destination:
+            destination = "the resolved destination"
+
+        sentences: list[str] = []
+        condition = _clean_string(report.get("arrival_weather_condition"))
+        branch = _clean_string(report.get("branch"))
+        primary_id = (
+            report.get("primary_location_id")
+            or report.get("primary_destination_id")
+        )
+        primary_label = self._route_endpoint_label(primary_id) or (
+            primary_id if isinstance(primary_id, str) and primary_id else None
+        )
+        if condition and branch == "fallback":
+            if primary_label:
+                sentences.append(
+                    f"Arrival weather at {primary_label} is {condition}, "
+                    f"so the request falls back to {destination}."
+                )
+            else:
+                sentences.append(
+                    f"Arrival weather is {condition}, so the request falls back "
+                    f"to {destination}."
+                )
+        elif condition and branch in {"primary", "primary_poi"}:
+            if primary_label:
+                sentences.append(
+                    f"Arrival weather at {primary_label} is {condition}, "
+                    f"so the primary branch remains valid."
+                )
+            else:
+                sentences.append(
+                    f"Arrival weather is {condition}, so the primary branch remains valid."
+                )
+
+        choices = self._route_choice_options_text(route_options)
+        sentences.append(
+            f"Route choice to {destination} is still unresolved. Which route should I use?"
+        )
+        if choices:
+            sentences.append(choices)
+        return " ".join(sentences)
+
+    def _route_selection_destination_id(
+        self,
+        report: dict[str, Any],
+        route_options: dict[str, Any],
+    ) -> str | None:
+        candidates = (
+            report.get("chosen_destination_id"),
+            report.get("fallback_destination_id")
+            if report.get("branch") == "fallback"
+            else None,
+            report.get("primary_destination_id")
+            if report.get("branch") == "primary"
+            else None,
+            report.get("primary_location_id")
+            if report.get("segment") == "primary_location"
+            else None,
+        )
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        routes = route_options.get("routes")
+        if isinstance(routes, list):
+            for route in routes:
+                if isinstance(route, dict):
+                    destination = route.get("destination_id")
+                    if isinstance(destination, str) and destination.strip():
+                        return destination.strip()
+        return None
+
+    def _route_choice_options_text(self, route_options: dict[str, Any]) -> str:
+        routes = route_options.get("routes")
+        route_list = [route for route in routes if isinstance(route, dict)] if isinstance(routes, list) else []
+        entries: list[str] = []
+        seen: set[str] = set()
+
+        def add(label: str, route: Any) -> None:
+            if not isinstance(route, dict):
+                return
+            route_id = route.get("route_id") or route.get("id")
+            seen_key = route_id if isinstance(route_id, str) and route_id else str(id(route))
+            if seen_key in seen:
+                return
+            seen.add(seen_key)
+            display = route.get("display") or self._route_display(self._normalize_route(route))
+            entries.append(f"{label}: {display}")
+
+        add("fastest", route_options.get("fastest"))
+        add("shortest", route_options.get("shortest"))
+        for index, route in enumerate(route_list[:3], start=1):
+            alias = route.get("alias")
+            aliases = [str(item).lower() for item in alias] if isinstance(alias, list) else []
+            if "fastest" in aliases or "shortest" in aliases:
+                add("option", route)
+            else:
+                add(f"option {index}", route)
+        return "Options: " + " ".join(entries) if entries else ""
+
+    @staticmethod
+    def _route_selector_label(route: Any, selector: str | None) -> str:
+        if isinstance(selector, str) and selector.strip():
+            return selector.strip()
+        if isinstance(route, dict):
+            aliases = {str(item).lower() for item in route.get("alias", [])}
+            if "fastest" in aliases and "shortest" in aliases:
+                return "fastest and shortest"
+            if "fastest" in aliases:
+                return "selected fastest"
+            if "shortest" in aliases:
+                return "selected shortest"
+        return "selected"
 
     def set_navigation_via_route_stop_with_open_poi(
         self,
@@ -4885,6 +5072,147 @@ class CoroutineWorkspace:
         }
         if isinstance(result, dict) and result.get("status") == "SUCCESS":
             self._helper_message("Navigation is set with the requested stop and final route.")
+        return report
+
+    def replace_final_destination_with_poi(
+        self,
+        poi: Any = None,
+        poi_id: str | None = None,
+        poi_name: str | None = None,
+        route_id: str | None = None,
+        route_alias: str | None = None,
+        route_name_via: str | None = None,
+        route_prefer: str | None = None,
+        start_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace the active final destination with one grounded selected POI."""
+
+        gate_name = "replace_final_destination_with_poi"
+        if poi is None:
+            entities = self.scratchpad.get("entities", {})
+            selected_destination = entities.get("selected_destination_poi")
+            selected_generic = entities.get("selected_poi")
+            if isinstance(selected_destination, dict):
+                poi = selected_destination.get("poi") or selected_destination.get("selected")
+            elif isinstance(selected_generic, dict):
+                poi = selected_generic.get("poi") or selected_generic.get("selected")
+
+        try:
+            selected = self.select_poi(
+                poi,
+                poi_id=poi_id,
+                name=poi_name,
+                record_selection=True,
+                role="destination",
+            )
+        except ValueError as exc:
+            selected = {
+                "status": "POI_SELECTION_FAILED",
+                "reason": str(exc),
+                "matches": [],
+            }
+        if selected.get("status") != "SUCCESS":
+            report = {
+                "status": selected.get("status") or "POI_SELECTION_FAILED",
+                "reason": selected.get("reason") or "selected POI is not uniquely grounded",
+                "selection": copy.deepcopy(selected),
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+
+        selected_poi = selected.get("poi")
+        if not isinstance(selected_poi, dict):
+            report = {
+                "status": "POI_SELECTION_FAILED",
+                "reason": "selected POI payload is unavailable",
+                "selection": copy.deepcopy(selected),
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+
+        destination_id = (
+            selected_poi.get("navigation_id")
+            or selected_poi.get("poi_id")
+            or selected_poi.get("id")
+        )
+        if not isinstance(destination_id, str) or not destination_id.strip():
+            report = {
+                "status": "INVALID_POI",
+                "reason": "selected POI has no navigation_id or poi_id",
+                "selected_poi": copy.deepcopy(selected_poi),
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+        destination_id = destination_id.strip()
+
+        if start_id is None:
+            order = self._fresh_waypoint_order()
+            if len(order) >= 2:
+                start_id = order[-2]
+        start_id = self._resolve_preloaded_argument_value(start_id)
+        if not isinstance(start_id, str) or not start_id.strip():
+            report = {
+                "status": "NO_ACTIVE_FINAL_LEG",
+                "reason": "active navigation final-leg start is unavailable",
+                "selected_poi": copy.deepcopy(selected_poi),
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+        start_id = start_id.strip()
+
+        route_options = self.get_route_options(start_id=start_id, destination_id=destination_id)
+        route_selection = self._select_route_for_navigation_leg(
+            route_options,
+            segment_name="final_leg_to_selected_poi",
+            route_id=route_id,
+            alias=route_alias,
+            name_via=route_name_via,
+            prefer=route_prefer,
+            default_prefer=None,
+        )
+        if route_selection.get("status") != "SUCCESS":
+            report = {
+                "status": route_selection.get("status") or "ROUTE_SELECTION_FAILED",
+                "reason": route_selection.get("reason") or "route to selected POI is unresolved",
+                "selected_poi": copy.deepcopy(selected_poi),
+                "route_options": copy.deepcopy(route_options),
+                "route_selection": copy.deepcopy(route_selection),
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+
+        selected_route_id = route_selection.get("selected_route_id") or route_selection.get("route_id")
+        if not isinstance(selected_route_id, str) or not selected_route_id:
+            report = {
+                "status": "ROUTE_SELECTION_FAILED",
+                "reason": "selected route to POI did not expose a route id",
+                "selected_poi": copy.deepcopy(selected_poi),
+                "route_selection": copy.deepcopy(route_selection),
+            }
+            self._store_helper_report(gate_name, report)
+            return report
+
+        result = self.navigation_replace_final_destination_guarded(
+            new_destination_id=destination_id,
+            route_id_leading_to_new_destination=selected_route_id,
+        )
+        report = {
+            "status": result.get("status") if isinstance(result, dict) else "UNKNOWN",
+            "result": result,
+            "selected_poi": copy.deepcopy(selected_poi),
+            "poi_id": selected_poi.get("poi_id") or selected_poi.get("id"),
+            "navigation_id": destination_id,
+            "poi_name": selected_poi.get("name"),
+            "start_id": start_id,
+            "route_id": selected_route_id,
+            "route_selection": copy.deepcopy(route_selection),
+        }
+        self.remember_entity("selected_destination_poi", copy.deepcopy(selected))
+        self.remember_entity("last_destination_poi_replacement", copy.deepcopy(report))
+        self._store_helper_report(gate_name, report)
+        if isinstance(result, dict) and result.get("status") == "SUCCESS":
+            label = _clean_string(selected_poi.get("name")) or "the selected POI"
+            self._helper_message(f"Navigation is updated to {label}.")
         return report
 
     def _repair_or_block_charging_plan_route(self, route_ids: Any) -> dict[str, Any]:
@@ -12542,7 +12870,7 @@ class CoroutineWorkspace:
         primary_destination_id: str,
         fallback_destination_id: str,
         avoid_conditions: list[str] | tuple[str, ...] | str,
-        route_prefer: str | None = "fastest",
+        route_prefer: str | None = None,
         start_id: str | None = None,
     ) -> dict[str, Any]:
         """Short alias for the full arrival-weather navigation protocol."""
@@ -12562,7 +12890,7 @@ class CoroutineWorkspace:
         category_poi: str,
         avoid_conditions: list[str] | tuple[str, ...] | str,
         poi_prefer: str | None = "fastest_charging",
-        route_prefer: str | None = "fastest",
+        route_prefer: str | None = None,
         start_id: str | None = None,
         poi_id: str | None = None,
         poi_name: str | None = None,
@@ -12603,7 +12931,11 @@ class CoroutineWorkspace:
                 "set navigation based on arrival weather and POI selection",
                 reason="at least one blocked weather condition must be supplied",
             )
-        route_selector = str(route_prefer or "fastest").strip().lower() or "fastest"
+        route_selector = (
+            str(route_prefer).strip().lower()
+            if route_prefer is not None and str(route_prefer).strip()
+            else None
+        )
         poi_selector = str(poi_prefer or "unique").strip().lower() or "unique"
 
         blocker = self._require_tool_surface_for_calls(
@@ -12626,9 +12958,23 @@ class CoroutineWorkspace:
             primary_options,
             segment_name="primary_location",
             prefer=route_selector,
+            default_prefer=None,
+            allow_shared_fastest_shortest=True,
         )
         if primary_route.get("status") != "SUCCESS":
-            return primary_route
+            return self._route_selection_required_report(
+                gate_name=gate_name,
+                segment_name="primary_location",
+                route_options=primary_options,
+                route_selection=primary_route,
+                extra={
+                    "primary_location_id": primary_id,
+                    "fallback_destination_id": fallback_id,
+                    "category_poi": category,
+                    "route_prefer": route_selector,
+                    "poi_prefer": poi_selector,
+                },
+            )
 
         primary_weather = self.get_weather_at_route_arrival(
             location_or_poi_id=primary_id,
@@ -12658,6 +13004,8 @@ class CoroutineWorkspace:
                 fallback_options,
                 segment_name="fallback_destination",
                 prefer=route_selector,
+                default_prefer=None,
+                allow_shared_fastest_shortest=True,
             )
             chosen_destination_id = fallback_id
             branch = "fallback"
@@ -12724,11 +13072,34 @@ class CoroutineWorkspace:
                 poi_options,
                 segment_name="primary_poi_destination",
                 prefer=route_selector,
+                default_prefer=None,
+                allow_shared_fastest_shortest=True,
             )
             branch = "primary_poi"
 
         if selected_route.get("status") != "SUCCESS":
-            return selected_route
+            return self._route_selection_required_report(
+                gate_name=gate_name,
+                segment_name=str(selected_route.get("segment") or branch),
+                route_options=selected_route.get("route_options")
+                if isinstance(selected_route.get("route_options"), dict)
+                else (fallback_options if branch == "fallback" else poi_options),
+                route_selection=selected_route,
+                extra={
+                    "branch": branch,
+                    "primary_location_id": primary_id,
+                    "fallback_destination_id": fallback_id,
+                    "chosen_destination_id": chosen_destination_id,
+                    "category_poi": category,
+                    "route_prefer": route_selector,
+                    "poi_prefer": poi_selector,
+                    "selected_poi": copy.deepcopy(selected_poi),
+                    "selected_charging_plug": copy.deepcopy(selected_plug),
+                    "arrival_weather_condition": condition,
+                    "blocked_conditions": blocked_conditions,
+                    "weather": copy.deepcopy(weather_payload),
+                },
+            )
         route_id = selected_route.get("selected_route_id") or selected_route.get("route_id")
         if not isinstance(route_id, str) or not route_id:
             return self._limitation_response(
@@ -12748,6 +13119,7 @@ class CoroutineWorkspace:
             "route_id": route_id,
             "route_prefer": route_selector,
             "poi_prefer": poi_selector,
+            "selected_route": copy.deepcopy(selected_route.get("route")),
             "selected_poi": copy.deepcopy(selected_poi),
             "selected_charging_plug": copy.deepcopy(selected_plug),
             "arrival_weather_condition": condition,
@@ -12758,11 +13130,12 @@ class CoroutineWorkspace:
         if isinstance(result, dict) and result.get("status") == "SUCCESS":
             primary_label = self._route_endpoint_label(primary_id) or "the primary location"
             fallback_label = self._route_endpoint_label(fallback_id) or "the fallback destination"
+            route_label = self._route_selector_label(selected_route.get("route"), route_selector)
             if branch == "fallback":
                 message = (
                     f"Arrival weather at {primary_label} is {condition}, "
                     f"so navigation is set to {fallback_label} using the "
-                    f"{route_selector} route."
+                    f"{route_label} route."
                 )
             else:
                 poi_label = _clean_string(
@@ -12770,7 +13143,7 @@ class CoroutineWorkspace:
                 ) or "the selected POI"
                 message = (
                     f"Arrival weather at {primary_label} is {condition}, "
-                    f"so navigation is set to {poi_label} using the {route_selector} route."
+                    f"so navigation is set to {poi_label} using the {route_label} route."
                 )
             report["message"] = message
             satisfied_patterns = (
@@ -12795,7 +13168,7 @@ class CoroutineWorkspace:
         category_poi: str,
         avoid_conditions: list[str] | tuple[str, ...] | str,
         poi_prefer: str | None = "fastest_charging",
-        route_prefer: str | None = "fastest",
+        route_prefer: str | None = None,
         start_id: str | None = None,
         poi_id: str | None = None,
         poi_name: str | None = None,
@@ -12910,7 +13283,7 @@ class CoroutineWorkspace:
         primary_destination_id: str,
         fallback_destination_id: str,
         avoid_conditions: list[str] | tuple[str, ...] | str,
-        route_prefer: str | None = "fastest",
+        route_prefer: str | None = None,
         start_id: str | None = None,
     ) -> dict[str, Any]:
         """Set navigation to primary unless arrival weather requires fallback."""
@@ -12946,7 +13319,11 @@ class CoroutineWorkspace:
                 "set navigation based on arrival weather",
                 reason="at least one blocked weather condition must be supplied",
             )
-        prefer = str(route_prefer or "fastest").strip().lower() or "fastest"
+        prefer = (
+            str(route_prefer).strip().lower()
+            if route_prefer is not None and str(route_prefer).strip()
+            else None
+        )
         blocker = self._require_tool_surface_for_calls(
             gate_name,
             "set navigation based on arrival weather",
@@ -12964,9 +13341,21 @@ class CoroutineWorkspace:
             primary_options,
             segment_name="primary_destination",
             prefer=prefer,
+            default_prefer=None,
+            allow_shared_fastest_shortest=True,
         )
         if primary_route.get("status") != "SUCCESS":
-            return primary_route
+            return self._route_selection_required_report(
+                gate_name=gate_name,
+                segment_name="primary_destination",
+                route_options=primary_options,
+                route_selection=primary_route,
+                extra={
+                    "primary_destination_id": primary_id,
+                    "fallback_destination_id": fallback_id,
+                    "route_prefer": prefer,
+                },
+            )
         primary_weather = self.get_weather_at_route_arrival(
             location_or_poi_id=primary_id,
             route=primary_route.get("route"),
@@ -12993,6 +13382,8 @@ class CoroutineWorkspace:
                 fallback_options,
                 segment_name="fallback_destination",
                 prefer=prefer,
+                default_prefer=None,
+                allow_shared_fastest_shortest=True,
             )
             chosen_destination_id = fallback_id
             branch = "fallback"
@@ -13001,7 +13392,24 @@ class CoroutineWorkspace:
             chosen_destination_id = primary_id
             branch = "primary"
         if selected_route.get("status") != "SUCCESS":
-            return selected_route
+            return self._route_selection_required_report(
+                gate_name=gate_name,
+                segment_name=str(selected_route.get("segment") or branch),
+                route_options=selected_route.get("route_options")
+                if isinstance(selected_route.get("route_options"), dict)
+                else fallback_options,
+                route_selection=selected_route,
+                extra={
+                    "branch": branch,
+                    "primary_destination_id": primary_id,
+                    "fallback_destination_id": fallback_id,
+                    "chosen_destination_id": chosen_destination_id,
+                    "route_prefer": prefer,
+                    "arrival_weather_condition": condition,
+                    "blocked_conditions": blocked_conditions,
+                    "weather": copy.deepcopy(weather_payload),
+                },
+            )
         route_id = selected_route.get("selected_route_id") or selected_route.get("route_id")
         if not isinstance(route_id, str) or not route_id:
             return self._limitation_response(
@@ -13019,21 +13427,23 @@ class CoroutineWorkspace:
             "chosen_destination_id": chosen_destination_id,
             "route_id": route_id,
             "route_prefer": prefer,
+            "selected_route": copy.deepcopy(selected_route.get("route")),
             "arrival_weather_condition": condition,
             "blocked_conditions": blocked_conditions,
             "weather": copy.deepcopy(weather_payload),
             "navigation_result": copy.deepcopy(result),
         }
         if isinstance(result, dict) and result.get("status") == "SUCCESS":
+            route_label = self._route_selector_label(selected_route.get("route"), prefer)
             if branch == "fallback":
                 message = (
                     f"Arrival weather at the primary destination is {condition}, "
-                    f"so navigation is set to the fallback destination using the {prefer} route."
+                    f"so navigation is set to the fallback destination using the {route_label} route."
                 )
             else:
                 message = (
                     f"Arrival weather at the primary destination is {condition}, "
-                    f"so navigation is set to the primary destination using the {prefer} route."
+                    f"so navigation is set to the primary destination using the {route_label} route."
                 )
             report["message"] = message
             self._helper_message(message)
@@ -15256,6 +15666,7 @@ class BlockingPythonExecutor:
             "select_route": ws.select_route,
             "select_route_by_user_preferences": ws.select_route_by_user_preferences,
             "select_poi": ws.select_poi,
+            "replace_final_destination_with_poi": ws.replace_final_destination_with_poi,
             "get_weather_at_route_arrival": ws.get_weather_at_route_arrival,
             "navigate_by_arrival_weather": ws.navigate_by_arrival_weather,
             "navigate_to_poi_by_arrival_weather": ws.navigate_to_poi_by_arrival_weather,

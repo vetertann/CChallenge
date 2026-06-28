@@ -2868,6 +2868,203 @@ class GuardTests(unittest.TestCase):
             {"route_ids": ["route_fallback_short"]},
         )
 
+    def test_weather_navigation_without_route_preference_does_not_default_fastest(self):
+        ws, ex = self.make(
+            {
+                "get_routes_from_start_to_destination": [
+                    (
+                        "SUCCESS",
+                        {
+                            "routes": [
+                                {
+                                    "route_id": "route_primary",
+                                    "start_id": "loc_home_1",
+                                    "destination_id": "loc_primary",
+                                    "distance_km": 120,
+                                    "duration_hours": 1,
+                                    "duration_minutes": 45,
+                                    "alias": ["fastest", "shortest"],
+                                }
+                            ]
+                        },
+                    ),
+                    (
+                        "SUCCESS",
+                        {
+                            "routes": [
+                                {
+                                    "route_id": "route_fallback_fast",
+                                    "start_id": "loc_home_1",
+                                    "destination_id": "loc_fallback",
+                                    "distance_km": 92,
+                                    "duration_hours": 1,
+                                    "duration_minutes": 10,
+                                    "alias": ["fastest"],
+                                },
+                                {
+                                    "route_id": "route_fallback_short",
+                                    "start_id": "loc_home_1",
+                                    "destination_id": "loc_fallback",
+                                    "distance_km": 86,
+                                    "duration_hours": 1,
+                                    "duration_minutes": 15,
+                                    "alias": ["shortest"],
+                                },
+                            ]
+                        },
+                    ),
+                ],
+                "get_weather": ("SUCCESS", {"current_slot": {"condition": "rain"}}),
+                "set_new_navigation": ("SUCCESS", {}),
+            },
+            {
+                "get_routes_from_start_to_destination": tool_schema(
+                    "get_routes_from_start_to_destination",
+                    {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+                    required=["start_id", "destination_id"],
+                ),
+                "get_weather": tool_schema(
+                    "get_weather",
+                    {
+                        "location_or_poi_id": {"type": "string"},
+                        "month": {"type": "number"},
+                        "day": {"type": "number"},
+                        "time_hour_24hformat": {"type": "number"},
+                        "time_minutes": {"type": "number"},
+                    },
+                    required=["location_or_poi_id", "month", "day", "time_hour_24hformat"],
+                ),
+                "set_new_navigation": self._nav_schema(),
+            },
+        )
+
+        result = ex.run(
+            "r = navigate_by_arrival_weather(\n"
+            "    primary_destination_id='loc_primary',\n"
+            "    fallback_destination_id='loc_fallback',\n"
+            "    avoid_conditions=['rain'],\n"
+            ")\n"
+            "respond(r['status'] + '|' + r['branch'] + '|' + r['segment'])"
+        )
+
+        self.assertTrue(
+            result.response_text.startswith(
+                "ROUTE_SELECTION_REQUIRED|fallback|fallback_destination"
+            )
+        )
+        self.assertIn(
+            "Route choice to loc_fallback is still unresolved",
+            result.response_text,
+        )
+        self.assertIn("fastest:", result.response_text)
+        self.assertIn("shortest:", result.response_text)
+        self.assertNotIn("Would you like details about the route options", result.response_text)
+        self.assertIsNone(self._emitted(ws, "set_new_navigation"))
+
+    def test_poi_weather_navigation_without_route_preference_does_not_default_fastest(self):
+        ws, ex = self.make(
+            {
+                "get_routes_from_start_to_destination": [
+                    (
+                        "SUCCESS",
+                        {
+                            "routes": [
+                                {
+                                    "route_id": "route_primary",
+                                    "start_id": "loc_home_1",
+                                    "destination_id": "loc_primary",
+                                    "distance_km": 120,
+                                    "duration_hours": 1,
+                                    "duration_minutes": 45,
+                                    "alias": ["fastest", "shortest"],
+                                }
+                            ]
+                        },
+                    ),
+                    (
+                        "SUCCESS",
+                        {
+                            "routes": [
+                                {
+                                    "route_id": "route_fallback_fast",
+                                    "start_id": "loc_home_1",
+                                    "destination_id": "loc_fallback",
+                                    "distance_km": 92,
+                                    "duration_hours": 1,
+                                    "duration_minutes": 10,
+                                    "alias": ["fastest"],
+                                },
+                                {
+                                    "route_id": "route_fallback_short",
+                                    "start_id": "loc_home_1",
+                                    "destination_id": "loc_fallback",
+                                    "distance_km": 86,
+                                    "duration_hours": 1,
+                                    "duration_minutes": 15,
+                                    "alias": ["shortest"],
+                                },
+                            ]
+                        },
+                    ),
+                ],
+                "get_weather": ("SUCCESS", {"current_slot": {"condition": "rain"}}),
+                "search_poi_at_location": ("SUCCESS", {"pois": []}),
+                "set_new_navigation": ("SUCCESS", {}),
+            },
+            {
+                "get_routes_from_start_to_destination": tool_schema(
+                    "get_routes_from_start_to_destination",
+                    {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+                    required=["start_id", "destination_id"],
+                ),
+                "get_weather": tool_schema(
+                    "get_weather",
+                    {
+                        "location_or_poi_id": {"type": "string"},
+                        "month": {"type": "number"},
+                        "day": {"type": "number"},
+                        "time_hour_24hformat": {"type": "number"},
+                        "time_minutes": {"type": "number"},
+                    },
+                    required=["location_or_poi_id", "month", "day", "time_hour_24hformat"],
+                ),
+                "search_poi_at_location": tool_schema(
+                    "search_poi_at_location",
+                    {"location_id": {"type": "string"}, "category_poi": {"type": "string"}},
+                    required=["location_id", "category_poi"],
+                ),
+                "set_new_navigation": self._nav_schema(),
+            },
+        )
+
+        result = ex.run(
+            "r = navigate_to_poi_unless_arrival_weather(\n"
+            "    primary_location_id='loc_primary',\n"
+            "    fallback_destination_id='loc_fallback',\n"
+            "    category_poi='charging_stations',\n"
+            "    avoid_conditions=['rain'],\n"
+            ")\n"
+            "respond(r['status'] + '|' + r['branch'] + '|' + r['segment'])"
+        )
+
+        self.assertTrue(
+            result.response_text.startswith(
+                "ROUTE_SELECTION_REQUIRED|fallback|fallback_destination"
+            )
+        )
+        self.assertIn(
+            "Route choice to loc_fallback is still unresolved",
+            result.response_text,
+        )
+        self.assertIn("fastest:", result.response_text)
+        self.assertIn("shortest:", result.response_text)
+        self.assertNotIn("Would you like details about the route options", result.response_text)
+        emitted_names = [
+            call["tool_name"] for batch in ws.bridge.requests for call in batch
+        ]
+        self.assertNotIn("search_poi_at_location", emitted_names)
+        self.assertIsNone(self._emitted(ws, "set_new_navigation"))
+
     def test_navigate_to_poi_by_arrival_weather_selects_fastest_charger_when_clear(self):
         ws, ex = self.make(
             {

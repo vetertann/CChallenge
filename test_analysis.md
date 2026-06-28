@@ -6,6 +6,46 @@ This document covers every unique public-test task that did not reach `Pass^3` i
 
 Scoring convention: `score` means how many of the three attempts passed. `wall-times` are evaluator end-to-end A2A task times per trial. The representative evidence quote comes from the first failed trial for that task unless the evaluator logged a more direct error string.
 
+## Current Cross-Model Public-Test Readout
+
+Latest full public-test comparison:
+
+| Run | Agent model/provider | Scope | Result | Split result |
+| --- | --- | --- | ---: | --- |
+| `output/run_configs/20260628-143015__run_configs-coroutine_full_test_cerebras_gemini_1__test-trials1-baseall-hallall-disall__gpt-oss-120b.json` | `gpt-oss-120b` on Cerebras | full test, 1 trial | `108/125` | base `41/50`, disambiguation `19/25`, hallucination `48/50` |
+| `output/run_configs/20260628-174003__run_configs-coroutine_full_test_kimi_nebius_gemini_1__test-trials1-baseall-hallall-disall__moonshotai-Kimi-K2.6.json` | `moonshotai/Kimi-K2.6` on Nebius | full test, 1 trial | `108/125` | base `45/50`, disambiguation `17/25`, hallucination `46/50` |
+
+Kimi did not improve the total public-test score over the latest Cerebras run,
+but it redistributed failures: base improved by four tasks, while
+disambiguation and hallucination worsened.
+
+GPT-5.5 targeted reruns against Kimi-failed public-test tasks show the strongest
+model-scaling signal:
+
+| Kimi-failed subset | GPT-5.5 run | Result | Recovered tasks | Still failed |
+| --- | --- | ---: | --- | --- |
+| base failures from Kimi full test | `output/run_configs/20260628-181111__run_configs-coroutine_test_base_kimi_failures_openai_gpt55_gemini_1__test-trials1-base5ids-hall0-dis0__gpt-5.5.json` | `3/5` | `base_9`, `base_31`, `base_67` | `base_47`, `base_81` |
+| disambiguation failures from Kimi full test, clean third attempt | `output/run_configs/20260628-180058__run_configs-coroutine_test_disamb_failures_openai_gpt55_gemini_1__test-trials1-base0-hall0-dis8ids__gpt-5.5.json` | `5/8` | `disambiguation_9`, `disambiguation_19`, `disambiguation_37`, `disambiguation_41`, `disambiguation_47` | `disambiguation_21`, `disambiguation_31`, `disambiguation_45` |
+
+Two earlier GPT-5.5 disambiguation subset attempts scored `0/8`
+(`20260628-174920...gpt-5.5.json` and `20260628-175310...gpt-5.5.json`), so
+the `5/8` run is evidence that the stronger model can recover these cases, not
+a stable pass-rate estimate.
+
+Train-side sanity check:
+`output/run_configs/20260628-191836__run_configs-coroutine_train_base_failures_openai_gpt55_gemini_1__train-trials1-base3ids-hall0-dis0__gpt-5.5.json`
+passed `base_74` and `base_86`, failed `base_96`. That matches the public-test
+pattern: some misses are model-reasoning sensitive, while weather/route-choice
+and persistent route-edit issues still need helper/prompt work or are evaluator
+sensitive.
+
+Conclusion: stronger models scale several failures that require longer
+multi-step reasoning, state preservation, or choosing the right helper path. Do
+not convert those recovered cases into task-specific helper rules. Prioritize
+code fixes only for failures that remain under GPT-5.5, failures where a helper
+blocks a valid grounded choice, or failures that are reproducible on train-safe
+synthetic tests.
+
 ## Split Summary
 
 | Split | Failed unique tasks | Pass^3 |

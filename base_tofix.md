@@ -25,6 +25,21 @@ Raw failures in this run:
 
 If the confirmed `base_86` evaluator issue is factored out, current base score is `47/50` (`94.0%`).
 
+Public-test cross-model note:
+- Latest Cerebras full public-test base score:
+  `41/50` in
+  `output/run_configs/20260628-143015__run_configs-coroutine_full_test_cerebras_gemini_1__test-trials1-baseall-hallall-disall__gpt-oss-120b.json`.
+- Kimi/Nebius full public-test base score:
+  `45/50` in
+  `output/run_configs/20260628-174003__run_configs-coroutine_full_test_kimi_nebius_gemini_1__test-trials1-baseall-hallall-disall__moonshotai-Kimi-K2.6.json`.
+- GPT-5.5 targeted rerun on the five Kimi-missed base public-test tasks:
+  `3/5` in
+  `output/run_configs/20260628-181111__run_configs-coroutine_test_base_kimi_failures_openai_gpt55_gemini_1__test-trials1-base5ids-hall0-dis0__gpt-5.5.json`.
+- Interpretation: base tasks show positive model scaling. Kimi improved the
+  full-split base result, and GPT-5.5 recovered most Kimi base misses. Remaining
+  misses that persist under GPT-5.5 are better candidates for helper/prompt
+  work than cases solved only by the stronger model.
+
 Previous 3-trial stability reference:
 `output/run_configs/20260624-204337__run_configs-coroutine_full_train_cerebras_gemini_3__train-trials3-baseall-hallall-disall__gpt-oss-120b.json`
 
@@ -67,6 +82,7 @@ Current base tofix state:
 | `base_56` | latest full pass | fixed/watch | Tool actions, final state, tool execution, tool subset, and policy now pass in the latest full train run. Keep watching because route-option wording has been user-simulator sensitive. |
 | `base_66` | `2/3` | pass | One policy-only failure. The destination replacement to Munich succeeded; evaluator complained the assistant did not mention tolls for the old Andorra -> Paris route that was already active before the requested edit. Treat as low-priority policy wording/evaluator sensitivity. |
 | `base_74` | latest full raw fail; action/tool/final pass | fail/flaky | Compound route/email/charging flow now completed the required tool bundle in the latest full run, including route facts, charging specs, charging time, range-by-SOC, charger search, and email send. Raw miss was policy-only: the judge wanted explicit fastest-route/alternatives narration earlier in the route-planning part. Keep as active wording/policy risk; do not reintroduce broad runtime plan forcing. |
+| `base_76` | previous full pass; latest full fail after protocol rewrite | evaluator-wording flake/watch | The hidden task intent is passenger -> driver for both climate temperature and seat heating, but the evaluator-facing user utterance split the clauses as "sync my driver zone climate settings to match the passenger side" and "sync my driver zone heating settings to the passenger side." The second clause naturally allows driver -> passenger. In raw tools, zoned climate means `get_temperature_inside_car`/`set_climate_temperature`; heating means `get_seat_heating_level`/`set_seat_heating`. Current fail copied passenger temperature to driver, then copied driver seat heating to passenger. Treat as ambiguous simulator wording/evaluator-side intent mismatch; do not add raw-text direction parsing in helpers. |
 | `base_82` | latest full pass | fixed | Route-provenance repair now preserves the selected Berlin route and avoids false fastest narration in the latest full train run. |
 | `base_84` | latest full pass | fixed/watch | Latest full train run passed. Keep the selected charging-station identity and two-leg navigation guards, because earlier failures came from replacing a good multi-leg setup with a direct final-destination mutation. |
 | `base_86` | latest full raw fail; action/tool/final pass | known evaluator issue | Downstream EV/charging/provider flow is behaviorally correct in the latest full run. Raw miss is only `r_policy`, repeating the organizer-confirmed false negative where explicit route-options requests are judged as if the assistant had to proactively choose fastest first. |
@@ -275,34 +291,64 @@ Implemented:
   fan-speed deltas.
 - Targeted run `20260622-224610...base_nonregex_fix...` passed `base_28`.
 
-### `base_76`: driver/passenger sync direction reversed — TARGETED FIX
+### `base_76`: driver/passenger sync wording ambiguity — EVALUATOR-SIDE FLAKE WATCH
 
-The agent correctly read `get_temperature_inside_car()` and
-`get_seat_heating_level()`. The read values were driver `27°C` / seat heat `3`
-and passenger `16°C` / seat heat `1`. The user asked to sync driver settings to
-match passenger, but the agent called:
-`set_climate_temperature(seat_zone="PASSENGER", temperature=27.0)` and
-`set_seat_heating(seat_zone="PASSENGER", level=3.0)`.
+Hidden task intent: set the driver's zone climate and heating settings to match
+the passenger side. Under that intent the expected raw-tool flow is:
+`get_temperature_inside_car()` then
+`set_climate_temperature(seat_zone="DRIVER", temperature=<passenger_temp>)`,
+and `get_seat_heating_level()` then
+`set_seat_heating(seat_zone="DRIVER", level=<passenger_heat>)`.
 
-This was a real action failure: it copied driver values onto passenger instead
-of passenger values onto driver.
+The evaluator-facing user utterance is less clear than the hidden task intent:
+"Could you sync my driver zone climate settings to match the passenger side?
+Also, please sync my driver zone heating settings to the passenger side."
+The first clause clearly means passenger -> driver. The second clause can
+reasonably mean driver -> passenger because "to the passenger side" sounds like
+the passenger side is the target.
 
-Implemented:
-- Added `sync_climate_zone(source_zone, target_zone, ...)`.
-- Added explicit source/target wording: "set driver to match passenger" means
-  `source_zone="PASSENGER", target_zone="DRIVER"`.
-- Added a compound-sync clarification: if multiple clauses name the same target
-  side, keep one source/target direction and include both temperature and
-  seat-heating flags instead of making a second opposite-direction call.
-- Targeted runs:
-  `20260622-225815...round3...` and `20260622-230404...round4...` both passed
-  `base_76`; combined targeted run `20260622-231433...final3...` also passed.
+Raw tool meaning:
+- Zoned "climate settings" for this task are temperature only:
+  `get_temperature_inside_car()` and `set_climate_temperature(...)`.
+- Zoned "heating settings" are seat heating:
+  `get_seat_heating_level()` and `set_seat_heating(...)`.
+- Fan speed, AC, air circulation, airflow direction, and defrost are cabin/global
+  climate controls, not driver/passenger zone sync tools for this task.
+
+Current latest full-train fail after the disambiguation-protocol rewrite:
+`output/run_configs/20260627-164218__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
+
+What happened:
+- The agent copied passenger temperature to driver: correct under both the
+  hidden intent and the first user clause.
+- The agent copied driver seat heating to passenger:
+  `sync_climate_zone(source_zone="DRIVER", target_zone="PASSENGER",
+  include_seat_heating=True)`.
+- The user simulator then corrected it: "I asked to sync my driver zone heating
+  settings to the passenger side, not the other way around." That correction
+  relies on hidden task intent; the spoken second clause itself permits the
+  opposite parse.
+- Scoring failed `r_actions`; policy and tool execution passed.
+
+Existing implemented support remains useful:
+- `sync_climate_zone(source_zone, target_zone, ...)` copies values in exactly the
+  supplied direction and does not inspect raw user text.
+- Skill guidance says "set driver to match passenger" means
+  `source_zone="PASSENGER", target_zone="DRIVER"` and compound sync clauses that
+  name the same target side should keep one direction.
+- Targeted runs
+  `20260622-225815...round3...`, `20260622-230404...round4...`, and
+  `20260622-231433...final3...` passed `base_76`.
 - Latest targeted run
   `output/run_configs/20260626-184959__run_configs-coroutine_base76_cerebras_gemini_3__train-trials3-base1ids-hall0-dis0__gpt-oss-120b.json`
   passed `3/3` and all traces copied passenger temperature/heating to driver.
-  Latest full helper regression still saw one wrong-direction two-call split.
-  Do not repair that inside the helper, because resolving which opposite
-  direction was intended would require raw user-text or hidden task inference.
+
+Current decision:
+- Treat as evaluator/simulator wording flake unless the organizers say the
+  second clause is intentionally interpreted by hidden task intent.
+- Do not add helper-side raw-text direction parsing. A repair that forces
+  passenger -> driver from the phrase "heating settings to the passenger side"
+  would overfit this task and would be wrong for valid literal user requests.
 
 ### `base_64`: waypoint flow — PREFLIGHT FIX, TARGETED 3/3
 

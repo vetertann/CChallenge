@@ -189,9 +189,12 @@ Arrival-weather navigation helpers use response obligations for the same
 fact-only purpose: after `navigate_to_poi_by_arrival_weather(...)` or
 `navigate_to_poi_unless_arrival_weather(...)` chooses the fallback branch from
 grounded arrival-weather facts, the final answer must include the blocked
-weather condition and fallback destination. The obligation does not choose the
-branch; it only prevents the model from omitting the branch reason after the
-helper has already made the evaluator-visible navigation call.
+weather condition and fallback destination. If the branch is resolved but route
+choice is still unresolved, the helper returns `ROUTE_SELECTION_REQUIRED` and
+replaces the generic route narration with a branch-specific route-choice
+question. The obligation does not choose the branch or route; it only prevents
+the model from omitting the branch reason or reopening a branch already blocked
+by grounded weather facts.
 Successful climate-temperature setters also have a narrow response repair:
 if the model says "degrees" without Celsius after a successful
 `set_climate_temperature(...)`, `respond(...)` rewrites the assistant's own
@@ -882,8 +885,8 @@ Current helpers:
 | `get_route_options(...)` | Normalizes route choices, aliases, durations, and toll metadata. |
 | `select_route(...)` | Selects one uniquely identified route without guessing and records revision-bound provenance. |
 | `select_poi(..., role=None)` | Selects one grounded POI without guessing; optional explicit `role` stores `selected_<role>_poi` so later steps can preserve stop, companion, destination, or charging-station identity without relying only on the latest POI alias. |
-| `navigate_by_arrival_weather(...)` | Preferred short helper for primary/fallback weather navigation; delegates to the full route-arrival weather protocol. |
-| `navigate_to_poi_by_arrival_weather(...)` | Handles primary-location POI navigation unless arrival weather blocks it; if blocked, sets the fallback route, otherwise searches/selects the model-supplied POI category and sets navigation to that POI. |
+| `navigate_by_arrival_weather(...)` | Preferred short helper for primary/fallback weather navigation; delegates to the full route-arrival weather protocol and returns `ROUTE_SELECTION_REQUIRED` instead of defaulting to fastest when no grounded route selector exists. |
+| `navigate_to_poi_by_arrival_weather(...)` | Handles primary-location POI navigation unless arrival weather blocks it; if blocked, sets or asks route choice for the fallback route, otherwise searches/selects the model-supplied POI category and sets or asks route choice for that POI. |
 | `navigate_to_poi_unless_arrival_weather(...)` | Short alias for `navigate_to_poi_by_arrival_weather(...)`; same helper contract, no new raw-text parsing or hidden preference repair. |
 | `set_navigation_conditioned_on_arrival_weather(...)` | Selects a primary route, checks destination weather at route-arrival time, and sets navigation to the primary or fallback destination using the model-supplied blocked weather conditions and route preference. |
 | `send_contact_details_to_contact(...)` | Sends one contact's grounded details to another explicit contact by keeping recipient and subject IDs in separate helper arguments and routing the final message through normal email confirmation. |

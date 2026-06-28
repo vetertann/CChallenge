@@ -161,6 +161,7 @@ def _call_model(
     temperature_override: float | None = None,
 ) -> Any:
     provider_name = provider.lower()
+    is_openai_gpt5 = provider_name == "openai" and model.lower().startswith("gpt-5")
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -169,13 +170,15 @@ def _call_model(
     if provider_name == "cerebras" and temperature_override is not None:
         # Only the Cerebras path is tested for per-call retry-temperature bumps.
         temp = temperature_override
-    if temp is not None:
+    if temp is not None and not is_openai_gpt5:
         kwargs["temperature"] = temp
 
     if provider_name == "cerebras":
         kwargs["max_completion_tokens"] = MODEL_MAX_OUTPUT_TOKENS
         if MODEL_REASONING_EFFORT:
             kwargs["reasoning_effort"] = MODEL_REASONING_EFFORT
+    elif is_openai_gpt5:
+        kwargs["max_completion_tokens"] = MODEL_MAX_OUTPUT_TOKENS
     else:
         kwargs["max_tokens"] = MODEL_MAX_OUTPUT_TOKENS
 

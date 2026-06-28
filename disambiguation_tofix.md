@@ -23,6 +23,23 @@ Raw failures in this run:
 
 If the known `disambiguation_55` initial-lookup artifact is factored out, current disambiguation score is `30/31` (`96.8%`).
 
+Public-test cross-model note:
+- Latest Cerebras full public-test disambiguation score:
+  `19/25` in
+  `output/run_configs/20260628-143015__run_configs-coroutine_full_test_cerebras_gemini_1__test-trials1-baseall-hallall-disall__gpt-oss-120b.json`.
+- Kimi/Nebius full public-test disambiguation score:
+  `17/25` in
+  `output/run_configs/20260628-174003__run_configs-coroutine_full_test_kimi_nebius_gemini_1__test-trials1-baseall-hallall-disall__moonshotai-Kimi-K2.6.json`.
+- GPT-5.5 targeted rerun on the eight Kimi-missed disambiguation public-test
+  tasks: clean third attempt `5/8` in
+  `output/run_configs/20260628-180058__run_configs-coroutine_test_disamb_failures_openai_gpt55_gemini_1__test-trials1-base0-hall0-dis8ids__gpt-5.5.json`.
+- Two earlier GPT-5.5 attempts on the same subset scored `0/8`, so treat the
+  `5/8` as a model-scaling signal, not a stable rate estimate.
+- Interpretation: disambiguation still benefits from stronger model reasoning,
+  but less reliably than base. Remaining failures after GPT-5.5 should be
+  inspected first for helper-blocked valid reasoning, route-policy ambiguity,
+  confirmation/completion edges, or evaluator-side route-policy sensitivity.
+
 Previous 3-trial stability reference:
 `output/run_configs/20260624-204337__run_configs-coroutine_full_train_cerebras_gemini_3__train-trials3-baseall-hallall-disall__gpt-oss-120b.json`
 

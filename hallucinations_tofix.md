@@ -22,6 +22,20 @@ Raw failure in this run:
 
 If this likely simulator/judge artifact is factored out, current hallucination score is `48/48` (`100.0%`).
 
+Public-test cross-model note:
+- Latest Cerebras full public-test hallucination score:
+  `48/50` in
+  `output/run_configs/20260628-143015__run_configs-coroutine_full_test_cerebras_gemini_1__test-trials1-baseall-hallall-disall__gpt-oss-120b.json`.
+- Kimi/Nebius full public-test hallucination score:
+  `46/50` in
+  `output/run_configs/20260628-174003__run_configs-coroutine_full_test_kimi_nebius_gemini_1__test-trials1-baseall-hallall-disall__moonshotai-Kimi-K2.6.json`.
+- No GPT-5.5 hallucination subset rerun was recorded for the Kimi-missed
+  hallucination public-test tasks.
+- Interpretation: unlike base and disambiguation, the current evidence does not
+  show positive hallucination scaling from Kimi. Keep hallucination work focused
+  on wrapper-level missing-capability handling, unknown-value terminal
+  responses, and avoiding unsupported claims rather than model-only optimism.
+
 Previous 3-trial stability reference:
 `output/run_configs/20260624-204337__run_configs-coroutine_full_train_cerebras_gemini_3__train-trials3-baseall-hallall-disall__gpt-oss-120b.json`
 
