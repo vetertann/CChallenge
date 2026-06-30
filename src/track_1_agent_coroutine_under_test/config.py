@@ -83,7 +83,7 @@ MODEL_SCHEMA_MAX_RETRIES = int(
     or _env("MODEL_SCHEMA_MAX_RETRIES")
     or "3"
 )
-MODEL_MAX_INTERNAL_STEPS = int(_env("CAR_AGENT_MAX_INTERNAL_STEPS") or "8")
+MODEL_MAX_INTERNAL_STEPS = int(_env("CAR_AGENT_MAX_INTERNAL_STEPS") or "5")
 CAR_AGENT_SKILL = _env("CAR_AGENT_SKILL") or "car_domain.md"
 CAR_AGENT_TRACE_DIR = _env("CAR_AGENT_TRACE_DIR") or "run_logs/car_agent"
 CAR_AGENT_RUN_ID = _env("CAR_AGENT_RUN_ID") or datetime.now(timezone.utc).strftime(

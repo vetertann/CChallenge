@@ -65,6 +65,44 @@ How to use this signal:
 
 ## Concrete Patch Signals
 
+### 0. Fabricated internal IDs must be blocked before evaluator calls
+
+Where this lives:
+- Runtime guard: `_grounded_id_blocker_result(...)` in `coroutine_repl.py`.
+- Grounded-ID persistence: `_remember_grounded_ids_from_result(...)` and
+  `_auto_persist_entities_inner(...)`.
+- Raw-call chokepoint: `_call_raw_tools_sync(...)`.
+
+Bad generic flow:
+```text
+agent needs a location, route, contact, POI, station, plug, or plan ID
+agent constructs a plausible-looking ID string from a name or placeholder
+evaluator receives the invalid ID and returns a tool-execution error
+```
+
+Target flow:
+```text
+agent needs an ID
+runtime blocks ungrounded ID arguments locally
+agent calls the relevant lookup/search/route/state function
+agent retries the action with the returned ID
+```
+
+Patch shape:
+- Guard only live evaluator parameters that are actually ID-shaped, such as
+  `*_id`, `*_ids`, or names containing `_id_`.
+- Build membership from policy current location, successful tool results, and
+  persisted route/location/POI/contact/navigation state.
+- Do not infer IDs from raw user text. The guard is only a fact check against
+  IDs already returned in the task.
+
+Acceptance tests:
+- Plausible fabricated location/route/contact-like IDs are blocked before bridge
+  dispatch.
+- IDs returned by lookup/search/route/state reads are accepted.
+- Mixed batches still execute independent valid calls while locally blocking only
+  the ungrounded-ID call.
+
 ### 1. Broad control request without value must ask, not set a guessed value
 
 Where this lives:
@@ -227,7 +265,7 @@ Acceptance tests:
 
 Where this lives:
 - Existing helper: `set_occupied_reading_lights(on=True, include_rear=True)`
-- Proposed model-facing helper: `set_reading_lights_by_occupancy(...)`
+- Implemented model-facing helper: `set_reading_lights_by_occupancy(...)`
 - Raw CAR-bench tools involved: `get_seats_occupancy(...)`,
   `get_reading_lights_status(...)`, `set_reading_light(...)`
 - Do not route these through `set_exterior_lights_safe(...)`
@@ -253,8 +291,8 @@ assistant confirms final state
 ```
 
 Patch shape:
-- Add `set_reading_lights_by_occupancy(occupied_on=True, unoccupied_on=False,
-  include_rear=True)` or equivalent.
+- Keep `set_reading_lights_by_occupancy(occupied_on=True,
+  unoccupied_on=False, include_rear=True)` available to the model.
 - Internally compute desired state before emitting any setter calls.
 - Do not use aliases in a way that maps two positions to the same setter target.
 
@@ -300,7 +338,8 @@ Patch shape:
 - Make the skill strongly prefer `send_contact_details_to_contact(...)` once
   both contact roles are known.
 - If the model does the flow manually, `get_contact_details(..., role=...)`
-  must preserve the two roles separately.
+  must preserve the two roles separately. Recipient/subject role repair should
+  use only current-turn roles or a current/immediately previous-turn pair.
 - Confirmation handling must recognize a contact-details draft as complete
   email content. It must not ask "what should the email say" after a valid
   contact-details draft was stored.
@@ -308,6 +347,7 @@ Patch shape:
 Acceptance tests:
 - Same-turn recipient and subject contact.
 - Multi-turn recipient first, subject later, confirmation after draft.
+- Older stale contact roles do not rewrite unrelated later email recipients.
 - Bare yes with no stored draft still asks for missing content.
 
 ### 7. Destination POI selection must happen before route selection to that POI
@@ -526,6 +566,7 @@ Acceptance tests:
 Where this lives:
 - `set_occupied_seat_heating(...)`
 - `turn_off_unoccupied_seat_heating()`
+- `optimize_seat_heating_by_occupancy(...)`
 - `sync_climate_zone(...)`
 - `set_climate_temperature_safe(...)`
 - Raw CAR-bench tools involved: `get_seats_occupancy(...)`,
@@ -552,7 +593,9 @@ for occupied unsupported rear seats:
 ```
 
 Patch shape:
-- Add or tighten an occupancy heating optimizer that knows supported zones.
+- Preserve/tighten the occupancy heating optimizer that knows supported zones and
+  accepts explicit final levels for occupied and/or unoccupied heatable front
+  seats.
 - Do not ask which seat the child/passenger is in when occupancy already
   provides the only occupied rear seat.
 - Do not hallucinate rear seat-heating controls.
@@ -560,6 +603,8 @@ Patch shape:
 Acceptance tests:
 - Occupied driver with unknown current level still gets requested level.
 - Unoccupied passenger with unknown or nonzero level is set to 0 on cleanup.
+- Mixed occupied/unoccupied front seats get one final target each.
+- Two front seats with the same final target can use `ALL_ZONES`.
 - Occupied rear seat produces limitation, not `set_seat_heating(...)`.
 - Combined occupancy plus temperature request does not over-apply to unsupported
   rear zones.
@@ -574,8 +619,10 @@ Acceptance tests:
    examples. These are mostly prompt/skill fixes.
 4. Contact-details email stored-draft flow. It is high-value but needs careful
    confirmation regression tests.
-5. Route/toll narration and route-stop mutation guards. These touch longer
-   navigation flows and should be tested with helper-regression slices.
+5. Route/toll narration and the positive route-stop mutation path. The
+   completion-claim guard is already implemented; remaining work is making the
+   helper emit the right grounded navigation mutation instead of only blocking
+   false success text.
 6. Confirmation unknown-state wording and seat-heating unsupported-zone handling.
    These are important but should be validated against existing hallucination
    train slices before full-run validation.

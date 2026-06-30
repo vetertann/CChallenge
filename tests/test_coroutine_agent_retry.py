@@ -155,6 +155,59 @@ class RepeatedReplErrorBreakerTests(unittest.TestCase):
         self.assertEqual(temps, [None, STORM_RETRY_TEMPERATURES[0]])
         self.assertEqual(outbound.response_text, "Done.")
 
+    def test_repl_error_retry_does_not_carry_failed_code_or_scratchpad_observation(self):
+        worker = CoroutineAgentWorker(
+            context_id="compact-retry-test",
+            model="test-model",
+            provider="cerebras",
+            tool_mode="prompt_json",
+            client=object(),
+        )
+        worker.system_prompt = "SYSTEM"
+        worker.initial_user_request = "Do the task"
+        worker.workspace.scratchpad["entities"]["large_value"] = "x" * 5000
+        requests: list[list[dict]] = []
+        results = [
+            ExecutionResult(
+                stdout="",
+                error={
+                    "type": "SyntaxError",
+                    "message": "f-string: unterminated string (<string>, line 13)",
+                },
+                response_text=None,
+            ),
+            ExecutionResult(stdout="", error=None, response_text="Done."),
+        ]
+
+        def next_execute_python(step_index: int, temperature_override=None):
+            requests.append(list(worker.messages))
+            worker.metrics.add_call({}, 1.0)
+            return (
+                {"role": "assistant", "content": "FAILED_CODE_SHOULD_NOT_PERSIST"},
+                "",
+                "bad code",
+                f"call-{step_index}",
+            )
+
+        worker._next_execute_python = next_execute_python  # type: ignore[method-assign]
+        worker.executor.run = lambda code: results.pop(0)
+
+        worker._run_until_outbound()
+
+        outbound = worker.outbox.get_nowait()
+        self.assertEqual(outbound.response_text, "Done.")
+        self.assertEqual(len(requests), 2)
+        second_prompt = "\n".join(
+            str(message.get("content") or "") for message in requests[1]
+        )
+        self.assertIn(
+            "Previous Python execution failed with SyntaxError: f-string: unterminated string.",
+            second_prompt,
+        )
+        self.assertNotIn("FAILED_CODE_SHOULD_NOT_PERSIST", second_prompt)
+        self.assertNotIn("Observation from execute_python", second_prompt)
+        self.assertNotIn("SCRATCHPAD\n", second_prompt)
+
     def test_repl_error_signature_ignores_line_number_noise(self):
         first = CoroutineAgentWorker._retry_storm_error_signature(
             {

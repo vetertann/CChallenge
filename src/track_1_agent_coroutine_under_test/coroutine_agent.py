@@ -354,22 +354,27 @@ class CoroutineAgentWorker:
         if self.initial_user_request:
             messages.append({"role": "user", "content": initial_user_message(self.initial_user_request)})
         messages.extend(self.stable_messages)
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "Current persistent scratchpad state:\n"
-                    f"{json_dumps_safe(self.workspace.scratchpad, indent=2)}\n\n"
-                    "Use this as your compact carry-forward memory.\n\n"
-                    "Navigation policy reminder:\n"
-                    f"{NAVIGATION_STATE_POLICY_REMINDER}\n\n"
-                    "Preference policy reminder:\n"
-                    f"{PREFERENCE_POLICY_REMINDER}\n\n"
-                    f"{PREFLIGHT_ATTENTION_REMINDER}"
-                ),
-            }
-        )
         return messages
+
+    def _scratchpad_state_message(self) -> dict[str, Any]:
+        """The current scratchpad + reminders, appended fresh to every model
+        request. Kept OUT of the running message log so multi-step turns do not
+        accumulate one stale full-scratchpad dump per step (the scratchpad is
+        persistent state; only the latest copy is meaningful)."""
+
+        return {
+            "role": "user",
+            "content": (
+                "Current persistent scratchpad state:\n"
+                f"{json_dumps_safe(self.workspace.scratchpad, indent=2)}\n\n"
+                "Use this as your compact carry-forward memory.\n\n"
+                "Navigation policy reminder:\n"
+                f"{NAVIGATION_STATE_POLICY_REMINDER}\n\n"
+                "Preference policy reminder:\n"
+                f"{PREFERENCE_POLICY_REMINDER}\n\n"
+                f"{PREFLIGHT_ATTENTION_REMINDER}"
+            ),
+        }
 
     def _run_until_outbound(self) -> None:
         repeated_error_signature: tuple[str, str] | None = None
@@ -381,9 +386,63 @@ class CoroutineAgentWorker:
                 step_index, temperature_override=temperature_override
             )
             self.metrics.add_pass()
-            self.messages.append(assistant_log)
             result = self.executor.run(code)
-            observation = format_observation(result, self.workspace.scratchpad)
+            if result.error and not result.response_text:
+                retry_message = self._compact_repl_retry_message(result.error)
+                self.trace.write(
+                    "repl_result",
+                    step_index=step_index,
+                    stdout=result.stdout,
+                    error=result.error,
+                    response_text=result.response_text,
+                    scratchpad=self.workspace.scratchpad,
+                    observation=retry_message,
+                    compact_retry=True,
+                )
+                self.ctx_logger.info(
+                    "Coroutine REPL result "
+                    f"step={step_index} error={result.error} "
+                    "compact_retry=True"
+                )
+
+                error_signature = self._retry_storm_error_signature(result.error)
+                if error_signature is None:
+                    repeated_error_signature = None
+                    repeated_error_count = 0
+                elif error_signature == repeated_error_signature:
+                    repeated_error_count += 1
+                else:
+                    repeated_error_signature = error_signature
+                    repeated_error_count = 1
+                if repeated_error_count >= self._repeated_repl_error_limit():
+                    response_text = "I hit an internal issue while deciding the next step."
+                    self.ctx_logger.warning(
+                        "Breaking repeated coroutine REPL error loop "
+                        f"step={step_index} error={result.error}"
+                    )
+                    self._emit_text_response(
+                        response_text,
+                        step_index=step_index,
+                        trace_event="repeated_repl_error_breaker",
+                        error_type=result.error.get("type") if result.error else None,
+                        error_message=result.error.get("message") if result.error else None,
+                        repeat_count=repeated_error_count,
+                    )
+                    return
+
+                # Retry from the last stable evaluator-facing context plus the
+                # current scratchpad. Do not retain failed Python or the full
+                # failed-observation scratchpad dump in model context.
+                self.messages = self._rebuild_messages()
+                self.messages.append({"role": "user", "content": retry_message})
+                continue
+
+            self.messages.append(assistant_log)
+            # Compact observation in the running log (no embedded scratchpad): the
+            # current scratchpad is injected fresh per request by
+            # _scratchpad_state_message(), so embedding it per step would stack one
+            # full dump per step and blow up the context on long turns.
+            observation = format_observation(result, {})
             self.messages.append(build_tool_log(call_id, observation, self.tool_mode))
             self.trace.write(
                 "repl_result",
@@ -436,6 +495,20 @@ class CoroutineAgentWorker:
         self.trace.write("max_internal_steps_reached", max_steps=MODEL_MAX_INTERNAL_STEPS)
         self.outbox.put(
             OutboundAction(response_text="I need a bit more information before I can continue.")
+        )
+
+    @staticmethod
+    def _compact_repl_retry_message(error: dict[str, Any]) -> str:
+        error_type = str(error.get("type") or "Error")
+        message = str(error.get("message") or "").strip()
+        message = re.sub(r"\s*\(<string>, line \d+\)\s*", "", message)
+        message = re.sub(r"\s+on line \d+\b", "", message)
+        message = " ".join(message.split()).strip().rstrip(".")
+        rendered = f"{error_type}: {message}" if message else error_type
+        return (
+            f"Previous Python execution failed with {rendered}. "
+            "Retry the same task. Do not use the same code shape. "
+            "Use available helper outputs and scratchpad keys instead of assuming missing fields."
         )
 
     def _repl_retry_temperature_override(self, repeated_error_count: int) -> float | None:
@@ -492,6 +565,9 @@ class CoroutineAgentWorker:
                 request_messages = request_messages + [
                     build_repair_message("invalid execute_python action", self.tool_mode)
                 ]
+            # Inject the current scratchpad once, as the last message, so it is
+            # always fresh and never accumulates across multi-step turns.
+            request_messages = request_messages + [self._scratchpad_state_message()]
             self.trace.write(
                 "model_request",
                 step_index=step_index,

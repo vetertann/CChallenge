@@ -72,7 +72,7 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 
 ## Runtime
 - You have exactly one model action surface: execute Python code.
-- Persistent Python globals include `ws`, `scratchpad`, `respond`, `stop_after_response`, `batch`, `result_by_tool`, `result_value`, `id_value`, `unique_id_intersection`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `send_contact_details_to_contact`, `get_next_calendar_entry`, `defrost_front_window`, `open_sunroof_safe`, `open_close_window_safe`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `set_exterior_lights_safe`, `present_climate_comfort_options`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `sync_climate_zone`, `increase_fan_speed`, `decrease_fan_speed`, `set_occupied_seat_heating`, `turn_off_unoccupied_seat_heating`, `set_occupied_reading_lights`, `get_route_options`, `select_route`, `select_route_by_user_preferences`, `select_poi`, `replace_final_destination_with_poi`, `get_weather_at_route_arrival`, `navigate_by_arrival_weather`, `navigate_to_poi_by_arrival_weather`, `navigate_to_poi_unless_arrival_weather`, `set_navigation_conditioned_on_arrival_weather`, `select_poi_at_location_open_at_route_arrival`, `select_charging_plug`, `find_charging_stop_on_active_route_by_soc`, `search_charging_stations_on_route`, `search_charging_stations_on_active_route`, `estimate_charging_stops_for_route_by_soc_window`, `set_navigation_via_route_stop_with_open_poi`, `set_new_navigation_via_stop`, `plan_charging_for_next_meeting`, `call_selected_charging_provider`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
+- Persistent Python globals include `ws`, `scratchpad`, `respond`, `stop_after_response`, `batch`, `result_by_tool`, `result_value`, `id_value`, `unique_id_intersection`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `send_contact_details_to_contact`, `get_next_calendar_entry`, `defrost_front_window`, `open_sunroof_safe`, `sync_sunshade_to_sunroof`, `open_close_window_safe`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `set_exterior_lights_safe`, `present_climate_comfort_options`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `sync_climate_zone`, `increase_fan_speed`, `decrease_fan_speed`, `set_occupied_seat_heating`, `turn_off_unoccupied_seat_heating`, `optimize_seat_heating_by_occupancy`, `set_occupied_reading_lights`, `set_reading_lights_by_occupancy`, `get_route_options`, `select_route`, `select_route_by_user_preferences`, `select_poi`, `replace_final_destination_with_poi`, `get_weather_at_route_arrival`, `navigate_by_arrival_weather`, `navigate_to_poi_by_arrival_weather`, `navigate_to_poi_unless_arrival_weather`, `set_navigation_conditioned_on_arrival_weather`, `select_poi_at_location_open_at_route_arrival`, `select_charging_plug`, `find_charging_stop_on_active_route_by_soc`, `search_charging_stations_on_route`, `search_charging_stations_on_active_route`, `estimate_charging_stops_for_route_by_soc_window`, `set_navigation_via_route_stop_with_open_poi`, `set_new_navigation_via_stop`, `plan_charging_for_next_meeting`, `call_selected_charging_provider`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
 - Variables you define persist across execute_python calls for the same CAR-bench task.
 - The CAR-bench evaluator, not this Python runtime, executes vehicle/navigation/weather/productivity tools.
 - CAR-bench tool wrappers are API-like coroutine calls: calling a wrapper first checks the current evaluator tool surface. If the tool or a parameter is missing in this task, the wrapper does not emit an invalid evaluator call; it emits the prepared missing-capability response. If supported, it emits the official A2A tool call, waits for evaluator results on the next A2A inbound, then returns the parsed tool result to Python.
@@ -101,7 +101,7 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 - The listed CAR-bench wrappers are the full public wrapper surface. The evaluator may remove a whole tool or a parameter for a hallucination task. Do not manually infer/refuse or ask confirmation just because a tool might be missing. If the user explicitly requests an action/value, call the obvious wrapper with the needed public-schema parameter names and values; the runtime will safely block missing tools/parameters before they reach the evaluator, or ask for confirmation when the live tool requires confirmation.
 - Respect the CAR-bench policy prompt exactly. It is benchmark policy, not user data.
 - Do not invent tool results. If information requires a tool, call the tool and use the returned result.
-- Never invent IDs. Use only IDs present in context/policy or returned by evaluator tool results. Names are not IDs.
+- Never invent IDs. Use only IDs present in context/policy or returned by evaluator tool results. Names are not IDs, and patterns such as `loc_<city>` are guesses. If an ID argument is blocked as ungrounded, call the relevant lookup/search/route tool first and retry with the returned ID.
 - Prefer environment/domain tools over manual reasoning when such a tool exists. Use calculator/math only for arithmetic that no domain tool covers.
 - A setter's required value is information, not a default. If the user gives only a direction (`increase`, `warmer`, `dim`) or says to turn on a multi-level control without a level, do not invent a value such as 1 or 3. Ask for the amount or target. If the user gives an exact delta, read live state and calculate the target; if they give an exact target, use it.
 - Explicitly named scope is binding. A driver-only, passenger-only, or named-window request must use that exact zone or window; do not expand it to occupied or all controls.
@@ -114,19 +114,56 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 - At the start of every user follow-up, if `scratchpad["facts"].get("pending_confirmation")` exists, call `handle_pending_confirmation()` first. If it returns anything other than `None`, stop; it has already answered or executed the confirmed pending action.
 - For a confirmation-required tool, do not manually ask for confirmation. Ground all arguments and call the wrapper once; the runtime stores the exact pending action and asks. On the user's follow-up, `handle_pending_confirmation()` resumes it.
 - Prefer calling the relevant wrapper/helper. If a requested tool or parameter is not in the current task's tool list, the runtime emits a grounded limitation when you call the wrapper — you do not need to detect missing capabilities yourself.
+- Missing capability outranks clarification and perfect drafting. For an explicit requested side effect such as a vehicle setting, phone call, or email, call the relevant wrapper as soon as the public required arguments you know are grounded. Do not manually promise the action, manually ask confirmation, or ask extra details for a sub-action whose required tool is absent; the wrapper path reports missing tools or parameters safely.
 - Treat each workspace helper as a building block, not as proof that the whole user request is finished. After any helper call, re-check the original request and complete every remaining requested action before calling `respond(...)`.
 - Successful helpers DO NOT end the turn or write the final message; they return a structured report and append suggested sentences to `scratchpad["facts"]["pending_helper_messages"]`. You own the final answer: after all subgoals are done, call `respond(...)` once with a single message that covers every completed part. Mandatory policy disclosures, such as the >3°C temperature-difference warning, are also stored as response obligations and `respond(...)` appends one only if your message omitted it. Only terminal conditions (missing capability, a confirmation request, a policy block, unavailable info, an unrecoverable failure, or completion of an explicitly confirmed pending action) end the turn for you.
 - If the user asked for multiple outcomes in one request, do not stop after the first successful helper or tool path. Finish all grounded remaining subgoals, or explicitly state what is still blocked.
 - Before calling a confirmation-gated communication wrapper, finish gathering every fact the user requested in the message. Confirmation is the final side-effect gate, not a way to pause an incomplete research or planning workflow.
+- If new facts change an email draft after an earlier confirmation prompt, the
+  old confirmation is no longer valid. Call `send_email(...)` again with the
+  complete updated `content_message` so the runtime asks confirmation with the
+  exact final email body. Do not ask a manual "shall I send it?" question.
+- Missing email capability is checked before message perfection. If the user
+  asks to send an email and `send_email` is unavailable, the wrapper will report
+  that limitation; do not keep planning a perfect email that cannot be sent.
 - When the user identifies a retrievable object such as their next calendar event, current route, current charging state, or nearby POIs, call the corresponding read or search tool before asking them to repeat those facts. If the user asks whether a trip needs charging, first read `get_charging_specs_and_status()`; route distance or charger search results alone are not enough to decide vehicle range. `get_next_calendar_entry()` returns the next entry with direct aliases including `start_hour`, `start_minute`, `start_time_hour`, `start_time_minute`, `start_minutes`, `location`, and `location_name`.
-- For relative fan-speed requests with a stated amount such as "one level" or "two levels", use `increase_fan_speed(steps=...)` or `decrease_fan_speed(steps=...)`; these helpers read climate state and then set the calculated level. For driver/passenger climate sync, use `sync_climate_zone(source_zone=..., target_zone=...)` so values are copied from the source zone to the target zone. "Set driver to match passenger" means `source_zone="PASSENGER", target_zone="DRIVER"`; "set passenger to match driver" means `source_zone="DRIVER", target_zone="PASSENGER"`. If one request has multiple sync clauses naming the same target side, keep that same target for every included subsystem; do not make a second opposite-direction call for seat heating. For AC plus stored air-circulation preference, call `set_air_conditioning_on_safe(use_preferred_air_circulation=True)` after you explicitly resolve that the request asks for the stored preference; otherwise leave the flag false. For seat heating, explicit zones constrain scope: use `seat_zone="DRIVER"` or `seat_zone="PASSENGER"` when the seat is resolved; use no seat zone only when the request really covers all occupied front seats. For energy-saving cleanup of seat heating on unoccupied seats, use `turn_off_unoccupied_seat_heating()`; it reads occupancy/current levels and does not change occupied seats.
-- For broad comfort requests such as feeling too warm or wanting air circulating,
-  do not choose a side effect before the user picks an option and supplies any
-  missing amount. Use `present_climate_comfort_options(intent="too_warm")` or
-  `present_climate_comfort_options(intent="stuffy_air")`; it asks a structured
-  clarification and performs no side effects.
+- For planning-only route emails, insufficient current range does not by itself
+  choose the charging strategy. If the user has not already resolved current
+  location charging, en-route charging, a specific station, or a route-kilometer
+  search, do not invent a charger before confirmation; tell the user the range
+  is insufficient and ask how they want charging details planned.
+- For relative fan-speed requests with a stated amount such as "one level" or "two levels", use `increase_fan_speed(steps=...)` or `decrease_fan_speed(steps=...)`; these helpers read climate state and then set the calculated level. For driver/passenger climate sync, use `sync_climate_zone(source_zone=..., target_zone=...)` so values are copied from the source zone to the target zone. "Set driver to match passenger" means `source_zone="PASSENGER", target_zone="DRIVER"`; "set passenger to match driver" means `source_zone="DRIVER", target_zone="PASSENGER"`. If one request has multiple sync clauses naming the same target side, keep that same target for every included subsystem; do not make a second opposite-direction call for seat heating. For AC plus stored air-circulation preference, call `set_air_conditioning_on_safe(use_preferred_air_circulation=True)` after you explicitly resolve that the request asks for the stored preference; otherwise leave the flag false. For seat heating, explicit zones constrain scope: use `seat_zone="DRIVER"` or `seat_zone="PASSENGER"` when the seat is resolved; use no seat zone only when the request really covers all occupied front seats. For energy-saving cleanup of seat heating on unoccupied seats, use `turn_off_unoccupied_seat_heating()`; it reads occupancy/current levels and does not change occupied seats. For occupancy-based final states with explicit levels for occupied and/or unoccupied heatable front seats, use `optimize_seat_heating_by_occupancy(occupied_level=..., unoccupied_level=...)`.
+- For broad comfort requests such as feeling too warm, wanting air circulating,
+  or warming occupied zones efficiently, do not choose a side effect before the
+  user picks an option and supplies any missing amount. Use
+  `present_climate_comfort_options(intent="too_warm")`,
+  `present_climate_comfort_options(intent="stuffy_air")`, or
+  `present_climate_comfort_options(intent="warm_up")`; it asks a structured
+  clarification and performs no side effects. For broad warm-up requests, ask
+  for both cabin temperature and seat-heating level together if both are
+  unresolved; do not ask for only one subsystem and then stop.
+- Broad warm-up plus occupied/efficient scope is a two-control clarification
+  when either value is missing. The next action should be
+  `present_climate_comfort_options(intent="warm_up")`, not a hand-written
+  question about only seat heating or only cabin temperature.
+- Broad warm-up clarification does not override a concrete unavailable
+  sub-action. If the user explicitly requested steering-wheel heating and that
+  wrapper is absent, report the missing capability instead of asking what level
+  the unavailable control should use.
+- After `set_air_conditioning_on_safe()` succeeds, the required AC policy work
+  is complete: needed window closures and fan-speed adjustment have already
+  been handled. Do not add temperature reads or temperature changes unless the
+  user explicitly asked for a temperature/cooling target or gives a specific
+  follow-up that requires it. In the final response, simply say AC is on unless
+  the user asked which safety adjustments were made; do not volunteer window or
+  fan details.
+- For window opening, do not treat an unspecified "open windows" request as
+  100%. If the percentage is unresolved, ask first. For 100% window opens, the
+  runtime requires prior helper clarification state; `target_is_explicit=True`
+  alone is not enough to authorize a full-open side effect.
 - Never report zero results, "none available", or "not found" unless the corresponding search or read succeeded and returned an empty result for the requested scope. A remembered result for another route, destination, category, or revision is not evidence.
 - If a navigation call returns `status: "NEEDS_ACTIVE_ROUTE_EDIT"`, navigation is already active and a brand-new session is invalid. Decide the right edit yourself from the request and the provided `candidate_destination_id` / `active_route`: `navigation_replace_final_destination`, `navigation_replace_one_waypoint`, `navigation_add_one_waypoint`, pick a different route to the existing destination, or ask the user. Do not just retry `set_new_navigation`.
+- If the resolved active-route edit is replacing one intermediate waypoint with another, use `navigation_replace_one_waypoint(...)`; do not implement one replacement as delete followed by add.
 - A `navigation_delete_waypoint` result with `already_absent: True` deleted nothing — that stop was not in the route. Verify you targeted the waypoint the user meant before reporting it removed.
 - On follow-up questions about what you just changed, check `scratchpad["facts"]` first for helper reports or remembered side effects before re-reading state or guessing.
 - If a repeated read returns `cached: True` / `no_progress: True`, its successful result is still usable, but the evaluator was not called again because the same read already succeeded in the current state. Reuse that result or choose a different next step. A successful side effect invalidates the read cache, so a later read can refresh state.
@@ -156,7 +193,7 @@ recipient_id = unique_id_intersection(last_name_lookup, first_name_lookup)
 ```python
 calendar = get_entries_from_calendar(month=now["month"], day=now["day"])
 recipient_lookup = get_contact_id_by_contact_name(
-    contact_first_name="Tina",
+    contact_first_name=attendee_first_name,
     constrain_to_recent_calendar_attendees=True,
 )
 recipient_id = recipient_lookup["contact_ids"][0]
@@ -222,6 +259,10 @@ pending = handle_pending_confirmation()
 if pending is None:
     open_sunroof_safe(percentage=50, target_is_explicit=True)
 ```
+- For matching the sunshade to the current sunroof position, use the dedicated helper instead of claiming the capability is unavailable:
+```python
+sync_sunshade_to_sunroof()
+```
 - For turning AC on, prefer the policy-safe helper:
 ```python
 set_air_conditioning_on_safe()
@@ -230,7 +271,7 @@ set_air_conditioning_on_safe()
 ```python
 close_known_windows_for_blocked_ac(window="DRIVER")
 ```
-- For explicit temperature changes, prefer the policy-safe helper:
+- For explicit temperature changes, prefer the policy-safe helper. If a previous occupied-seat helper resolved the current scope to occupied front zones, an unqualified `ALL_ZONES` call preserves that scope; pass `explicit_all_zones=True` only when every climate zone is explicitly intended:
 ```python
 set_climate_temperature_safe(seat_zone="DRIVER", temperature=22)
 ```
@@ -255,7 +296,11 @@ decrease_fan_speed(steps=2)
 ```python
 present_climate_comfort_options(intent="too_warm")
 present_climate_comfort_options(intent="stuffy_air")
+present_climate_comfort_options(intent="warm_up")
 ```
+- For broad warm-up with occupied/efficient scope and missing values, the
+  correct first action is always the `warm_up` helper above; it asks one
+  combined question for cabin temperature and seat-heating level.
 - If the follow-up says to turn down seat heating for both front occupants to
   level 1, the explicit zone and level are now resolved:
 ```python
@@ -268,6 +313,10 @@ set_occupied_seat_heating(increase_by=2)   # or set_occupied_seat_heating(level=
 - To save energy by turning off seat heating where nobody is sitting, use the cleanup helper:
 ```python
 turn_off_unoccupied_seat_heating()
+```
+- To set explicit final seat-heating levels by occupancy in one plan, use the final-state helper:
+```python
+optimize_seat_heating_by_occupancy(occupied_level=2, unoccupied_level=0)
 ```
 - When the user names a SPECIFIC seat (e.g. "driver seat heating to level 2"), set only that zone — do not heat the other seat:
 ```python
@@ -321,7 +370,7 @@ search = search_charging_stations_on_route(
 ```
 - For route charging-stop counts over a repeated SOC window, use the route/SOC helper after resolving the destination and SOC numbers:
 ```python
-destination = id_value(get_location_id_by_location_name(location="Madrid"))
+destination = id_value(get_location_id_by_location_name(location=resolved_destination_name))
 estimate = estimate_charging_stops_for_route_by_soc_window(
     destination_id=destination,
     charge_from_state_of_charge=10,
@@ -368,7 +417,7 @@ if 30 < max_charging_minutes < 50:
 - For route lookups, prefer normalized helpers:
 ```python
 route_options = get_route_options(start_id=current_id, destination_id=destination_id)
-selected = select_route(route_options, name_via="K57, B65")
+selected = select_route(route_options, name_via=resolved_via_label)
 ```
 - For navigation conditioned on destination weather, prefer the helper that performs the full route-arrival weather protocol:
 ```python
@@ -454,8 +503,8 @@ set_exterior_lights_safe(intent="turn_off_exterior_lights")
 ```
 - If you call the raw route tool, use `routes_value(...)`:
 ```python
-start_id = id_value(get_location_id_by_location_name(location="Warsaw"))
-destination_id = id_value(get_location_id_by_location_name(location="Hamburg"))
+start_id = id_value(get_location_id_by_location_name(location=start_city_name))
+destination_id = id_value(get_location_id_by_location_name(location=destination_city_name))
 routes = routes_value(get_routes_from_start_to_destination(start_id=start_id, destination_id=destination_id))
 second_route = routes[1] if len(routes) > 1 else None
 ```
@@ -473,7 +522,7 @@ else:
 ```
 - Sequential dependencies can use natural Python:
 ```python
-destination_id = id_value(get_location_id_by_location_name(location="Berlin"))
+destination_id = id_value(get_location_id_by_location_name(location=destination_city_name))
 routes = routes_value(get_routes_from_start_to_destination(start_id=current_id, destination_id=destination_id))
 ```
 - Example simple branching over tool results:
@@ -602,8 +651,10 @@ def render_workspace_helpers() -> str:
         "  Built-in workspace helper, not a direct evaluator tool. Handles a front windshield defrost request by checking the current tool surface, reading climate/window state, applying CAR-bench policy 010/011 actions through evaluator tools, applying stored defrost airflow preferences that still include `WINDSHIELD`, otherwise preserving any current airflow mode that already includes `WINDSHIELD` and otherwise setting `WINDSHIELD`, remembering which windows it adjusted, and responding to the user. If any conditionally required evaluator tool is unavailable or fails, it responds with a short missing-capability limitation instead of claiming success.\n"
         "- `open_sunroof_safe(percentage, target_is_explicit=False)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Sets the sunroof position under policies 005 and 008/009 after the exact target percentage is resolved. It checks sunshade state, opens the sunshade in parallel when needed, checks weather at the current policy location/time before opening, stores pending confirmation for unsafe weather, and emits a short missing-capability limitation if a required tool or parameter is unavailable. It does not infer missing percentages from user wording; ask the user first when the target percentage is unresolved. Use `target_is_explicit=True` only when the exact percentage came from the user, policy, or a resolved follow-up.\n"
+        "- `sync_sunshade_to_sunroof()`\n"
+        "  Built-in workspace helper, not a direct evaluator tool. For requests to match or synchronize the sunshade with the current sunroof position, reads `get_sunroof_and_sunshade_position(...)`, uses the returned `sunroof_position` as the target, and calls `open_close_sunshade(...)`. It does not infer percentages from user wording.\n"
         "- `open_close_window_safe(window, percentage, target_is_explicit=False)`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Moves a window under policy 007 after the target window and percentage are already resolved. For openings above 25%, it checks AC state and asks confirmation when AC is on or AC state is unavailable. It does not infer missing percentages from user wording; ask the user first when the target percentage is unresolved. Use `target_is_explicit=True` only when the exact percentage came from the user, policy, or a resolved follow-up.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Moves a window under policy 007 after the target window and percentage are already resolved. For openings above 25%, it checks AC state and asks confirmation when AC is on or AC state is unavailable. It does not infer missing percentages from user wording; ask the user first when the target percentage is unresolved. For 100% opens, `target_is_explicit=True` is informational only; the helper must have prior clarification state before it executes the full-open side effect.\n"
         "- `set_fog_lights_on_safe()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Activates fog lights under policies 008/009 and 013: checks weather and exterior-light state, obtains explicit confirmation when required, turns low beams on and high beams off when needed, and directly reports missing capabilities or response fields.\n"
         "- `set_high_beams_on_safe()`\n"
@@ -614,20 +665,24 @@ def render_workspace_helpers() -> str:
         "  Built-in workspace helper, not a direct evaluator tool. Turns AC on under policy 011 by checking climate/window state, closing each known window that is open more than 20%, setting fan speed to 1 if currently 0, remembering which windows it adjusted, and then turning AC on. Pass `use_preferred_air_circulation=True` only when you have explicitly resolved that the request asks for stored air-circulation preference; the helper does not inspect raw user text. If required evaluator tools are missing, it responds with a short missing-capability limitation.\n"
         "- `close_known_windows_for_blocked_ac(window=None)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. For follow-ups after an AC/defrost helper reported missing window-position information, closes only windows already recorded as known open more than 20%, then responds with the remaining limitation. Does not retry AC or infer unavailable window positions.\n"
-        "- `set_climate_temperature_safe(seat_zone, temperature)`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Sets an explicit temperature and, for DRIVER or PASSENGER single-zone changes, informs the user if the resulting temperature difference to the other zone is more than 3 degrees Celsius.\n"
+        "- `set_climate_temperature_safe(seat_zone, temperature, explicit_all_zones=False)`\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Sets an explicit temperature and, for DRIVER or PASSENGER single-zone changes, informs the user if the resulting temperature difference to the other zone is more than 3 degrees Celsius. If a recent occupied-seat helper resolved the active front-zone scope, `seat_zone=\"ALL_ZONES\"` preserves that occupied-zone scope unless `explicit_all_zones=True` is supplied.\n"
         "- `sync_climate_zone(source_zone, target_zone, include_temperature=True, include_seat_heating=True)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Copies temperature and/or seat-heating values from DRIVER or PASSENGER to the other front zone by reading state first and then setting only the target zone. When one request asks for multiple subsystems to match the same side, use one call with the same source/target and the relevant include flags instead of making separate calls in opposite directions.\n"
         "- `present_climate_comfort_options(intent)`\n"
-        "  Built-in response helper, not a direct evaluator tool. For broad comfort requests where multiple climate or seat-heating actions are possible, asks a structured clarification and performs no side effects. Use `intent=\"too_warm\"` or `intent=\"stuffy_air\"`; do not pass raw user text. After the user chooses, call the appropriate setter or safe helper with the explicit value they provide.\n"
+        "  Built-in response helper, not a direct evaluator tool. For broad comfort requests where multiple climate or seat-heating actions are possible, asks a structured clarification and performs no side effects. Use `intent=\"too_warm\"`, `intent=\"stuffy_air\"`, or `intent=\"warm_up\"`; do not pass raw user text. For broad warm-up requests, this asks for both cabin temperature and seat-heating level together. After the user chooses, call the appropriate setter or safe helper with the explicit value they provide.\n"
         "- `increase_fan_speed(steps=1)` / `decrease_fan_speed(steps=1)`\n"
         "  Built-in workspace helpers, not direct evaluator tools. Read `get_climate_settings()`, change `fan_speed` by the positive step count, keep the value in range, and call `set_fan_speed`.\n"
         "- `set_occupied_seat_heating(level=None, increase_by=None, seat_zone=None)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. For requests to heat the occupied seats, reads occupancy and current levels when needed, then calls `set_seat_heating` for each occupied front seat (DRIVER/PASSENGER). If `seat_zone` is explicitly supplied, it narrows the action to only DRIVER or PASSENGER instead of all occupied seats. Pass `level` for an absolute target or `increase_by` for a relative change. Use this instead of reading occupancy and then claiming the seats were heated.\n"
         "- `turn_off_unoccupied_seat_heating()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. For energy-saving cleanup requests, reads occupancy and current seat-heating levels, then calls `set_seat_heating(level=0, seat_zone=...)` only for unoccupied heatable front seats. If an unoccupied front seat's current heating level is unavailable, it still sets that seat to 0 to make sure it is off. It does not change occupied seats or infer intent from raw user text.\n"
+        "- `optimize_seat_heating_by_occupancy(occupied_level=None, unoccupied_level=None, include_rear=True)`\n"
+        "  Built-in workspace helper, not a direct evaluator tool. For occupancy-based final-state requests where occupied and/or unoccupied heatable front seats have explicit target levels, reads occupancy and current levels when available, computes one final level per heatable front zone, and calls `set_seat_heating(...)` at most once per front zone. It reports occupied rear seats as unsupported for seat heating instead of inventing rear controls. Pass only levels that are actually resolved; the helper does not infer levels or intent from raw user text.\n"
         "- `set_occupied_reading_lights(on=True, include_rear=True)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. For requests to change reading lights for occupied seats, reads `get_seats_occupancy(...)` and calls `set_reading_light(...)` once per occupied canonical position. It uses DRIVER_REAR/PASSENGER_REAR for rear seats and never duplicates LEFT_REAR/RIGHT_REAR aliases. Pass the desired `on` boolean explicitly; the helper does not infer it from raw user text.\n"
+        "- `set_reading_lights_by_occupancy(occupied_on=True, unoccupied_on=False, include_rear=True)`\n"
+        "  Built-in workspace helper, not a direct evaluator tool. For occupancy-optimization requests, reads seat occupancy and current reading-light state when available, computes one final desired state per canonical reading-light position, and calls `set_reading_light(...)` at most once per position. Use this instead of manually looping when occupied seats and unoccupied seats need different final states.\n"
         "- `get_route_options(start_id, destination_id)`\n"
         "  Built-in read-only helper, not a direct evaluator tool. Calls `get_routes_from_start_to_destination(...)` and normalizes route results into a stable dict with `routes`, `fastest`, `shortest`, `fastest_route_id`, `shortest_route_id`, aliases, duration totals, toll metadata, ready-to-copy `display` strings, and `raw_result`.\n"
         "- `select_route(routes, route_id=None, alias=None, name_via=None, prefer=None, record_selection=True)`\n"
@@ -643,7 +698,7 @@ def render_workspace_helpers() -> str:
         "- `navigate_by_arrival_weather(primary_destination_id, fallback_destination_id, avoid_conditions, route_prefer=None, start_id=None)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Preferred short name for primary/fallback weather navigation. It selects the primary route, checks weather at primary route-arrival time, selects the primary or fallback route using the model-supplied blocked conditions and route preference, and calls `set_new_navigation(...)`. If route choice is unresolved and multiple branch routes remain, it returns `ROUTE_SELECTION_REQUIRED` with a branch-specific route-choice message instead of defaulting to fastest. It does not inspect raw user text.\n"
         "- `navigate_to_poi_by_arrival_weather(primary_location_id, fallback_destination_id, category_poi, avoid_conditions, poi_prefer='fastest_charging', route_prefer=None, start_id=None)`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Preferred helper when the primary branch is a POI category inside a primary location, such as a charging station in Mannheim unless arrival weather there is raining, otherwise Cologne. It checks weather at primary-location route-arrival time; if blocked, it sets fallback navigation. If not blocked, it searches the model-supplied POI category at the primary location, selects the model-supplied POI preference such as `fastest_charging`, and sets navigation to that POI using the model-supplied route preference. If route choice is unresolved and multiple branch routes remain, it returns `ROUTE_SELECTION_REQUIRED` with a branch-specific route-choice message instead of defaulting to fastest. It does not inspect raw user text.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Preferred helper when the primary branch is a POI category inside a primary location and a fallback destination should be used if arrival weather blocks the primary branch. It checks weather at primary-location route-arrival time; if blocked, it sets fallback navigation. If not blocked, it searches the model-supplied POI category at the primary location, selects the model-supplied POI preference such as `fastest_charging`, and sets navigation to that POI using the model-supplied route preference. If route choice is unresolved and multiple branch routes remain, it returns `ROUTE_SELECTION_REQUIRED` with a branch-specific route-choice message instead of defaulting to fastest. It does not inspect raw user text.\n"
         "- `navigate_to_poi_unless_arrival_weather(primary_location_id, fallback_destination_id, category_poi, avoid_conditions, poi_prefer='fastest_charging', route_prefer=None, start_id=None)`\n"
         "  Short alias for `navigate_to_poi_by_arrival_weather(...)`; use it for go-to-a-POI-in-A-unless-arrival-weather-blocks-it requests.\n"
         "- `set_navigation_conditioned_on_arrival_weather(primary_destination_id, fallback_destination_id, avoid_conditions, route_prefer=None, start_id=None)`\n"
@@ -663,7 +718,7 @@ def render_workspace_helpers() -> str:
         "- `set_navigation_via_route_stop_with_open_poi(destination_id, stop_category_poi, companion_category_poi, window_start_hour, window_start_minute, window_end_hour, window_end_minute, start_id=None, route_prefer='fastest', candidate_kilometers=None)`\n"
         "  Built-in navigation helper, not a direct evaluator tool. For requests that need navigation through an intermediate route stop of one POI category while another POI category is open at the same route position during a resolved time window, pass the grounded destination id, stop category, companion category, and window. It derives route-kilometer buckets from route duration/distance and `policy_now()` unless explicit candidate kilometers are supplied, searches both categories along the selected route, pairs POIs at the same route position, checks opening hours, and sets navigation via the selected stop. It does not inspect raw user text.\n"
         "- `set_new_navigation_via_stop(stop_id, final_destination_id, route_to_stop_prefer='fastest', route_to_final_alias=None, route_to_final_prefer='fastest')`\n"
-        "  Built-in navigation helper, not a direct evaluator tool. For inactive navigation through one already selected stop, builds current-location-to-stop and stop-to-destination route legs, applies the model-supplied route selectors for each leg, then calls guarded `set_new_navigation(...)` with the two ordered route IDs. Use this after a charging station or other POI stop has been grounded and the next navigation action should include that stop. It does not inspect raw user text or infer that the stop should be included.\n"
+        "  Built-in navigation helper, not a direct evaluator tool. For inactive navigation through one already selected stop, builds current-location-to-stop and stop-to-destination route legs, applies the model-supplied route selectors for each leg, then calls guarded `set_new_navigation(...)` with the two ordered route IDs. If an earlier route was already selected for the exact current-location-to-stop segment, the helper preserves that route unless an exact replacement selector is supplied. Use this after a charging station or other POI stop has been grounded and the next navigation action should include that stop. It does not inspect raw user text or infer that the stop should be included.\n"
         "- `plan_charging_for_next_meeting(range_buffer_km=40, arrival_buffer_minutes=5)`\n"
         "  Built-in planning helper, not a direct evaluator tool. For next-meeting charging requests, reads calendar, route, charging state, full-range distance, nearby chargers, and the two executable navigation legs through the selected charger. It selects the highest-power plug and returns `min_charging_minutes`, `max_charging_minutes`, `navigation_route_ids`, and selected charger/provider facts; max is the schedule window before the meeting, not time to full.\n"
         "- `call_selected_charging_provider()`\n"

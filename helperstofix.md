@@ -91,6 +91,7 @@ surface and validation target.
 | Priority | Helper or wrapper surface | General fix to implement or preserve | Validation target |
 | --- | --- | --- | --- |
 | P0 | `CoroutineAgent._retry_storm_error_signature(...)`, `_repl_retry_temperature_override(...)`, `_repeated_repl_error_limit(...)`; provider call path in `provider.py` | Break repeated identical REPL syntax/indentation loops. Keep the retry-temperature ladder Cerebras-only because that provider path is tested; other providers should only use the bounded breaker. | `tests/test_coroutine_agent_retry.py`; full-run call-count audit for repeated REPL errors. |
+| P0 | `_grounded_id_blocker_result(...)`, `_remember_grounded_ids_from_result(...)`, `_call_raw_tools_sync(...)` | Implemented; preserve the runtime rejection of evaluator ID arguments that were not returned by policy state or successful tool results in the current task. This catches plausible invented IDs as well as literal placeholders without reading raw user text or hardcoding task cases. | Unit tests for fabricated location/route/contact-like IDs, returned IDs accepted, mixed batches, and route/navigation/contact helper slices. |
 | P0 | `send_contact_details_to_contact(...)`, `get_contact_details(...)`, `get_contact_id_by_contact_name_guarded(...)`, `_remember_contacts_by_id(...)`, `_repair_send_email_contact_recipient(...)`, `_repair_confirmation_contact_recipients(...)` | Preserve recipient/contact-subject roles instead of relying on latest-contact aliases. Repair only when grounded contact IDs and email ownership prove the recipient mismatch. | Synthetic two-contact email tests plus train contact/email slices. |
 | P0 | `select_charging_plug(...)`, `_remember_selected_poi(...)`, `_current_or_referred_selected_charging_poi(...)`, `_repair_charging_calculation_station(...)`, `_repair_charging_station_plug_pair(...)`, `_repair_route_endpoint_to_selected_poi(...)`, `set_new_navigation_via_stop(...)` | Keep selected charging station identity stable across plug selection, charge-time calculation, provider call, and navigation-through-stop setup. Do not select a different POI from raw text or convenience. | Synthetic multi-turn POI/charger flow; charging/navigation train slices. |
 | P0 | `set_new_navigation_via_stop(...)`, `select_route(...)`, `_repair_route_ids_for_recorded_selection(...)`, `_repair_route_ids_for_current_request_via(...)`, `_repair_or_block_route_chain(...)`, `set_new_navigation_guarded(...)` | Make two-leg navigation through a selected stop complete both route legs and the final `set_new_navigation(...)`. Preserve explicit final-leg route selection by route ID, alias, or `name_via` only against grounded candidates. | Multi-leg navigation unit tests and route-through-stop train slices. |
@@ -100,14 +101,15 @@ surface and validation target.
 | P1 | `get_weather_at_route_arrival(...)`, `get_weather_guarded(...)`, `select_route_by_user_preferences(...)`, `set_new_navigation_guarded(...)` | For weather-conditioned navigation, use route-arrival time weather and preserve explicit or stored route preferences after the weather branch is resolved. | Weather-conditioned navigation synthetic tests and train weather slices. |
 | P1 | `navigate_by_arrival_weather(...)`, `navigate_to_poi_by_arrival_weather(...)`, `navigate_to_poi_unless_arrival_weather(...)`, `set_navigation_conditioned_on_arrival_weather(...)` | For primary/fallback weather navigation, make the whole protocol one helper: select primary route, check primary arrival-time weather, then set primary/fallback or primary-POI navigation with the model-supplied POI and route preferences. | Synthetic primary-clear and fallback-blocked tests plus weather-conditioned train slices. |
 | P1 | `search_charging_stations_on_active_route(...)`, `search_charging_stations_on_route(...)`, `find_charging_stop_on_active_route_by_soc(...)`, `estimate_charging_stops_for_route_by_soc_window(...)`, `_abort_if_unknown_charging_range_blocks(...)` | Require grounded route kilometer/SOC/range facts for charging math. Translate explicit `require_available=True` to the official filter only when the live schema supports it. Unknown range should be a terminal limitation for the current range calculation. | EV/range unit tests and train charging-route slices. |
+| P1 | `send_email(...)`, `handle_pending_confirmation(...)`, `_long_route_email_needs_charging_facts_result(...)`, `_post_charge_email_needs_distance_by_soc_result(...)`, `_pending_send_email_confirmation(...)` | Long EV route/travel-detail emails should not reach confirmation before route distance, current range, and any requested or required charging-plan facts are grounded. This must block incomplete route-only drafts without choosing current-location or en-route charging from raw user wording. | Synthetic long-route email tests: route-only draft blocked before range read; insufficient range asks/plans charging strategy before confirmation; completed grounded charging plan can be confirmed and sent. |
 | P1 | `set_occupied_reading_lights(...)`, `set_exterior_lights_safe(...)`, `set_occupied_seat_heating(...)` | Keep cabin/reading lights out of exterior-light policy helpers. Separate explicit front-seat heating from whole-cabin occupied/unoccupied optimization. | Synthetic occupancy and reading-light/heating tests. |
 | P1 | `turn_off_unoccupied_seat_heating()` | For energy-saving seat-heating cleanup, read occupancy and current heating, then turn off only unoccupied heatable front seats. Unknown current level on an unoccupied heatable front seat should not hard-stop; setting level 0 is the safe cleanup action. | Synthetic occupancy/current-level tests, including unavailable current heating for an unoccupied front seat. |
-| P1 | `set_occupied_reading_lights(...)`, new or tightened `set_reading_lights_by_occupancy(...)`, optional `_repair_reading_light_occupancy_sequence(...)` | Reading-light occupancy optimization must compute the desired final state once and avoid contradictory on/off calls for the same occupied seat. It should turn on occupied supported reading lights and turn off unoccupied supported reading lights only when requested, using occupancy and current light state when available. | Synthetic occupancy/light-state tests with occupied front, occupied rear, unoccupied front, and mixed current-light states. |
+| P1 | `set_occupied_reading_lights(...)`, `set_reading_lights_by_occupancy(...)` | Reading-light occupancy optimization must compute the desired final state once and avoid contradictory on/off calls for the same occupied seat. It should turn on occupied supported reading lights and turn off unoccupied supported reading lights only when requested, using occupancy and current light state when available. | Synthetic occupancy/light-state tests with occupied front, occupied rear, unoccupied front, and mixed current-light states. |
 | P1 | `present_climate_comfort_options(...)`, `increase_fan_speed(...)`, `decrease_fan_speed(...)`, `get_climate_settings` wrapper/preflight | Broad air/comfort clarification should first read current climate state when the user asks for options or when the answer depends on current fan/AC/circulation. The helper should expose the current fan speed in the clarification so a follow-up can set or change fan speed without missing the required read. | Synthetic stale-air/comfort tests and train broad-control slices. |
 | P1 | `send_contact_details_to_contact(...)`, `get_contact_details(...)`, `handle_pending_confirmation(...)`, `_repair_send_email_contact_recipient(...)` | Contact-details email flow needs a single model-facing helper/example that resolves recipient and subject contacts, reads both email/details in one tool call when possible, drafts the message, asks confirmation, and sends after yes. The runtime should not infer recipient/subject from raw text; it should use explicit helper arguments and grounded contact records. | Synthetic two-contact email flow, confirmation-send tests, and contact/email train slices. |
-| P1 | `set_occupied_seat_heating(...)`, `turn_off_unoccupied_seat_heating()`, new or expanded `optimize_seat_heating_by_occupancy(...)`, `sync_climate_zone(...)`, `set_climate_temperature_safe(...)` | Seat/climate efficiency workflows need one helper path that reads occupancy, current seat heating, and current temperature, then applies explicit occupied/unoccupied heating and temperature-sync requests without over-applying to unsupported rear seats. Unknown current heating on a target to be turned off can be safely set to 0; unknown heating on an occupied target should not block setting the requested level. | Synthetic occupied/unoccupied front/rear seat tests, unknown current-level tests, temperature-sync tests. |
+| P1 | `set_occupied_seat_heating(...)`, `turn_off_unoccupied_seat_heating()`, `optimize_seat_heating_by_occupancy(...)`, `sync_climate_zone(...)`, `set_climate_temperature_safe(...)` | Seat/climate efficiency workflows need helper paths that read occupancy and current seat heating, then apply explicit occupied/unoccupied heating requests without over-applying to unsupported rear seats. Unknown current heating on an explicit target does not block setting the requested final level. | Preserve synthetic occupied/unoccupied front/rear seat tests, unknown current-level tests, and temperature-sync tests. |
 | P1 | `navigation_replace_final_destination_guarded(...)`, `navigation_delete_waypoint_guarded(...)`, `select_route(...)`, `select_route_by_user_preferences(...)`, route narration helpers | Route edits must preserve selected route identity, but default-fastest policy should be applied immediately only when no user route-option request or explicit non-default choice is pending. Narration must include toll metadata accurately and not describe toll routes as no-toll. | Route-edit tests for default fastest, explicit alternatives, non-default via-road choice, and toll/no-toll narration. |
-| P1 | `set_navigation_via_route_stop_with_open_poi(...)`, `set_new_navigation_via_stop(...)`, `navigation_add_one_waypoint_guarded(...)`, route-stop completion guards | If navigation is already active and the user adds a stop satisfying route-position constraints, the helper should either emit the expected waypoint-add mutation or a complete two-leg replacement, but must not merely claim a stop was added after only calculating routes. | Synthetic active-navigation route-stop tests and train route-stop/charging/food slices. |
+| P1 | `set_navigation_via_route_stop_with_open_poi(...)`, `set_new_navigation_via_stop(...)`, `navigation_add_one_waypoint_guarded(...)`, route-stop completion guards | Completion-claim guarding is implemented: stop/waypoint-added text is blocked unless a navigation mutation succeeded. Remaining work is the positive mutation path: if navigation is already active and the user adds a stop satisfying route-position constraints, the helper should emit the expected waypoint-add mutation or a complete two-leg replacement instead of leaving the model to compose it manually. | Synthetic active-navigation route-stop tests and train route-stop/charging/food slices. |
 | P2 | `get_route_options(...)`, `select_route_by_user_preferences(...)`, route presentation helpers | Route presentations must disclose `includes_toll` accurately for each named route. If a route preference says no-toll within a threshold, the selector should use grounded route durations/toll fields and the response should not label a toll route as no-toll. | Unit tests for fastest-toll vs slower-no-toll alternatives and no-toll-within-threshold selection. |
 | P2 | `send_email(...)`, `handle_pending_confirmation(...)`, `_has_successful_email_send(...)`, `_pending_send_email_confirmation(...)`, `_ungrounded_email_completion_response(...)` | Block "email sent" claims until the evaluator-visible `send_email(...)` succeeds; confirmation prompts are not completed sends. | Email completion-claim unit tests. |
 
@@ -184,8 +186,7 @@ Validation:
 
 Affected helpers and tools:
 - `set_occupied_reading_lights(...)`
-- `set_reading_lights_by_occupancy(...)` if added
-- `_repair_reading_light_occupancy_sequence(...)` if added
+- `set_reading_lights_by_occupancy(...)`
 - `set_exterior_lights_safe(intent=...)`
 - `get_reading_lights_status(...)`
 - `set_reading_light(...)`
@@ -194,7 +195,7 @@ Affected helpers and tools:
 - `get_seat_heating_level(...)`
 - `set_seat_heating(...)`
 - `turn_off_unoccupied_seat_heating()`
-- `optimize_seat_heating_by_occupancy(...)` if added
+- `optimize_seat_heating_by_occupancy(...)`
 - `sync_climate_zone(...)`
 
 Roadmap:
@@ -215,6 +216,11 @@ Roadmap:
   even if the current level is unknown. For occupied front seats, setting an
   explicitly requested heating level is safe even if the current level is
   unknown.
+- For combined occupied/unoccupied final-state requests, use
+  `optimize_seat_heating_by_occupancy(...)` with explicit target levels. It
+  computes one final level per heatable front zone, can use `ALL_ZONES` only
+  when both front zones need the same final level, and reports occupied rear
+  seats as unsupported rather than inventing rear seat-heating controls.
 - If a rear passenger asks whether heating is active and rear seats do not have
   heat controls, the helper should answer that seat heating is unavailable for
   that rear seat and use climate-temperature fallback only if the user asks for
@@ -228,7 +234,7 @@ Roadmap:
 Validation:
 - Synthetic occupancy maps for all front/rear seats.
 - Unit tests proving rear aliases do not duplicate reading-light actions.
-- Unit tests for explicit seat scope and whole-cabin optimization.
+- Unit tests for explicit seat scope and combined occupied/unoccupied optimization.
 - Unit tests for mixed reading-light final states, including occupied rear and
   unoccupied front seats.
 - Unit tests for unknown current heating on unoccupied and occupied front-seat
@@ -565,6 +571,19 @@ Held-out validation signal:
   expected mutation was emitted. This is a completion-claim plus mutation-shape
   issue, not a reason to hardcode any route stop.
 
+Current implementation status:
+- The completion-claim half is implemented in
+  `_ungrounded_navigation_completion_response(...)` /
+  `_claims_navigation_completed(...)`. It now catches assistant text claiming a
+  stop or waypoint was added to a route/navigation before any successful
+  evaluator-visible navigation mutation.
+- Unit coverage exists for stop-added and waypoint-added claims before and
+  after successful navigation mutation.
+- The positive active-navigation mutation path remains open. The runtime should
+  still prefer an explicit helper/tool path chosen from grounded route and POI
+  facts; it should not infer the intended stop, route kilometer, or POI category
+  from raw user-message text.
+
 ### 8. Keep retry-storm controls provider-scoped
 
 Affected runtime code:
@@ -580,11 +599,16 @@ Roadmap:
   was tested.
 - Do not apply provider-specific sampling overrides to other APIs unless those
   APIs are tested with the same behavior.
+- On any failed REPL execution, retry from stable context with a compact error
+  note instead of retaining the failed assistant code and full scratchpad
+  observation in model context.
 
 Validation:
 - Unit tests for repeated identical REPL errors.
 - Provider-path tests proving only Cerebras receives the retry temperature
   override.
+- Unit test proving failed-code text, `Observation from execute_python`, and
+  full `SCRATCHPAD` observations are absent from the next retry prompt.
 - Call-count audits on full train runs.
 
 ## Active Helper/Code Issues
@@ -604,20 +628,21 @@ each item exists and how to validate it without copying held-out task details.
 
 | Issue class | Primary helpers or wrappers | Current status | Safe next move |
 | --- | --- | --- | --- |
-| Contact role drift / contact-details email | `send_contact_details_to_contact(...)`, `get_contact_details(..., role=...)`, `get_contact_id_by_contact_name_guarded(...)`, `_remember_contacts_by_id(...)`, `_remember_contact_role(...)`, `_repair_send_email_contact_recipient(...)`, `_repair_confirmation_contact_recipients(...)`, `handle_pending_confirmation(...)` | Implemented for direct helper use, but held-out run exposed helper-selection gap in multi-turn recipient/subject contact-detail email. | Improve skill/prompt examples and add synthetic test where recipient is resolved first, subject contact later, confirmation sends stored draft. |
+| Contact role drift / contact-details email | `send_contact_details_to_contact(...)`, `get_contact_details(..., role=...)`, `get_contact_id_by_contact_name_guarded(...)`, `_remember_contacts_by_id(...)`, `_remember_contact_role(...)`, `_repair_send_email_contact_recipient(...)`, `_repair_confirmation_contact_recipients(...)`, `handle_pending_confirmation(...)` | Implemented for direct helper use and adjacent-turn manual role flows. Recipient/subject repair uses explicit grounded roles from the current or immediately previous user turn and ignores older stale roles. | Preserve same-turn, adjacent-turn, and stale-role negative unit tests; re-run contact/email train slices when doing full helper regression. |
 | Email success claims | `send_email(...)`, `handle_pending_confirmation(...)`, `_has_successful_email_send(...)`, `_pending_send_email_confirmation(...)`, `_ungrounded_email_completion_response(...)` | Implemented and unit-tested. Confirmation success is terminal for the current Python execution. | Preserve claim-before-send, confirmation-pending, successful-send, and terminal-confirmation tests. |
 | Interior vs exterior light routing | `set_exterior_lights_safe(...)`, `set_occupied_reading_lights(...)`, `get_reading_lights_status(...)`, `set_reading_light(...)`, `get_seats_occupancy(...)` | Implemented and target-validated; broad "lights" remains a regression risk. | Keep examples domain-based: cabin/reading context goes to reading-light helpers; exterior visibility goes to exterior helpers. Do not parse raw text inside helpers. |
-| Reading-light occupancy final-state planning | `set_occupied_reading_lights(...)`, `get_seats_occupancy(...)`, `get_reading_lights_status(...)`, `set_reading_light(...)`, optional `set_reading_lights_by_occupancy(...)` | Implemented for canonical aliases, but held-out run exposed contradictory on/off calls in one occupancy optimization flow. | Compute desired final state once, then emit only minimal necessary calls. Add occupied rear/unoccupied front synthetic tests. |
-| Broad climate/airflow state read | `present_climate_comfort_options(...)`, `get_climate_settings(...)`, `increase_fan_speed(...)`, `decrease_fan_speed(...)` | Proposed from held-out evidence. Current helper can ask good options without grounding current climate state first. | Make broad option helper state-aware and side-effect-free; validate with stale-air/fan-level synthetic tests. |
-| Occupied/unoccupied seat heating and climate sync | `set_occupied_seat_heating(...)`, `turn_off_unoccupied_seat_heating()`, `get_seats_occupancy(...)`, `get_seat_heating_level(...)`, `set_seat_heating(...)`, `sync_climate_zone(...)`, `set_climate_temperature_safe(...)` | Partially implemented; latest train slice passed, but held-out run exposed broader optimization and unsupported-rear-seat gaps. | Add occupancy/heating optimizer tests for unknown levels, rear unsupported seats, and target-zone temperature matching. |
+| Reading-light occupancy final-state planning | `set_occupied_reading_lights(...)`, `set_reading_lights_by_occupancy(...)`, `get_seats_occupancy(...)`, `get_reading_lights_status(...)`, `set_reading_light(...)` | Implemented with a dedicated final-state helper. It reads occupancy, reads current light state when available, computes one desired state per canonical position, and emits at most one setter per position. | Preserve synthetic tests for occupied/unoccupied mixed final states, unknown occupancy, and no-status fallback. |
+| Broad climate/airflow state read | `present_climate_comfort_options(...)`, `get_climate_settings(...)`, `increase_fan_speed(...)`, `decrease_fan_speed(...)` | Implemented and target-validated. The broad option helper reads current climate state when available, reports fan/AC/circulation/airflow facts, and remains side-effect-free. | Preserve synthetic tests for grounded fan speed, unknown fan speed, and no setter calls; latest broad-control train slice is `5/5`. |
+| Occupied/unoccupied seat heating and climate sync | `set_occupied_seat_heating(...)`, `turn_off_unoccupied_seat_heating()`, `optimize_seat_heating_by_occupancy(...)`, `get_seats_occupancy(...)`, `get_seat_heating_level(...)`, `set_seat_heating(...)`, `sync_climate_zone(...)`, `set_climate_temperature_safe(...)` | Implemented for explicit-zone heating, unoccupied cleanup, and combined occupied/unoccupied final states. The optimizer reads occupancy/current levels when available, emits one final action per heatable front zone, and reports occupied rear seats as unsupported. | Preserve synthetic mixed-final-state, ALL_ZONES, unknown current-level, rear-unsupported, and temperature-sync tests. |
 | Route-edit default-fastest overfit | `navigation_delete_waypoint_guarded(...)`, `navigation_replace_one_waypoint_guarded(...)`, `navigation_replace_final_destination_guarded(...)`, `get_route_options(...)`, `select_route(...)`, `select_route_by_user_preferences(...)`, `_single_segment_final_destination_needs_route_choice(...)` | Implemented/preserved where safe, but held-out run still shows route-option/default-route tension. | Preserve explicit options/non-fastest choices; apply default-fastest only when no route-option request or grounded non-default choice is pending. Do not add hidden fastest/shortest repairs. |
 | Route narration and toll facts | `_remember_route_selection(...)`, `_route_narration_record(...)`, `_store_route_narration_sequence(...)`, `_narrate_from_route_ids(...)`, `_append_pending_route_narration(...)`, `_fastest_route(...)`, `_shortest_route(...)`, `select_route_by_user_preferences(...)` | Partially implemented; held-out run exposed toll/no-toll wording risk. | Generate toll disclosure from grounded `includes_toll`; add no-toll-within-threshold tests and avoid calling toll routes no-toll. |
 | POI identity drift | `select_poi(..., role=...)`, `select_charging_plug(...)`, `select_poi_at_location_open_at_route_arrival(...)`, `set_new_navigation_via_stop(...)`, `set_navigation_via_route_stop_with_open_poi(...)`, `_remember_selected_poi(...)`, `_selected_poi_role_key(...)`, `_current_or_referred_selected_charging_poi(...)`, `_repair_route_endpoint_to_selected_poi(...)` | Implemented with role-keyed persistence, focused tests, and latest full helper-regression passes on `base_84`/`base_98`. | Preserve role-keyed validation without overriding explicit grounded POI changes. |
 | Charging/range fact omission | `get_charging_specs_and_status(...)`, `find_charging_stop_on_active_route_by_soc(...)`, `search_charging_stations_on_active_route(...)`, `search_charging_stations_on_route(...)`, `estimate_charging_stops_for_route_by_soc_window(...)`, `_abort_if_unknown_charging_range_blocks(...)` | Implemented for known train-safe surfaces; latest full helper regression passed both hallucination charging targets. | Preserve fact requirements for range/battery claims; do not force a charger strategy when the model has not grounded it. |
-| Active route-stop composition | `set_navigation_via_route_stop_with_open_poi(...)`, `set_new_navigation_via_stop(...)`, `navigation_add_one_waypoint_guarded(...)`, `set_new_navigation_guarded(...)`, `_has_successful_navigation_mutation(...)`, `_ungrounded_navigation_completion_response(...)` | Proposed from held-out evidence; current helper covers corrected train flow but active-navigation mutation shape still needs work. | Add synthetic active-route stop tests; require successful waypoint-add or full route-chain mutation before completion claims. |
+| EV route-email completeness | `send_email(...)`, `handle_pending_confirmation(...)`, `_long_route_email_needs_charging_facts_result(...)`, `_post_charge_email_needs_distance_by_soc_result(...)`, `_pending_send_email_confirmation(...)` | Implemented for the observed train-safe gap. Grounded charging facts are preserved once known; incomplete charging-need claims are blocked; and route/travel drafts that omit a known range insufficiency are blocked when route distance exceeds current range and no charging plan exists. | Preserve the unit tests for route-only draft before range read, range-only insufficient draft, acknowledged insufficiency without invented charger, selected charging-plan details, and post-charge range. Latest target evidence: `base_74` 3/3, touched-helper slice 4/4, `hallucination_72` 3/3. |
+| Active route-stop composition | `set_navigation_via_route_stop_with_open_poi(...)`, `set_new_navigation_via_stop(...)`, `navigation_add_one_waypoint_guarded(...)`, `set_new_navigation_guarded(...)`, `_has_successful_navigation_mutation(...)`, `_ungrounded_navigation_completion_response(...)` | Partially implemented. Completion claims for added stops/waypoints are now guarded and unit-tested. Current helpers cover corrected train flow, but active-navigation positive mutation shape still needs work. | Add synthetic active-route stop tests; preserve successful-waypoint/full-route-chain requirement before completion claims. |
 | Weather-conditioned navigation | `get_weather_at_route_arrival(...)`, `navigate_by_arrival_weather(...)`, `navigate_to_poi_by_arrival_weather(...)`, `navigate_to_poi_unless_arrival_weather(...)`, `set_navigation_conditioned_on_arrival_weather(...)`, `get_weather_guarded(...)`, `set_new_navigation_guarded(...)`, `select_route_by_user_preferences(...)` | Implemented. Latest target fixed `disambiguation_53`; latest full helper regression passed `disambiguation_53` and remains unstable only on `base_96`. | Preserve explicit/stored route preferences and branch-response obligations; do not add hidden route-preference repairs that override valid reasoning. |
 | Helper-blocked valid reasoning audit | `_repair_send_email_contact_recipient(...)`, `_repair_confirmation_contact_recipients(...)`, `_repair_charging_calculation_station(...)`, `_repair_charging_station_plug_pair(...)`, `_repair_route_endpoint_to_selected_poi(...)`, `_repair_route_ids_for_recorded_selection(...)`, `_repair_route_ids_for_current_request_via(...)`, `_resolve_route_arg(...)`, `_resolve_explicit_or_unique_route_arg(...)` | Current changed repairs have focused tests or regression evidence. | Add "valid non-default model choice is preserved" tests whenever a repair is changed. |
-| Retry storm / sequential-call waste | `CoroutineAgent._retry_storm_error_signature(...)`, `_repeated_repl_error_limit(...)`, `_repl_retry_temperature_override(...)`, `provider.py` Cerebras call path | Implemented and unit-tested. | Keep provider-specific retry temperature scoped to Cerebras; audit future full runs for repeated REPL syntax/indentation failures. |
+| Retry storm / sequential-call waste | `CoroutineAgent._retry_storm_error_signature(...)`, `_repeated_repl_error_limit(...)`, `_repl_retry_temperature_override(...)`, `_compact_repl_retry_message(...)`, `provider.py` Cerebras call path | Implemented and unit-tested. Failed REPL executions now retry from stable context with only a compact error note; failed assistant code and full scratchpad observations are not retained in the next model prompt. | Keep provider-specific retry temperature scoped to Cerebras; audit future full runs for repeated REPL syntax/indentation failures and prompt-token spikes on compound tasks. |
 
 ### Contact role drift in multi-contact email flows
 
@@ -663,15 +688,24 @@ Current implementation status:
   common "send A's details to B" shape. It requires explicit grounded recipient
   and subject contact IDs, builds the message from grounded contact fields, and
   routes through normal `send_email(...)` confirmation.
-- `get_contact_details(..., role=...)` now stores same-turn contact role facts
-  such as `email_recipient` and `contact_details_subject`. The confirmation
-  guard uses those explicit roles to repair a single-recipient `send_email(...)`
-  when the selected address belongs to the subject contact instead of the
-  recipient contact.
+- `get_contact_details(..., role=...)` now stores contact role facts such as
+  `email_recipient` and `contact_details_subject` with the user-turn index. The
+  confirmation guard uses those explicit roles to repair a single-recipient
+  `send_email(...)` when the selected address belongs to the subject contact
+  instead of the recipient contact. The repair is bounded to the current user
+  turn plus the immediately previous user turn, so old roles do not rewrite
+  unrelated later emails.
 - Existing `last_contacts` remains a convenience alias. Role repair is
   intentionally narrow: it does not infer roles from raw user text, and it does
-  not rewrite arbitrary emails unless grounded current-turn roles prove the
+  not rewrite arbitrary emails unless grounded recent explicit roles prove the
   recipient/subject mismatch.
+
+Current validation:
+- Focused unit tests cover same-turn recipient/subject repair, adjacent-turn
+  recipient-first repair through `handle_pending_confirmation()`, and the
+  stale-role negative case.
+- The contact/calendar train regression slice passed `7/7`:
+  `output/run_configs/20260629-155801__run_configs-coroutine_contact_calendar_regression_cerebras_gemini_1__train-trials1-base3ids-hall1ids-dis3ids__gpt-oss-120b.json`.
 
 ### Email completion claims without `send_email`
 
@@ -754,6 +788,8 @@ Current implementation status:
   interior-light domain, not an exterior-light helper path.
 - Added `set_occupied_reading_lights(...)` for occupied-seat reading-light
   requests with an explicit `on` boolean.
+- Added `set_reading_lights_by_occupancy(...)` for mixed occupied/unoccupied
+  final-state requests.
 
 ### Reading-light alias over-action
 
@@ -762,12 +798,13 @@ Observed general failure:
   calls than necessary, including duplicate or alias rear positions.
 
 Why this is a helper/code issue:
-- There is no dedicated helper that maps occupied seat facts to the supported
-  reading-light control positions with a minimal, non-duplicated action set.
+- Reading-light logic needs a dedicated helper path that maps occupied seat
+  facts to supported reading-light control positions with a minimal,
+  non-duplicated action set.
 
 Relevant code surfaces:
-- Candidate new helper, if we add one:
-  `set_occupied_reading_lights(...)` or similarly named workspace helper.
+- `set_occupied_reading_lights(...)`
+- `set_reading_lights_by_occupancy(...)`
 - Raw tools to wrap: `get_seats_occupancy(...)`, `get_reading_lights_status(...)`,
   and `set_reading_light(...)`.
 - Helper exposure requires adding the name to `WORKSPACE_HELPER_NAMES`, binding
@@ -775,10 +812,12 @@ Relevant code surfaces:
   `Skills/car_domain_120b.md`.
 
 General fix direction:
-- Add or document a helper for occupied-seat reading-light adjustment.
+- Preserve the helper path for occupied-seat reading-light adjustment.
 - Normalize seat occupancy keys to exactly the supported reading-light positions.
 - Avoid setting alias positions when the canonical position has already been
   handled.
+- For mixed occupied/unoccupied final-state requests, compute desired states
+  before making setter calls and emit at most one call per canonical position.
 
 Train-safe validation:
 - Synthetic occupancy maps covering each front/rear seat.
@@ -788,6 +827,9 @@ Current implementation status:
 - Added `set_occupied_reading_lights(...)`, which reads occupancy and emits each
   occupied canonical reading-light position once. Rear aliases are normalized to
   `DRIVER_REAR` and `PASSENGER_REAR`.
+- Added `set_reading_lights_by_occupancy(...)`, which reads occupancy plus
+  current reading-light state when available and emits only necessary final-state
+  calls.
 
 ### Occupied-seat heating trace mismatch
 
@@ -814,13 +856,15 @@ Relevant code surfaces:
   `get_seat_heating_level(...)`, and `set_seat_heating(...)`.
 - Related prompt/skill guidance for explicit seat scope versus all occupied
   front seats.
+- Combined optimizer: `optimize_seat_heating_by_occupancy(...)`.
 
 General fix direction:
-- Separate two helper modes:
+- Separate helper modes:
   - Explicit front-zone scope: only the supplied front zone.
-  - Whole-cabin optimization: read occupancy and current heating state, set
-    supported occupied zones appropriately, and clearly explain unsupported rear
-    heating when needed.
+  - Unoccupied cleanup: turn off only unoccupied heatable front seats.
+  - Combined final-state optimization: read occupancy and current heating state,
+    apply explicit occupied/unoccupied target levels to heatable front seats, and
+    clearly explain unsupported rear heating when needed.
 - Prefer broad supported tool zones only when that exactly matches the resolved
   action and does not heat unsupported/unwanted seats.
 - Require `get_seat_heating_level` in optimization flows that ask whether a seat
@@ -828,7 +872,7 @@ General fix direction:
 
 Train-safe validation:
 - Unit tests for explicit front-zone calls.
-- Unit tests for whole-cabin occupied/unoccupied optimization.
+- Unit tests for combined occupied/unoccupied optimization.
 - Unit tests with occupied rear seats and non-heatable rear-seat explanation.
 
 Current implementation status:
@@ -839,6 +883,18 @@ Current implementation status:
   seat, the helper still sets that seat to 0 to make sure it is off. This keeps
   unknown-value handling aligned with safe cleanup behavior rather than turning
   missing state into a hard stop.
+- Added `optimize_seat_heating_by_occupancy(...)` for explicit occupancy-based
+  final states. It preserves explicit model levels, skips already-correct front
+  zones when current levels are known, sets explicit targets directly when
+  current levels are unknown, uses `ALL_ZONES` only when both front zones need
+  the same final level, and reports occupied rear seats as unsupported.
+
+Current validation:
+- Focused unit tests cover mixed occupied/unoccupied front final states,
+  `ALL_ZONES` for same front target, unknown current target levels, and occupied
+  rear unsupported reporting.
+- Seat/climate train regression passed `5/5`:
+  `output/run_configs/20260629-160705__run_configs-coroutine_seat_climate_regression_cerebras_gemini_1__train-trials1-base3ids-hall0-dis2ids__gpt-oss-120b.json`.
 
 ### Route-edit default-fastest overfit
 
@@ -1125,6 +1181,20 @@ Latest full train evidence:
 - No new helper was found overriding grounded valid model reasoning in this full
   run. The remaining safe work is helper selection/prompting and response
   wording, not runtime inference from raw user text.
+
+Latest affected-target evidence:
+- `output/run_configs/20260629-162757__run_configs-coroutine_target_helper_fixes_cerebras_gemini_1__train-trials1-base4ids-hall1ids-dis6ids__gpt-oss-120b.json`
+  scored `8/11` raw on the current affected helper slice.
+- All four base targets passed, and the route-preference preservation target
+  passed.
+- The remaining misses do not justify task-shaped helper logic. One
+  AC/window/fan miss executed the expected tool sequence and failed only by the
+  user simulator's hallucination marker. One corrected-destination route/POI
+  flow passed after user correction but raw-failed on the initial unsupported
+  lookup. One waypoint-replacement flow correctly performed the replacement,
+  then the model chose a location-based charging search instead of the existing
+  active-route charging helper on a follow-up. The safe follow-up is helper
+  selection/ergonomics, not user-message regex repair.
 
 Held-out full test evidence, sanitized for train iteration:
 - `output/run_configs/20260626-234701__run_configs-coroutine_full_test_cerebras_gemini_1__test-trials1-baseall-hallall-disall__gpt-oss-120b.json`
