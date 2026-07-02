@@ -19,14 +19,15 @@ General rules:
   write the email from those returned facts.
 - If new tool results change the draft after a confirmation prompt, call
   `send_email(...)` again with the updated final `content_message`. The old
-  confirmation covers only the old body.
+  confirmation covers only the old body, so a manual "shall I send it?"
+  question is not enough.
 - Do not set navigation just to prepare an email. For planning-only email work,
   keep routes as grounded route facts. Search for charging/POI stops only after
   the stop strategy is resolved by the user, policy, stored preference, or a
   previous grounded selection.
 - If `send_email` or a required recipient field is unavailable, report that
   limitation through the wrapper/helper path instead of continuing to perfect
-  the message.
+  a message that cannot be sent.
 
 For route or travel emails:
 
@@ -35,6 +36,9 @@ For route or travel emails:
 - If the route is for an EV trip and current range may matter, read
   `get_charging_specs_and_status()` before the first email confirmation. Route
   distance alone is not enough to decide whether charging should be mentioned.
+- If remaining range is unavailable after `get_charging_specs_and_status()`,
+  say that charging-stop planning cannot be completed from the available car
+  data instead of sending an incomplete route-only email.
 - If route distance is greater than current remaining range, do not treat that
   as permission to invent a charging strategy. Do not choose current-location
   charging, along-route charging, a route kilometer, a station, a plug, or a
