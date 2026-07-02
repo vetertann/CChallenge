@@ -7184,6 +7184,17 @@ class GuardTests(unittest.TestCase):
             "routes": [{"route_id": "R_old"}],
         },
     }
+    NAV_3WP = {
+        "navigation_active": True,
+        "waypoints_id": ["loc_a", "loc_b", "loc_c"],
+        "details": {
+            "waypoints": [
+                {"id": "loc_a", "name": "Aix"},
+                {"id": "loc_b", "name": "Bonn"},
+                {"id": "loc_c", "name": "Cologne"},
+            ],
+        },
+    }
     UNKNOWN_NAV_STRUCTURE = {
         "navigation_active": True,
         "waypoints_id": "unknown",
@@ -7403,6 +7414,129 @@ class GuardTests(unittest.TestCase):
         self.assertIn("fastest route", result.response_text)
         self.assertIn("A11, A51", result.response_text)
         self.assertIn("alternative", result.response_text.casefold())
+
+    def test_route_edit_attention_marks_only_intermediate_waypoint_deletion_shape(self):
+        ws, _ = self.make({}, {})
+        ws.remember_entity(
+            "navigation_state",
+            {
+                "navigation_active": True,
+                "waypoint_order": ["loc_a", "loc_b", "loc_c"],
+                "waypoint_names": ["Aix", "Bonn", "Cologne"],
+                "waypoint_count": 3,
+                "is_multi_stop": True,
+            },
+        )
+
+        ws._refresh_route_edit_attention()
+
+        attention = ws.scratchpad["facts"].get("route_edit_attention")
+        self.assertIsInstance(attention, str)
+        self.assertIn("post-edit route becomes a single direct", attention)
+        self.assertIn("Bonn", attention)
+
+    def test_delete_only_mid_waypoint_requires_route_choice_when_multiple_routes(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+            ),
+            "navigation_delete_waypoint": tool_schema(
+                "navigation_delete_waypoint",
+                {
+                    "waypoint_id_to_delete": {"type": "string"},
+                    "route_id_without_waypoint": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": ("SUCCESS", self.NAV_3WP),
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {
+                    "routes": [
+                        {
+                            "route_id": "R_fast",
+                            "start_id": "loc_a",
+                            "destination_id": "loc_c",
+                            "name_via": "A11, A51",
+                            "alias": ["fastest", "first"],
+                        },
+                        {
+                            "route_id": "R_short",
+                            "start_id": "loc_a",
+                            "destination_id": "loc_c",
+                            "name_via": "B634, K322",
+                            "alias": ["shortest", "second"],
+                        },
+                    ]
+                },
+            ),
+            "navigation_delete_waypoint": ("SUCCESS", {"waypoint_deleted": True}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "navigation_delete_waypoint(waypoint_id_to_delete='loc_b')\n"
+            "respond('Done, Bonn has been removed.')"
+        )
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("Which route should I use?", result.response_text)
+        self.assertIn("A11, A51", result.response_text)
+        self.assertIn("B634, K322", result.response_text)
+        self.assertIsNone(self._emitted(ws, "navigation_delete_waypoint"))
+        self.assertEqual(
+            ws.scratchpad["gates"]["waypoint_delete_route_choice_guard"]["status"],
+            "BLOCKED",
+        )
+
+    def test_delete_only_mid_waypoint_uses_single_available_route(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+            ),
+            "navigation_delete_waypoint": tool_schema(
+                "navigation_delete_waypoint",
+                {
+                    "waypoint_id_to_delete": {"type": "string"},
+                    "route_id_without_waypoint": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": ("SUCCESS", self.NAV_3WP),
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {
+                    "routes": [
+                        {
+                            "route_id": "R_only",
+                            "start_id": "loc_a",
+                            "destination_id": "loc_c",
+                            "name_via": "A11",
+                            "alias": ["first"],
+                        },
+                    ]
+                },
+            ),
+            "navigation_delete_waypoint": ("SUCCESS", {"waypoint_deleted": True}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        ex.run("navigation_delete_waypoint(waypoint_id_to_delete='loc_b')")
+
+        args = self._emitted(ws, "navigation_delete_waypoint")
+        self.assertEqual(args["route_id_without_waypoint"], "R_only")
 
     def test_insert_mid_waypoint_derives_after_args(self):
         ws, ex = self._nav_edit_ws(

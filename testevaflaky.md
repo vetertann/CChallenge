@@ -39,6 +39,13 @@ are not active misses in the latest full Kimi/Cerebras public-test runs.
 because it persisted under GPT-5.5 and was never a fully clean action-correct
 trace.
 
+Additional current evidence:
+- `base_81` is now classified as a strong evaluator-inconsistency case. The
+  same waypoint-delete scenario has produced both sides of the contradiction:
+  fastest replacement passed policy but failed action matching, while
+  shortest-after-user-selection passed all action/tool checks but failed only
+  the policy LLM.
+
 ## Strong Eval-Side Cases
 
 ### `disambiguation_39`: confirmation simulator branch stops before required `send_email`
@@ -144,6 +151,71 @@ The current trace is action-correct and fails only on the policy judge.
 Do not fix by forcing fastest before showing options. That would violate the
 explicit route-options request and the organizer-confirmed interpretation from
 the analogous route-policy Q&A.
+
+### `base_81`: waypoint deletion route choice accepted by one evaluator component and rejected by another
+
+Classification: evaluator-policy/action-oracle inconsistency.
+
+Why this is evaluator-side:
+- The user asks to remove Stuttgart from an active Mannheim -> Stuttgart ->
+  Paris route.
+- The direct Mannheim -> Paris route lookup returns at least two valid options:
+  fastest `rll_man_par_341293` and shortest `rll_man_par_416568`.
+- The hidden simulator instruction says that if the assistant presents multiple
+  route options for the direct route, the user should choose the shortest one.
+- In one branch, the agent proactively chose fastest. The policy LLM accepted
+  the behavior, but the action oracle expected shortest.
+- In the latest branch, the agent presented options, the user chose shortest,
+  and the agent deleted Stuttgart using the shortest route. All action/tool
+  checks passed, but the policy LLM rejected it for not proactively choosing
+  fastest.
+
+Fastest branch evidence:
+
+Agent tool call:
+`navigation_delete_waypoint {"waypoint_id_to_delete": "loc_stu_828398", "route_id_without_waypoint": "rll_man_par_341293"}`
+
+Tool result:
+`{"status": "SUCCESS", "result": {"waypoint_deleted": true, "new_waypoints": ["loc_man_660365", "loc_par_405686"], "new_routes": ["rll_man_par_341293"]}}`
+
+Evaluator fields:
+- `r_policy = 1.0`
+- `r_tool_subset = 1.0`
+- `r_tool_execution = 1.0`
+- `r_actions = 0.0`
+
+Shortest-after-options branch evidence from
+`output/run_configs/20260702-194751__run_configs-coroutine_route_delete_test_cerebras_gemini_1__test-trials1-base1ids-hall0-dis1ids__gpt-oss-120b.json`:
+
+Assistant:
+`I found several direct routes from Mannheim to Paris. The fastest route is A35, B684, B808, 535.58 km, 6h 38m (route_id: rll_man_par_341293; fastest, first). The shortest route is B634, K322, L234, 534.14 km, 6h 42m (route_id: rll_man_par_416568; second, shortest). There are 1 other route options. Which route should I use for the direct drive after removing Stuttgart?`
+
+User simulator:
+`Let's go with the shortest one, please.`
+
+Agent tool call:
+`navigation_delete_waypoint {"waypoint_id_to_delete": "loc_stu_828398", "route_id_without_waypoint": "rll_man_par_416568"}`
+
+Evaluator fields:
+- `r_actions = 1.0`
+- `r_actions_intermediate = 1.0`
+- `r_actions_final = 1.0`
+- `r_tool_subset = 1.0`
+- `r_tool_execution = 1.0`
+- `r_policy = 0.0`
+
+Policy evaluator message:
+`The user asked to remove a waypoint, which resulted in a new single-segment route. The agent did not proactively take the fastest route as per policy, but instead presented multiple options and asked the user to choose.`
+
+Interpretation:
+The expected behavior is internally inconsistent across evaluator components.
+The action oracle and simulator branch accept shortest after route options; the
+policy LLM sometimes applies policy 022 as if the fastest route must be chosen
+proactively. Do not add task-specific code for this case. Keep the general
+agent behavior: when deleting the only intermediate waypoint leaves a single
+direct segment with multiple valid replacement routes, present options unless a
+user request, stored preference, prior accepted route, or unique route already
+selects one.
 
 ## Weaker Candidate
 

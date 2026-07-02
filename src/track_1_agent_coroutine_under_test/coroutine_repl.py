@@ -7982,7 +7982,10 @@ class CoroutineWorkspace:
         The required `route_id_without_waypoint` must connect the deleted
         waypoint's previous and next neighbours; a stale id raises
         `NavigationDeleteOneWaypoint_007`. Preserve a valid grounded route that
-        the model selected; otherwise derive the policy-default fastest route.
+        the model selected. If deleting the only intermediate waypoint leaves a
+        single direct segment and multiple connecting routes are available, ask
+        for route choice instead of silently applying the multi-stop fastest
+        default.
         """
 
         target = kwargs.get("waypoint_id_to_delete")
@@ -7999,6 +8002,7 @@ class CoroutineWorkspace:
             if 0 < index < len(order) - 1:  # a mid waypoint with both neighbours
                 previous_id = order[index - 1]
                 next_id = order[index + 1]
+                leaves_single_segment = len(order) - 1 == 2
                 supplied_route_id = kwargs.get("route_id_without_waypoint")
                 if self._route_id_connects(supplied_route_id, previous_id, next_id):
                     routes = self._known_routes_between(previous_id, next_id)
@@ -8007,6 +8011,38 @@ class CoroutineWorkspace:
                         supplied_route_id,
                         offer_alternatives=True,
                     )
+                elif leaves_single_segment:
+                    route_id, routes = self._resolve_explicit_or_unique_route_arg(
+                        supplied_route_id,
+                        previous_id,
+                        next_id,
+                    )
+                    if isinstance(route_id, str):
+                        kwargs = dict(kwargs, route_id_without_waypoint=route_id)
+                        self._store_route_narration(
+                            routes,
+                            route_id,
+                            selector=self._recorded_selector_for_route_id(route_id),
+                            offer_alternatives=True,
+                        )
+                    elif routes:
+                        self.scratchpad["gates"]["waypoint_delete_route_choice_guard"] = {
+                            "status": "BLOCKED",
+                            "waypoint_id_to_delete": target,
+                            "previous_waypoint_id": previous_id,
+                            "next_waypoint_id": next_id,
+                            "reason": (
+                                "deleting this waypoint leaves a single direct "
+                                "segment with multiple possible replacement routes"
+                            ),
+                        }
+                        self._abort_with_response(
+                            self._route_choice_prompt_for_waypoint_delete(
+                                previous_id,
+                                next_id,
+                                routes,
+                            )
+                        )
                 else:
                     route_id = self._fastest_route_id(previous_id, next_id)
                     if route_id:
@@ -8024,6 +8060,29 @@ class CoroutineWorkspace:
                 },
             )
         return result
+
+    def _route_choice_prompt_for_waypoint_delete(
+        self,
+        previous_id: str,
+        next_id: str,
+        routes: list[dict[str, Any]],
+    ) -> str:
+        previous = self._route_endpoint_label(previous_id) or previous_id
+        destination = self._route_endpoint_label(next_id) or next_id
+        displays: list[str] = []
+        for index, route in enumerate(routes[:3], start=1):
+            if not isinstance(route, dict):
+                continue
+            label = route.get("display") or self._route_display(route)
+            displays.append(f"{index}. {label}")
+        lead = (
+            f"Deleting that waypoint leaves a direct route from {previous} "
+            f"to {destination}, and there are multiple route options. "
+            "Which route should I use?"
+        )
+        if not displays:
+            return lead
+        return lead + " " + " ".join(displays)
 
     def _already_removed_result(self, tool_name: str, waypoint_id: str) -> dict[str, Any]:
         # The waypoint is not in the current route. Absence is a FACT, but it is
@@ -10887,8 +10946,10 @@ class CoroutineWorkspace:
         self._ensure_scratchpad_shape()
         state = self.scratchpad["entities"].get("navigation_state")
         if isinstance(state, dict) and state.get("stale") is not True:
+            self._refresh_route_edit_attention()
             return {"status": "CACHED", "navigation_state": copy.deepcopy(state)}
         if not self.tool_available("get_current_navigation_state"):
+            self._refresh_route_edit_attention()
             return {"status": "SKIPPED", "reason": "navigation state tool unavailable"}
 
         previous_source = self.last_source
@@ -10900,10 +10961,38 @@ class CoroutineWorkspace:
         finally:
             self.last_source = previous_source
         persisted = self.scratchpad["entities"].get("navigation_state")
+        self._refresh_route_edit_attention()
         return {
             "status": str(result.get("status") or "UNKNOWN"),
             "navigation_state": copy.deepcopy(persisted),
         }
+
+    def _refresh_route_edit_attention(self) -> None:
+        """Add state-derived route-edit reminders for the current model turn."""
+
+        self._ensure_scratchpad_shape()
+        facts = self.scratchpad["facts"]
+        facts.pop("route_edit_attention", None)
+        state = self.scratchpad["entities"].get("navigation_state")
+        if not isinstance(state, dict):
+            return
+        waypoint_order = state.get("waypoint_order") or state.get("waypoint_ids")
+        if not isinstance(waypoint_order, list) or len(waypoint_order) != 3:
+            return
+        waypoint_names = state.get("waypoint_names")
+        middle = None
+        if isinstance(waypoint_names, list) and len(waypoint_names) == 3:
+            middle = waypoint_names[1]
+        middle_text = f" ({middle})" if isinstance(middle, str) and middle else ""
+        facts["route_edit_attention"] = (
+            "If this turn deletes the only intermediate waypoint"
+            f"{middle_text}, the post-edit route becomes a single direct "
+            "start-to-final segment. For that edit, multiple direct replacement "
+            "routes remain unresolved unless the user, stored preferences, a "
+            "prior accepted route, or exactly one returned route selects one. "
+            "Do not apply policy 022's fastest default merely because the route "
+            "was multi-stop before deletion."
+        )
 
     def preflight_user_preferences(self) -> dict[str, Any]:
         """Populate stable user preference facts before the model's first decision."""
