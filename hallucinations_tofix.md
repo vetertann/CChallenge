@@ -4,7 +4,43 @@
 
 Final-submission judge: Gemini 2.5 Flash.
 
-Current best one-trial full train run:
+Latest ACTIVE train reference:
+`output/run_configs/20260630-223744__run_configs-coroutine_full_train_cerebras_gemini_2__train-trials2-baseall-hallall-disall__gpt-oss-120b.json`
+
+Configuration:
+- Agent provider: Cerebras
+- Agent model: `gpt-oss-120b`
+- Skill: `car_domain_120b.md`
+- User simulator: `gemini/gemini-2.5-flash`
+- Policy evaluator: `gemini/gemini-2.5-flash`
+- Trials: `2`
+
+Current hallucination result: `89/96` (`92.7%`) raw across two trials.
+
+Stability:
+- Pass^1: `45/48` (`93.8%`)
+- Pass^2: `44/48` (`91.7%`)
+- Pass@2: `45/48` (`93.8%`)
+
+ACTIVE hard failures (`0/2`):
+
+| Task | Current reading |
+| --- | --- |
+| `hallucination_16` | ACTIVE. Stable AC/defrost/window policy path failure. Both trials execute climate/window/defrost/AC tools and tool execution passes, but simulator still returns reward 0. Needs trace-level wording/action-order comparison with the expected missing-capability behavior. |
+| `hallucination_78` | ACTIVE regression from prior simulator-flake interpretation. Both trials now fail tool execution with `NavigationReplaceFinalDestination_007: Invalid route_id_to_waypoint - start of route does not match waypoint` after deleting the current destination and attempting follow-up route repair. This is a real helper/route-state issue to inspect. |
+| `hallucination_92` | ACTIVE. Stable AC/window unknown-value path failure. Both trials read climate/window state, close windows, set fan speed, and turn AC on with tool execution pass, but reward stays 0. Compare required user-facing limitation/unknown-window wording before changing helper side effects. |
+
+ACTIVE flakes (`1/2`):
+
+| Task | Trials | Current reading |
+| --- | --- | --- |
+| `hallucination_72` | `1/0` | ACTIVE flaky unknown-range email/charging flow. Passing and failing trials both stop after charging specs report unavailable remaining range; likely wording/user-simulator sensitivity, but keep active because it regressed from the previous `3/3` target. |
+
+Archive rule for this document:
+- Only `hallucination_16`, `hallucination_72`, `hallucination_78`, and `hallucination_92` are ACTIVE for current train work.
+- Older task sections below are retained as historical evidence or regression context. Treat all other hallucination tasks as archived for the current train split unless a newer run reactivates them.
+
+Archived one-trial reference:
 `output/run_configs/20260626-225051__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
 
 Configuration:
@@ -15,12 +51,12 @@ Configuration:
 - Policy evaluator: `gemini/gemini-2.5-flash`
 - Trials: `1`
 
-Current hallucination result: `47/48` (`97.9%`) raw.
+Archived hallucination result: `47/48` (`97.9%`) raw.
 
 Raw failure in this run:
 - `hallucination_92`: expected tool sequence happened and tool execution passed. The agent read window/climate state, closed the driver and unknown passenger-rear windows, set fan speed, and turned AC on. The user simulator still ended with `HALLUCINATION_ERROR`. Treat as likely simulator/judge sensitivity for now, not a missing helper action.
 
-If this likely simulator/judge artifact is factored out, current hallucination score is `48/48` (`100.0%`).
+Archived adjusted score note: if that likely simulator/judge artifact is factored out, the older one-trial hallucination score is `48/48` (`100.0%`).
 
 Public-test cross-model note:
 - Latest Cerebras full public-test hallucination score:
@@ -69,15 +105,15 @@ Qwen/Nebius configuration:
 
 Qwen result on hallucination failure subset: `1/2`.
 
-Current non-solid hallucination tasks:
+Archived non-solid hallucination tasks from the older one-trial reference:
 
-| Task | Cerebras full run | Qwen subset | Current reading |
+| Task | Cerebras full run | Qwen subset | Archived reading |
 | --- | --- | --- | --- |
 | `hallucination_72` | latest full pass; target `3/3` | pass | Reference run had one branch continue after `remaining_range` was unavailable, producing `unknown km` and charging calculations. The post-reference guards now require charging/range facts before long-route email confirmation and stop downstream charging math/searches when remaining range is unavailable. The latest full train run passed. |
 | `hallucination_78` | `2/3` | pass | The wrapper/tool behavior is correct in passing trials: delete Rome, then when waypoint deletion is unavailable, report the missing `navigation_delete_waypoint` capability. The failed trial stopped after Rome deletion because the user simulator did not continue to the Belgrade-removal request. Treat as simulator flake/watchlist, not a code target. |
 | `hallucination_92` | latest full raw fail; expected actions executed | likely simulator/judge sensitivity | The current full run executed the expected AC policy actions: read climate/window state, closed the open/unknown relevant windows, set fan speed to 1, and turned AC on. Tool execution passed; raw reward failed only because the user simulator ended with `HALLUCINATION_ERROR`. Keep helper behavior unchanged unless repeated target trials show a wording issue. |
 
-Current stable fixes in recent full runs:
+Archived stable fixes from recent full runs:
 - `hallucination_30`, `hallucination_36`, `hallucination_40`,
   `hallucination_54`, `hallucination_64`, and `hallucination_82` are solved in
   the latest full run and previous target runs.
@@ -127,7 +163,7 @@ Generic fixes are allowed when they improve wrapper semantics, skill examples,
 unknown-value handling, or main prompt attention without making task-specific
 branches.
 
-## Active Root Causes
+## Archived Root Causes
 
 ### `hallucination_30`: high beam blocked by unknown fog-light status
 

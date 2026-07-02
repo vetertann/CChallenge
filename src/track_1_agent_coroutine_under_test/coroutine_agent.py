@@ -313,12 +313,13 @@ class CoroutineAgentWorker:
         )
 
         if not self.initialized:
+            self.initial_user_request = inbound.user_text or "none"
             self.system_prompt = build_system_prompt(
                 car_policy=ws.policy,
                 tools=list(ws.available_tools.values()),
                 tool_mode=self.tool_mode,
+                user_request=self.initial_user_request,
             )
-            self.initial_user_request = inbound.user_text or "none"
             self.stable_messages = []
             self.messages = self._rebuild_messages()
             ws.observe_user(inbound.user_text or "none")

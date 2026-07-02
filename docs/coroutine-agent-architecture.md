@@ -913,6 +913,10 @@ missing response fields.
 Policy helpers turn multi-tool protocols into deterministic Python functions.
 They verify prerequisites before side effects, use live tool-surface checks,
 store structured reports, and directly answer when execution is blocked.
+If the model passes an invalid helper or wrapper argument value, the runtime
+should raise an internal retry error with the accepted values instead of sending
+that enum error to the evaluator-facing user. Missing tools or missing live
+parameters remain user-facing capability limitations.
 
 Current helpers:
 

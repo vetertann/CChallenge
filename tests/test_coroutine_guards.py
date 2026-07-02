@@ -191,6 +191,53 @@ class GuardTests(unittest.TestCase):
 
         self.assertEqual(result.response_text, "charging station found")
 
+    def test_wrong_raw_wrapper_argument_key_retries_when_required_key_is_missing(self):
+        ws, ex = self.make(
+            {"set_ambient_lights": ("SUCCESS", {})},
+            {
+                "set_ambient_lights": tool_schema(
+                    "set_ambient_lights",
+                    {
+                        "on": {"type": "boolean"},
+                        "lightcolor": {"type": "string"},
+                    },
+                    required=["on", "lightcolor"],
+                )
+            },
+        )
+
+        result = ex.run(
+            "set_ambient_lights(on=True, color='CYAN')\n"
+            "respond('Ambient lights set.')"
+        )
+
+        self.assertIsNone(result.response_text)
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.error["type"], "ValueError")
+        self.assertIn("set_ambient_lights", result.error["message"])
+        self.assertIn("color", result.error["message"])
+        self.assertIn("lightcolor", result.error["message"])
+        self.assertEqual(ws.scratchpad["gates"]["tool_surface"]["status"], "BAD_ARGUMENT")
+        self.assertEqual(ws.bridge.requests, [])
+
+    def test_removed_raw_wrapper_parameter_stays_user_facing_limitation(self):
+        ws, ex = self.make(
+            {"set_fan_speed": ("SUCCESS", {})},
+            {
+                "set_fan_speed": tool_schema(
+                    "set_fan_speed",
+                    {},
+                )
+            },
+        )
+
+        result = ex.run("set_fan_speed(level=3)\nrespond('Fan set to 3.')")
+
+        self.assertIsNone(result.error)
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("set_fan_speed.level", result.response_text)
+        self.assertEqual(ws.bridge.requests, [])
+
     def test_navigation_set_claim_without_mutation_reports_missing_control(self):
         ws, ex = self.make({}, {})
         result = ex.run("respond('Navigation set: first to the charger, then Hamburg.')")
@@ -766,6 +813,24 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(self._emitted(ws, "set_fog_lights"), {"on": True})
 
+    def test_exterior_lights_invalid_intent_retries_internally(self):
+        ws, ex = self.make({}, {})
+
+        result = ex.run(
+            'set_exterior_lights_safe(intent="turn_off_extraneous_lights")\n'
+            'respond("Low beams turned off.")'
+        )
+
+        self.assertIsNone(result.response_text)
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.error["type"], "ValueError")
+        self.assertIn("invalid intent='turn_off_extraneous_lights'", result.error["message"])
+        self.assertIn("turn_off_exterior_lights", result.error["message"])
+        self.assertEqual(
+            ws.scratchpad["gates"]["set_exterior_lights_safe"]["status"],
+            "BAD_ARGUMENT",
+        )
+
     def test_exterior_lights_turn_on_headlights_prompts_high_beams_when_low_on(self):
         ws, ex = self.make(
             {
@@ -1192,6 +1257,80 @@ class GuardTests(unittest.TestCase):
         )
         self.assertNotIn("pending_window_percentage_clarification", ws.scratchpad["facts"])
 
+    def test_sync_window_positions_blocks_when_target_position_unknown(self):
+        ws, ex = self.make(
+            {
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {
+                        "window_driver_position": 25,
+                        "window_passenger_position": 25,
+                        "window_driver_rear_position": "unknown",
+                        "window_passenger_rear_position": "unknown",
+                    },
+                ),
+                "open_close_window": ("SUCCESS", {}),
+            },
+            {
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "open_close_window": tool_schema(
+                    "open_close_window",
+                    {"window": {"type": "string"}, "percentage": {"type": "number"}},
+                ),
+            },
+        )
+
+        result = ex.run("sync_window_positions(source_windows='FRONT', target_windows='REAR')")
+
+        self.assertIn(
+            "get_vehicle_window_positions.window_driver_rear_position",
+            result.response_text,
+        )
+        self.assertIsNone(self._emitted(ws, "open_close_window"))
+
+    def test_sync_window_positions_copies_front_values_to_rear_windows(self):
+        ws, ex = self.make(
+            {
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {
+                        "window_driver_position": 25,
+                        "window_passenger_position": 15,
+                        "window_driver_rear_position": 0,
+                        "window_passenger_rear_position": 10,
+                    },
+                ),
+                "open_close_window": ("SUCCESS", {}),
+            },
+            {
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "open_close_window": tool_schema(
+                    "open_close_window",
+                    {"window": {"type": "string"}, "percentage": {"type": "number"}},
+                ),
+            },
+        )
+
+        result = ex.run(
+            "report = sync_window_positions(source_windows='FRONT', target_windows='REAR')\n"
+            "respond(report['message'])"
+        )
+
+        calls = [
+            call["arguments"]
+            for batch in ws.bridge.requests
+            for call in batch
+            if call["tool_name"] == "open_close_window"
+        ]
+        self.assertEqual(
+            calls,
+            [
+                {"window": "DRIVER_REAR", "percentage": 25},
+                {"window": "PASSENGER_REAR", "percentage": 15},
+            ],
+        )
+        self.assertEqual(result.response_text, "Window positions synchronized.")
+
     def test_raw_ac_on_delegates_to_policy_helper(self):
         ws, ex = self.make(
             {
@@ -1227,8 +1366,11 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(self._emitted(ws, "open_close_window"), {"window": "DRIVER", "percentage": 0})
         self.assertEqual(self._emitted(ws, "set_fan_speed"), {"level": 1})
         self.assertEqual(self._emitted(ws, "set_air_conditioning"), {"on": True})
-        self.assertEqual(result.response_text, "AC is on.")
-        self.assertNotIn("unknown", result.response_text.lower())
+        self.assertEqual(
+            result.response_text,
+            "AC is on. This includes closing the driver window because its "
+            "position reading was unavailable.",
+        )
         self.assertEqual(
             ws.scratchpad["facts"]["last_helper_report"]["unknown_windows"][0]["tool_window"],
             "DRIVER",
@@ -1355,8 +1497,11 @@ class GuardTests(unittest.TestCase):
         )
         self.assertIn(("set_fan_speed", {"level": 1}), emitted)
         self.assertIn(("set_air_conditioning", {"on": True}), emitted)
-        self.assertEqual(result.response_text, "Air conditioning is now on.")
-        self.assertNotIn("unknown", result.response_text.lower())
+        self.assertEqual(
+            result.response_text,
+            "Air conditioning is now on. This includes closing the passenger "
+            "rear window because its position reading was unavailable.",
+        )
         self.assertEqual(
             ws.scratchpad["facts"]["last_helper_report"]["unknown_windows"][0]["tool_window"],
             "PASSENGER_REAR",
@@ -1797,6 +1942,113 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(result.response_text, "507.0")
 
+    def test_car_color_direct_wrapper_returns_scalar_value(self):
+        ws, ex = self.make(
+            {"get_car_color": ("SUCCESS", {"car_color": "PURPLE"})},
+            {"get_car_color": tool_schema("get_car_color", {})},
+        )
+
+        result = ex.run(
+            "color = get_car_color()\n"
+            "respond(color)"
+        )
+
+        self.assertEqual(result.response_text, "PURPLE")
+
+    def test_car_color_result_value_accepts_already_unwrapped_scalar(self):
+        ws, ex = self.make(
+            {"get_car_color": ("SUCCESS", {"car_color": "PURPLE"})},
+            {"get_car_color": tool_schema("get_car_color", {})},
+        )
+
+        result = ex.run(
+            "color = result_value(get_car_color())\n"
+            "respond(color)"
+        )
+
+        self.assertEqual(result.response_text, "PURPLE")
+
+    def test_car_color_batch_result_unwraps_to_scalar_value(self):
+        ws, ex = self.make(
+            {"get_car_color": ("SUCCESS", {"car_color": "PURPLE"})},
+            {"get_car_color": tool_schema("get_car_color", {})},
+        )
+
+        result = ex.run(
+            "results = batch([('get_car_color', {})])\n"
+            "color = result_value(result_by_tool(results, 'get_car_color'))\n"
+            "respond(color)"
+        )
+
+        self.assertEqual(result.response_text, "PURPLE")
+
+    def test_zero_arg_single_value_reads_return_scalar_values(self):
+        cases = [
+            (
+                "get_steering_wheel_heating_level",
+                {"steering_wheel_heating": 1},
+                "1",
+            ),
+            (
+                "get_trunk_door_position",
+                {"trunk_door_position": "closed"},
+                "closed",
+            ),
+        ]
+
+        for tool_name, payload, expected in cases:
+            with self.subTest(tool_name=tool_name):
+                ws, ex = self.make(
+                    {tool_name: ("SUCCESS", payload)},
+                    {tool_name: tool_schema(tool_name, {})},
+                )
+
+                result = ex.run(
+                    f"value = {tool_name}()\n"
+                    "respond(str(value))"
+                )
+
+                self.assertEqual(result.response_text, expected)
+
+    def test_zero_arg_single_value_batch_results_unwrap_to_scalar_values(self):
+        ws, ex = self.make(
+            {
+                "get_steering_wheel_heating_level": ("SUCCESS", {"steering_wheel_heating": 1}),
+                "get_trunk_door_position": ("SUCCESS", {"trunk_door_position": "closed"}),
+            },
+            {
+                "get_steering_wheel_heating_level": tool_schema("get_steering_wheel_heating_level", {}),
+                "get_trunk_door_position": tool_schema("get_trunk_door_position", {}),
+            },
+        )
+
+        result = ex.run(
+            "results = batch([\n"
+            "    ('get_steering_wheel_heating_level', {}),\n"
+            "    ('get_trunk_door_position', {}),\n"
+            "])\n"
+            "heat = result_value(result_by_tool(results, 'get_steering_wheel_heating_level'))\n"
+            "trunk = result_value(result_by_tool(results, 'get_trunk_door_position'))\n"
+            "respond(f'{heat}|{trunk}')"
+        )
+
+        self.assertEqual(result.response_text, "1|closed")
+
+    def test_zero_arg_single_value_read_failure_is_handled_inside_wrapper(self):
+        ws, ex = self.make(
+            {"get_car_color": ("FAILURE", {"errors": {"x": "sensor unavailable"}})},
+            {"get_car_color": tool_schema("get_car_color", {})},
+        )
+
+        result = ex.run(
+            "get_car_color()\n"
+            "respond('color read')"
+        )
+
+        self.assertIn("can't get", result.response_text.lower())
+        self.assertIn("car color", result.response_text.lower())
+        self.assertNotEqual(result.response_text, "color read")
+
     def test_remaining_range_numeric_alias(self):
         ws, ex = self.make(
             {
@@ -1879,6 +2131,102 @@ class GuardTests(unittest.TestCase):
             ],
             "not available",
         )
+
+    def test_unknown_remaining_range_message_includes_known_soc(self):
+        ws, ex = self.make(
+            {
+                "get_charging_specs_and_status": (
+                    "SUCCESS",
+                    {
+                        "state_of_charge": 70,
+                        "battery_capacity_kwh": "unknown",
+                        "remaining_range": "unknown",
+                    },
+                ),
+            },
+            {
+                "get_charging_specs_and_status": tool_schema(
+                    "get_charging_specs_and_status",
+                    {},
+                ),
+            },
+        )
+        ws.observe_user("Can you include travel and charging details in an email?")
+
+        result = ex.run(
+            "status = get_charging_specs_and_status()\n"
+            "respond(f\"The remaining range is {status['remaining_range_km']:.0f} km.\")"
+        )
+
+        self.assertIn("state of charge as 70%", result.response_text)
+        self.assertIn("remaining range", result.response_text)
+        self.assertIn("battery capacity", result.response_text)
+        self.assertIn("complete charging-stop planning", result.response_text)
+        self.assertNotIn("unknown km", result.response_text)
+
+    def test_unknown_remaining_range_message_preserves_known_battery_capacity(self):
+        ws, ex = self.make(
+            {
+                "get_charging_specs_and_status": (
+                    "SUCCESS",
+                    {
+                        "state_of_charge": 70,
+                        "battery_capacity_kwh": 100,
+                        "remaining_range": "unknown",
+                    },
+                ),
+            },
+            {
+                "get_charging_specs_and_status": tool_schema(
+                    "get_charging_specs_and_status",
+                    {},
+                ),
+            },
+        )
+        ws.observe_user("Can I drive this route without charging?")
+
+        result = ex.run(
+            "status = get_charging_specs_and_status()\n"
+            "if status['remaining_range_km'] >= 100:\n"
+            "    respond('You have enough range.')\n"
+            "else:\n"
+            "    respond('You do not have enough range.')"
+        )
+
+        self.assertIn("state of charge as 70%", result.response_text)
+        self.assertIn("battery capacity as 100 kWh", result.response_text)
+        self.assertIn("did not provide the remaining range", result.response_text)
+        self.assertNotIn("or battery capacity", result.response_text)
+
+    def test_unknown_remaining_range_message_handles_missing_soc(self):
+        ws, ex = self.make(
+            {
+                "get_charging_specs_and_status": (
+                    "SUCCESS",
+                    {
+                        "battery_capacity_kwh": "unknown",
+                        "remaining_range": "unknown",
+                    },
+                ),
+            },
+            {
+                "get_charging_specs_and_status": tool_schema(
+                    "get_charging_specs_and_status",
+                    {},
+                ),
+            },
+        )
+        ws.observe_user("Can I drive this route without charging?")
+
+        result = ex.run(
+            "status = get_charging_specs_and_status()\n"
+            "respond(f\"Your range is {status['remaining_range_km']:.0f} km.\")"
+        )
+
+        self.assertIn("did not provide the remaining range", result.response_text)
+        self.assertIn("state of charge", result.response_text)
+        self.assertIn("battery capacity", result.response_text)
+        self.assertIn("available car data", result.response_text)
 
     def test_unknown_remaining_range_blocks_downstream_charging_math(self):
         ws, ex = self.make(
@@ -7216,6 +7564,136 @@ class GuardTests(unittest.TestCase):
         args = self._emitted(ws, "navigation_replace_final_destination")
         self.assertEqual(args["route_id_leading_to_new_destination"], "R_second")
 
+    def test_final_replacement_repairs_mismatched_route_to_selected_via_route(self):
+        wrong_route = {
+            "route_id": "R_wrong",
+            "start_id": "loc_old",
+            "destination_id": "loc_new",
+            "name_via": "A21",
+            "alias": ["fastest", "first"],
+        }
+        ws, ex = self._final_replace_ws(routes=self.REPLACEMENT_ROUTES)
+        ws.scratchpad["entities"]["routes_by_id"] = {"R_wrong": wrong_route}
+        ws.observe_user("I'll take the route via K57 and B65.")
+
+        ex.run(
+            "navigation_replace_final_destination("
+            "new_destination_id='loc_new', "
+            "route_id_leading_to_new_destination='R_wrong')"
+        )
+
+        args = self._emitted(ws, "navigation_replace_final_destination")
+        self.assertEqual(args["route_id_leading_to_new_destination"], "R_second")
+        self.assertEqual(
+            ws.scratchpad["gates"]["final_destination_route_endpoint_guard"]["status"],
+            "REPAIRED",
+        )
+
+    def test_final_replacement_blocks_mismatched_route_when_no_repair_exists(self):
+        ws, ex = self._final_replace_ws(routes=self.REPLACEMENT_ROUTES)
+        ws.observe_user("Use that route.")
+
+        result = ex.run(
+            "navigation_replace_final_destination("
+            "new_destination_id='loc_new', "
+            "route_id_leading_to_new_destination='R_wrong')"
+        )
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("Which route should I use?", result.response_text)
+        self.assertIsNone(self._emitted(ws, "navigation_replace_final_destination"))
+        self.assertEqual(
+            ws.scratchpad["gates"]["final_destination_route_endpoint_guard"]["status"],
+            "BLOCKED",
+        )
+
+    def test_final_replacement_to_penultimate_waypoint_deletes_current_destination(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "navigation_replace_final_destination": tool_schema(
+                "navigation_replace_final_destination",
+                {
+                    "new_destination_id": {"type": "string"},
+                    "route_id_leading_to_new_destination": {"type": "string"},
+                },
+            ),
+            "navigation_delete_destination": tool_schema(
+                "navigation_delete_destination",
+                {"destination_id_to_delete": {"type": "string"}},
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": (
+                "SUCCESS",
+                {
+                    "navigation_active": True,
+                    "waypoints_id": ["loc_start", "loc_mid", "loc_final"],
+                    "routes_to_final_destination_id": ["R_start_mid", "R_mid_final"],
+                },
+            ),
+            "navigation_delete_destination": ("SUCCESS", {"destination_deleted": True}),
+            "navigation_replace_final_destination": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+        ws.observe_user("Make the middle stop my final destination.")
+
+        ex.run(
+            "navigation_replace_final_destination("
+            "new_destination_id='loc_mid', "
+            "route_id_leading_to_new_destination='R_start_mid')"
+        )
+
+        self.assertIsNone(self._emitted(ws, "navigation_replace_final_destination"))
+        self.assertEqual(
+            self._emitted(ws, "navigation_delete_destination"),
+            {"destination_id_to_delete": "loc_final"},
+        )
+        self.assertEqual(
+            ws.scratchpad["gates"]["final_destination_delete_redirect"]["status"],
+            "REDIRECTED",
+        )
+
+    def test_final_replacement_to_penultimate_reports_missing_delete_capability(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "navigation_replace_final_destination": tool_schema(
+                "navigation_replace_final_destination",
+                {
+                    "new_destination_id": {"type": "string"},
+                    "route_id_leading_to_new_destination": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": (
+                "SUCCESS",
+                {
+                    "navigation_active": True,
+                    "waypoints_id": ["loc_start", "loc_mid", "loc_final"],
+                    "routes_to_final_destination_id": ["R_start_mid", "R_mid_final"],
+                },
+            ),
+            "navigation_replace_final_destination": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+        ws.observe_user("Remove the final destination.")
+
+        result = ex.run(
+            "navigation_replace_final_destination("
+            "new_destination_id='loc_mid', "
+            "route_id_leading_to_new_destination='R_start_mid')"
+        )
+
+        self.assertIsNotNone(result.response_text)
+        self.assertIn("navigation_delete_destination", result.response_text)
+        self.assertIsNone(self._emitted(ws, "navigation_replace_final_destination"))
+
     def test_multi_stop_replacement_preserves_model_route_choice(self):
         ws, ex = self._final_replace_ws(nav=self.NAV_4WP)
         ws.observe_user("Change my final destination to New City.")
@@ -7581,6 +8059,28 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(
             self._emitted(ws, "set_climate_temperature"),
             {"seat_zone": "ALL_ZONES", "temperature": 21},
+        )
+
+    def test_all_zones_temperature_helper_overrides_occupied_scope(self):
+        ws, ex = self.make(
+            {"set_climate_temperature": ("SUCCESS", {})},
+            {
+                "set_climate_temperature": tool_schema(
+                    "set_climate_temperature",
+                    {"temperature": {"type": "number"}, "seat_zone": {"type": "string"}},
+                )
+            },
+        )
+        ws.scratchpad["entities"]["active_occupied_front_zone_scope"] = {
+            "source": "test",
+            "zones": ["DRIVER", "PASSENGER"],
+        }
+
+        ex.run("set_all_zones_climate_temperature_safe(temperature=22)")
+
+        self.assertEqual(
+            self._emitted(ws, "set_climate_temperature"),
+            {"seat_zone": "ALL_ZONES", "temperature": 22},
         )
 
     def test_occupied_seat_explicit_zone_does_not_heat_other_occupied_seat(self):
@@ -8974,14 +9474,15 @@ class GuardTests(unittest.TestCase):
         )
 
         self.assertIsNone(result.error)
-        self.assertEqual(
-            result.response_text,
-            "I need to check the charging status before asking to send the email.",
-        )
+        self.assertIsNone(result.response_text)
         guard = ws.scratchpad["gates"]["long_route_email_charging_fact_guard"]
         self.assertEqual(guard["status"], "NEEDS_MORE_FACTS")
         self.assertEqual(guard["route_id"], "route_long")
         self.assertEqual(guard["route_distance_km"], 368.81)
+        blocker = ws.scratchpad["facts"]["pending_send_email_blocker"]
+        self.assertEqual(blocker["name"], "long_route_email_charging_fact_guard")
+        suppressed = ws.scratchpad["facts"]["last_suppressed_response_blocker"]
+        self.assertEqual(suppressed["name"], "pending_send_email_blocker")
         self.assertNotIn("last_routes", ws.scratchpad["entities"])
         self.assertEqual(
             ws.scratchpad["entities"]["active_route_records"][0]["route_id"],
@@ -9081,14 +9582,14 @@ class GuardTests(unittest.TestCase):
             "respond('I need the official post-charge range before asking to send the email.')"
         )
 
-        self.assertEqual(
-            result.response_text,
-            "I need the official post-charge range before asking to send the email.",
-        )
+        self.assertIsNone(result.response_text)
         guard = ws.scratchpad["gates"]["post_charge_email_distance_fact_guard"]
         self.assertEqual(guard["status"], "NEEDS_MORE_FACTS")
         self.assertEqual(guard["target_state_of_charge"], 100)
         self.assertEqual(guard["route_distance_km"], 1168.11)
+        suppressed = ws.scratchpad["facts"]["last_suppressed_response_blocker"]
+        self.assertEqual(suppressed["name"], "pending_send_email_blocker")
+        self.assertIn("official range after charging", suppressed["message"])
         emitted = [
             call["tool_name"] for request in ws.bridge.requests for call in request
         ]
@@ -9172,6 +9673,7 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(guard["route_id"], "route_long")
         self.assertEqual(guard["route_distance_km"], 900.0)
         self.assertEqual(guard["current_remaining_range_km"], 300.0)
+        self.assertNotIn("last_suppressed_response_blocker", ws.scratchpad["facts"])
         self.assertNotIn("pending_confirmation", ws.scratchpad["facts"])
         emitted = [
             call["tool_name"] for request in ws.bridge.requests for call in request
@@ -9180,6 +9682,226 @@ class GuardTests(unittest.TestCase):
             emitted,
             ["get_routes_from_start_to_destination", "get_charging_specs_and_status"],
         )
+
+    def test_long_route_email_allows_along_route_station_without_charge_plan(self):
+        tools = {
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": {"type": "string"},
+                    "destination_id": {"type": "string"},
+                },
+            ),
+            "get_charging_specs_and_status": tool_schema(
+                "get_charging_specs_and_status",
+                {},
+            ),
+            "search_poi_along_the_route": tool_schema(
+                "search_poi_along_the_route",
+                {
+                    "route_id": {"type": "string"},
+                    "category_poi": {"type": "string"},
+                    "at_kilometer": {"type": "number"},
+                },
+            ),
+            "get_distance_by_soc": tool_schema(
+                "get_distance_by_soc",
+                {
+                    "initial_state_of_charge": {"type": "number"},
+                    "final_state_of_charge": {"type": "number"},
+                },
+            ),
+            "send_email": tool_schema(
+                "send_email",
+                {
+                    "email_addresses": {"type": "array", "items": {"type": "string"}},
+                    "content_message": {"type": "string"},
+                },
+                required=["email_addresses", "content_message"],
+                description="REQUIRES_CONFIRMATION Send an email.",
+            ),
+        }
+        responses = {
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {
+                    "routes": [
+                        {
+                            "route_id": "route_bel_bud",
+                            "distance_km": 368.81,
+                            "duration_hours": 4,
+                            "duration_minutes": 41,
+                            "alias": ["fastest"],
+                        }
+                    ]
+                },
+            ),
+            "get_charging_specs_and_status": (
+                "SUCCESS",
+                {"state_of_charge": 72, "remaining_range": "324.0km"},
+            ),
+            "search_poi_along_the_route": (
+                "SUCCESS",
+                {
+                    "pois_found_along_route": [
+                        {
+                            "id": "poi_cha_pre",
+                            "name": "PRE",
+                            "category": "charging_stations",
+                            "charging_plugs": [
+                                {
+                                    "plug_id": "plug_dc",
+                                    "power_type": "DC",
+                                    "power_kw": 150,
+                                    "availability": "available",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            ),
+            "send_email": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "get_route_options(start_id='loc_bel', destination_id='loc_bud')\n"
+            "get_charging_specs_and_status()\n"
+            "search_poi_along_the_route("
+            "route_id='route_bel_bud', category_poi='charging_stations', "
+            "at_kilometer=150)\n"
+            "send_email("
+            "email_addresses=['grace@example.com'], "
+            "content_message='Travel time is 4h 41m. Include the charging station details.')"
+        )
+
+        self.assertIn("This action requires confirmation", result.response_text)
+        self.assertNotIn("pre_send_charging_plan_guard", ws.scratchpad["gates"])
+        self.assertNotIn("post_charge_email_distance_fact_guard", ws.scratchpad["gates"])
+        pending = ws.scratchpad["facts"]["pending_confirmation"]
+        pending_content = pending["on_confirm_calls"][0]["arguments"]["content_message"]
+        self.assertIn("Charging station: PRE near the 150-km point.", pending_content)
+        self.assertIn("Plug: 150 kW DC (available)", pending_content)
+
+    def test_blocked_long_route_email_suppresses_internal_guard_message(self):
+        tools = {
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": {"type": "string"},
+                    "destination_id": {"type": "string"},
+                },
+            ),
+            "get_charging_specs_and_status": tool_schema(
+                "get_charging_specs_and_status",
+                {},
+            ),
+            "send_email": tool_schema(
+                "send_email",
+                {
+                    "email_addresses": {"type": "array", "items": {"type": "string"}},
+                    "content_message": {"type": "string"},
+                },
+                required=["email_addresses", "content_message"],
+                description="REQUIRES_CONFIRMATION Send an email.",
+            ),
+        }
+        responses = {
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {
+                    "routes": [
+                        {
+                            "route_id": "route_long",
+                            "distance_km": 368.81,
+                            "duration_hours": 4,
+                            "duration_minutes": 41,
+                            "alias": ["fastest"],
+                        }
+                    ]
+                },
+            ),
+            "send_email": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "get_route_options(start_id='loc_bel', destination_id='loc_bud')\n"
+            "send_email("
+            "email_addresses=['grace@example.com'], "
+            "content_message='Travel time is 4h 41m.')\n"
+            "respond('Okay.')"
+        )
+
+        self.assertIsNone(result.response_text)
+        blocker = ws.scratchpad["facts"]["pending_send_email_blocker"]
+        self.assertEqual(blocker["name"], "long_route_email_charging_fact_guard")
+        suppressed = ws.scratchpad["facts"]["last_suppressed_response_blocker"]
+        self.assertEqual(suppressed["name"], "pending_send_email_blocker")
+        self.assertEqual(suppressed["attempted_response"], "Okay.")
+        self.assertIn("check the vehicle charging status", suppressed["message"])
+
+    def test_blocked_long_route_email_does_not_override_next_user_turn(self):
+        tools = {
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {
+                    "start_id": {"type": "string"},
+                    "destination_id": {"type": "string"},
+                },
+            ),
+            "get_charging_specs_and_status": tool_schema(
+                "get_charging_specs_and_status",
+                {},
+            ),
+            "send_email": tool_schema(
+                "send_email",
+                {
+                    "email_addresses": {"type": "array", "items": {"type": "string"}},
+                    "content_message": {"type": "string"},
+                },
+                required=["email_addresses", "content_message"],
+                description="REQUIRES_CONFIRMATION Send an email.",
+            ),
+        }
+        responses = {
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {
+                    "routes": [
+                        {
+                            "route_id": "route_long",
+                            "distance_km": 368.81,
+                            "duration_hours": 4,
+                            "duration_minutes": 41,
+                            "alias": ["fastest"],
+                        }
+                    ]
+                },
+            ),
+            "send_email": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        first = ex.run(
+            "get_route_options(start_id='loc_bel', destination_id='loc_bud')\n"
+            "send_email("
+            "email_addresses=['grace@example.com'], "
+            "content_message='Travel time is 4h 41m.')\n"
+            "respond('Okay.')"
+        )
+        self.assertIsNone(first.response_text)
+        self.assertIn("pending_send_email_blocker", ws.scratchpad["facts"])
+        self.assertIn(
+            "last_suppressed_response_blocker",
+            ws.scratchpad["facts"],
+        )
+
+        ws.observe_user("Can you find charging stations at my current location?")
+        second = ex.run("respond('I found Repsol and Endesa nearby.')")
+
+        self.assertEqual(second.response_text, "I found Repsol and Endesa nearby.")
+        self.assertNotIn("pending_send_email_blocker", ws.scratchpad["facts"])
 
     def test_long_route_email_blocks_range_only_draft_when_range_insufficient(self):
         tools = {
@@ -9253,6 +9975,7 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(guard["route_id"], "route_long")
         self.assertEqual(guard["route_distance_km"], 900.0)
         self.assertEqual(guard["current_remaining_range_km"], 300.0)
+        self.assertNotIn("last_suppressed_response_blocker", ws.scratchpad["facts"])
         self.assertNotIn("pending_confirmation", ws.scratchpad["facts"])
         emitted = [
             call["tool_name"] for request in ws.bridge.requests for call in request

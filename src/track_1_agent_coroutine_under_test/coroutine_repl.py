@@ -84,6 +84,7 @@ WORKSPACE_HELPER_NAMES = (
     "open_sunroof_safe",
     "sync_sunshade_to_sunroof",
     "open_close_window_safe",
+    "sync_window_positions",
     "set_fog_lights_on_safe",
     "set_high_beams_on_safe",
     "set_exterior_lights_safe",
@@ -91,6 +92,7 @@ WORKSPACE_HELPER_NAMES = (
     "set_air_conditioning_on_safe",
     "close_known_windows_for_blocked_ac",
     "set_climate_temperature_safe",
+    "set_all_zones_climate_temperature_safe",
     "sync_climate_zone",
     "increase_fan_speed",
     "decrease_fan_speed",
@@ -133,6 +135,12 @@ WORKSPACE_HELPER_NAMES = (
 
 KNOWN_CALL_NAMES = frozenset([*ALL_TOOL_NAMES, *WORKSPACE_HELPER_NAMES])
 
+EXTERIOR_LIGHTS_SAFE_INTENTS = (
+    "improve_visibility",
+    "turn_on_headlights",
+    "turn_off_exterior_lights",
+)
+
 SCRATCHPAD_ENTITY_ALIASES = frozenset(
     {
         "last_location_lookup",
@@ -152,6 +160,21 @@ SCRATCHPAD_ENTITY_ALIASES = frozenset(
 # hoisted into the envelope for convenience EXCEPT these, so a helper field
 # cannot overwrite the runtime's framing of the batched call.
 _RESERVED_BATCH_ENVELOPE_KEYS = frozenset({"status", "tool_name", "tool_call_id", "result"})
+
+# Zero-argument read tools whose successful result is one scalar fact. The Python
+# wrapper returns that value directly; failures still go through standard wrapper
+# failure/limitation handling.
+SINGLE_VALUE_READ_TOOL_FIELDS: dict[str, str] = {
+    "get_car_color": "car_color",
+    "get_steering_wheel_heating_level": "steering_wheel_heating",
+    "get_trunk_door_position": "trunk_door_position",
+}
+
+SINGLE_VALUE_READ_TOOL_ACTIONS: dict[str, str] = {
+    "get_car_color": "get the car color",
+    "get_steering_wheel_heating_level": "get the steering wheel heating level",
+    "get_trunk_door_position": "get the trunk door position",
+}
 
 # Side-effect tools. A non-SUCCESS result from any of these in a single REPL
 # block blocks optimistic success language until a later success clears it.
@@ -903,10 +926,45 @@ class CoroutineWorkspace:
             label_text = _human_join(labels)
         return f"I closed the {label_text} that had unknown positions."
 
+    @staticmethod
+    def _unknown_window_ac_disclosure(unknown_windows: list[dict[str, Any]]) -> str:
+        labels = [str(item.get("label", "a window")) for item in unknown_windows]
+        if not labels:
+            return ""
+        if len(labels) == 1:
+            return (
+                f"This includes closing the {labels[0]} because its position "
+                "reading was unavailable."
+            )
+        if all(label.endswith(" window") for label in labels):
+            label_text = f"{_human_join([label[:-7] for label in labels])} windows"
+        else:
+            label_text = _human_join(labels)
+        return (
+            f"This includes closing the {label_text} because their position "
+            "readings were unavailable."
+        )
+
     def _store_helper_report(self, name: str, report: dict[str, Any]) -> dict[str, Any]:
         self.remember(f"helper_report:{name}", report)
         self.remember("last_helper_report", {"name": name, **report})
         return report
+
+    def _store_send_email_blocker_report(
+        self,
+        name: str,
+        report: dict[str, Any],
+    ) -> dict[str, Any]:
+        stored = self._store_helper_report(name, report)
+        self.remember(
+            "pending_send_email_blocker",
+            {
+                "name": name,
+                "created_user_turn_index": self._user_turn_index,
+                **copy.deepcopy(report),
+            },
+        )
+        return stored
 
     def _window_unknown_reason(self, unknown_windows: list[dict[str, Any]]) -> str:
         labels = [str(item.get("label", "a window")) for item in unknown_windows]
@@ -1012,6 +1070,9 @@ class CoroutineWorkspace:
 
     def tool_signature(self, tool_name: str) -> str:
         helper_signatures = {
+            "get_car_color": "get_car_color() -> str",
+            "get_steering_wheel_heating_level": "get_steering_wheel_heating_level() -> int",
+            "get_trunk_door_position": "get_trunk_door_position() -> str",
             "handle_pending_confirmation": "handle_pending_confirmation()",
             "defrost_front_window": "defrost_front_window()",
             "open_sunroof_safe": "open_sunroof_safe(percentage)",
@@ -1038,7 +1099,11 @@ class CoroutineWorkspace:
             "set_climate_temperature_safe": (
                 "set_climate_temperature_safe(seat_zone, temperature, explicit_all_zones=False)"
             ),
+            "set_all_zones_climate_temperature_safe": (
+                "set_all_zones_climate_temperature_safe(temperature)"
+            ),
             "sync_sunshade_to_sunroof": "sync_sunshade_to_sunroof()",
+            "sync_window_positions": "sync_window_positions(source_windows, target_windows)",
             "sync_climate_zone": (
                 "sync_climate_zone(source_zone, target_zone, "
                 "include_temperature=True, include_seat_heating=True)"
@@ -1496,6 +1561,49 @@ class CoroutineWorkspace:
                     ),
                 },
             }
+        if tool_name == "sync_window_positions":
+            return {
+                "name": "sync_window_positions",
+                "signature": "sync_window_positions(source_windows, target_windows)",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper for model-resolved window match/sync "
+                    "requests. It reads get_vehicle_window_positions, requires both "
+                    "the source and target current window-position fields to be known, "
+                    "then copies each source percentage to the paired target window via "
+                    "open_close_window_safe. It does not inspect raw user text."
+                ),
+                "required_arguments": ["source_windows", "target_windows"],
+                "optional_arguments": [],
+                "schema": {
+                    "type": "object",
+                    "required": ["source_windows", "target_windows"],
+                    "properties": {
+                        "source_windows": {
+                            "description": (
+                                "One window, group, or list resolved by the model. "
+                                "Supported values include FRONT, REAR, ALL, DRIVER, "
+                                "PASSENGER, DRIVER_REAR, PASSENGER_REAR."
+                            ),
+                        },
+                        "target_windows": {
+                            "description": (
+                                "One target window, group, or list resolved by the model. "
+                                "Use FRONT to mean driver/passenger, REAR to mean "
+                                "driver-rear/passenger-rear."
+                            ),
+                        },
+                    },
+                },
+                "argument_descriptions": {
+                    "source_windows": (
+                        "Model-resolved source window(s) whose current percentage should be copied."
+                    ),
+                    "target_windows": (
+                        "Model-resolved target window(s) that should be set to the source percentage."
+                    ),
+                },
+            }
         if tool_name == "set_fog_lights_on_safe":
             return {
                 "name": "set_fog_lights_on_safe",
@@ -1691,6 +1799,30 @@ class CoroutineWorkspace:
                         "Set true only when the model has explicitly resolved that every "
                         "climate zone should change, not just the active occupied-seat scope."
                     ),
+                },
+            }
+        if tool_name == "set_all_zones_climate_temperature_safe":
+            return {
+                "name": "set_all_zones_climate_temperature_safe",
+                "signature": "set_all_zones_climate_temperature_safe(temperature)",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper for explicit all-zone temperature changes. "
+                    "Calls set_climate_temperature_safe with seat_zone=ALL_ZONES and "
+                    "explicit_all_zones=True so a prior occupied-seat scope cannot narrow "
+                    "the request."
+                ),
+                "required_arguments": ["temperature"],
+                "optional_arguments": [],
+                "schema": {
+                    "type": "object",
+                    "required": ["temperature"],
+                    "properties": {
+                        "temperature": {"type": "number", "minimum": 16, "maximum": 28},
+                    },
+                },
+                "argument_descriptions": {
+                    "temperature": "Target temperature in degrees Celsius for every climate zone.",
                 },
             }
         if tool_name == "sync_climate_zone":
@@ -2806,6 +2938,7 @@ class CoroutineWorkspace:
                 "pending_helper_messages",
                 "pending_response_obligations",
                 "pending_route_narration",
+                "pending_send_email_blocker",
             ):
                 facts.pop(key, None)
 
@@ -2849,6 +2982,14 @@ class CoroutineWorkspace:
         navigation_claim_blocker = self._ungrounded_navigation_completion_response(message)
         if navigation_claim_blocker is not None:
             self._respond_locked(navigation_claim_blocker)
+            return
+        active_email_blocker = self._active_send_email_blocker_response()
+        if active_email_blocker is not None:
+            self._suppress_internal_response_blocker(
+                "pending_send_email_blocker",
+                active_email_blocker,
+                message,
+            )
             return
         email_claim_blocker = self._ungrounded_email_completion_response(message)
         if email_claim_blocker is not None:
@@ -3005,6 +3146,31 @@ class CoroutineWorkspace:
         self._response_text = self._safe_user_message(message)
         self._response_locked = True
 
+    def _suppress_internal_response_blocker(
+        self,
+        blocker_name: str,
+        blocker_message: str,
+        attempted_message: str,
+    ) -> None:
+        """Keep model-directed guard feedback out of evaluator-facing chat.
+
+        Some guards are meant to tell the next internal model step which facts
+        are missing. If the model calls `respond(...)` before resolving them, do
+        not leak that internal instruction to the simulated user. Leaving
+        `_response_text` unset lets the coroutine loop continue with the current
+        scratchpad, where the blocker is already recorded.
+        """
+
+        self.remember(
+            "last_suppressed_response_blocker",
+            {
+                "name": blocker_name,
+                "message": blocker_message,
+                "attempted_response": attempted_message,
+                "created_user_turn_index": self._user_turn_index,
+            },
+        )
+
     def _preferred_air_circulation_response_repair(self, message: str) -> str | None:
         facts = self.scratchpad.get("facts")
         mode = facts.get("preferred_air_circulation_mode") if isinstance(facts, dict) else None
@@ -3127,11 +3293,96 @@ class CoroutineWorkspace:
             return None
         return self._unknown_fan_speed_relative_message()
 
-    def _charging_range_unknown_message(self) -> str:
+    @staticmethod
+    def _known_number(value: Any) -> int | float | None:
+        if isinstance(value, UnknownToolResponseValue):
+            return None
+        parsed = CoroutineWorkspace._parse_first_number(value)
+        if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+            return parsed
+        return None
+
+    @staticmethod
+    def _compact_number(value: int | float) -> str:
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return f"{number:g}"
+
+    @staticmethod
+    def _join_missing_fields(fields: list[str]) -> str:
+        if not fields:
+            return "the required charging information"
+        if len(fields) == 1:
+            return fields[0]
+        if len(fields) == 2:
+            return f"{fields[0]} or {fields[1]}"
+        return f"{', '.join(fields[:-1])}, or {fields[-1]}"
+
+    @staticmethod
+    def _join_known_facts(facts: list[str]) -> str:
+        if not facts:
+            return ""
+        if len(facts) == 1:
+            return facts[0]
+        if len(facts) == 2:
+            return f"{facts[0]} and {facts[1]}"
+        return f"{', '.join(facts[:-1])}, and {facts[-1]}"
+
+    def _latest_charging_status_for_unknown_range(self) -> dict[str, Any] | None:
+        entities = self.scratchpad.get("entities")
+        if isinstance(entities, dict):
+            charging = entities.get("last_charging_specs_and_status")
+            if isinstance(charging, dict):
+                return charging
+        gates = self.scratchpad.get("gates")
+        if isinstance(gates, dict):
+            gate = gates.get("charging_range_unknown")
+            if isinstance(gate, dict):
+                charging = gate.get("charging_status")
+                if isinstance(charging, dict):
+                    return charging
+        return None
+
+    def _charging_range_unknown_message(self, payload: dict[str, Any] | None = None) -> str:
+        charging = payload if isinstance(payload, dict) else self._latest_charging_status_for_unknown_range()
+        if not isinstance(charging, dict):
+            return (
+                "The car system did not provide the remaining range. I can't "
+                "determine whether charging is needed or complete charging-stop "
+                "planning from the available car data."
+            )
+
+        state_of_charge = self._known_number(charging.get("state_of_charge"))
+        battery_capacity = self._known_number(charging.get("battery_capacity_kwh"))
+        missing = ["the remaining range"]
+        if state_of_charge is None:
+            missing.append("state of charge")
+        if battery_capacity is None:
+            missing.append("battery capacity")
+
+        known_facts: list[str] = []
+        if state_of_charge is not None:
+            known_facts.append(
+                f"state of charge as {self._compact_number(state_of_charge)}%"
+            )
+        if battery_capacity is not None:
+            known_facts.append(
+                f"battery capacity as {self._compact_number(battery_capacity)} kWh"
+            )
+
+        missing_text = self._join_missing_fields(missing)
+        if known_facts:
+            known_text = self._join_known_facts(known_facts)
+            return (
+                f"The car reports {known_text}, but it did not provide "
+                f"{missing_text}. I can't determine whether charging is needed "
+                "or complete charging-stop planning from the available car data."
+            )
         return (
-            "I can't determine whether the remaining range is enough or complete "
-            "charging-stop planning because I looked it up and the car system did "
-            "not provide the remaining range."
+            f"The car system did not provide {missing_text}. I can't determine "
+            "whether charging is needed or complete charging-stop planning from "
+            "the available car data."
         )
 
     @staticmethod
@@ -3147,7 +3398,7 @@ class CoroutineWorkspace:
         self._ensure_scratchpad_shape()
         self.scratchpad["facts"]["unknown_charging_range_turn"] = self.last_user_message
         self.scratchpad["facts"]["unknown_charging_range_message"] = (
-            self._charging_range_unknown_message()
+            self._charging_range_unknown_message(payload)
         )
         self.scratchpad["gates"]["charging_range_unknown"] = {
             "status": "UNAVAILABLE",
@@ -3378,7 +3629,7 @@ class CoroutineWorkspace:
             "route_distance_km": route_distance,
         }
         self.scratchpad["gates"]["long_route_email_charging_fact_guard"] = report
-        self._store_helper_report("long_route_email_charging_fact_guard", report)
+        self._store_send_email_blocker_report("long_route_email_charging_fact_guard", report)
         return {
             "status": "NEEDS_MORE_FACTS",
             "tool_name": "send_email",
@@ -3413,13 +3664,18 @@ class CoroutineWorkspace:
             return None
         plan = entities.get("selected_charging_plan")
         if not isinstance(plan, dict):
+            has_grounded_along_route_station = (
+                self._has_grounded_along_route_charging_station_for_email(route)
+            )
             if self._email_content_mentions_charging_need(content):
+                if has_grounded_along_route_station:
+                    return None
                 message = (
                     "Before requesting confirmation to send this charging-route "
                     "email, gather grounded charging-stop details. The route "
                     "distance exceeds the current remaining range and the draft "
                     "says charging stops are required, but no charging stop, "
-                    "plug, or charging time has been selected yet."
+                    "plug, or route charging-station details have been selected yet."
                 )
                 report = {
                     "helper": "pre_send_charging_plan_guard",
@@ -3435,7 +3691,7 @@ class CoroutineWorkspace:
                     "current_remaining_range_km": remaining_range,
                 }
                 self.scratchpad["gates"]["pre_send_charging_plan_guard"] = report
-                self._store_helper_report("pre_send_charging_plan_guard", report)
+                self._store_send_email_blocker_report("pre_send_charging_plan_guard", report)
                 return {
                     "status": "NEEDS_MORE_FACTS",
                     "tool_name": "send_email",
@@ -3447,6 +3703,8 @@ class CoroutineWorkspace:
                 self._email_content_is_route_or_charging_related(content or "")
                 and not self._email_content_acknowledges_range_insufficiency(content)
             ):
+                if has_grounded_along_route_station:
+                    return None
                 message = (
                     "Before requesting confirmation to send this long-route email, "
                     "resolve the range insufficiency in the draft. The route "
@@ -3469,7 +3727,10 @@ class CoroutineWorkspace:
                     "current_remaining_range_km": remaining_range,
                 }
                 self.scratchpad["gates"]["pre_send_range_insufficiency_guard"] = report
-                self._store_helper_report("pre_send_range_insufficiency_guard", report)
+                self._store_send_email_blocker_report(
+                    "pre_send_range_insufficiency_guard",
+                    report,
+                )
                 return {
                     "status": "NEEDS_MORE_FACTS",
                     "tool_name": "send_email",
@@ -3504,7 +3765,7 @@ class CoroutineWorkspace:
             "target_state_of_charge": target_soc,
         }
         self.scratchpad["gates"]["post_charge_email_distance_fact_guard"] = report
-        self._store_helper_report("post_charge_email_distance_fact_guard", report)
+        self._store_send_email_blocker_report("post_charge_email_distance_fact_guard", report)
         return {
             "status": "NEEDS_MORE_FACTS",
             "tool_name": "send_email",
@@ -3576,6 +3837,48 @@ class CoroutineWorkspace:
             if isinstance(distance, (int, float)) and float(distance) >= 300:
                 return route
         return None
+
+    def _has_grounded_along_route_charging_station_for_email(
+        self,
+        route: dict[str, Any],
+    ) -> bool:
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return False
+        search = entities.get("last_poi_search")
+        if not isinstance(search, dict):
+            return False
+        if search.get("tool_name") != "search_poi_along_the_route":
+            return False
+        arguments = search.get("arguments")
+        arguments = arguments if isinstance(arguments, dict) else {}
+        route_id = route.get("route_id") or route.get("id")
+        search_route_id = arguments.get("route_id")
+        if (
+            isinstance(route_id, str)
+            and isinstance(search_route_id, str)
+            and search_route_id != route_id
+        ):
+            return False
+        category = str(search.get("category_poi") or arguments.get("category_poi") or "")
+        pois = search.get("pois")
+        if not isinstance(pois, list) or not pois:
+            return False
+        for poi in pois:
+            if not isinstance(poi, dict):
+                continue
+            poi_category = str(poi.get("category") or "")
+            poi_id = poi.get("poi_id") or poi.get("id") or poi.get("navigation_id")
+            if (
+                "charging" not in category.casefold()
+                and "charging" not in poi_category.casefold()
+                and not self._is_charging_poi_id(poi_id)
+            ):
+                continue
+            name = poi.get("name") or poi.get("display")
+            if isinstance(name, str) and name.strip():
+                return True
+        return False
 
     @staticmethod
     def _email_content_mentions_charging_need(content: str | None) -> bool:
@@ -4251,6 +4554,29 @@ class CoroutineWorkspace:
         )
         self._abort_with_response(report["message"])
 
+    def _invalid_helper_argument(
+        self,
+        helper_name: str,
+        argument_name: str,
+        value: Any,
+        allowed_values: tuple[str, ...],
+    ) -> NoReturn:
+        allowed_text = ", ".join(allowed_values)
+        message = (
+            f"{helper_name} received invalid {argument_name}={value!r}. "
+            f"Available {argument_name} values: {allowed_text}. "
+            "Retry with one of these exact values, or call a specific wrapped tool "
+            "when the request names a specific control."
+        )
+        self.scratchpad["gates"][helper_name] = {
+            "status": "BAD_ARGUMENT",
+            "argument": argument_name,
+            "received": value,
+            "allowed_values": list(allowed_values),
+            "reason": message,
+        }
+        raise ValueError(message)
+
     def _missing_tool_surface_for_calls(self, calls: list[Any]) -> tuple[list[str], list[dict[str, Any]]]:
         missing_tools: list[str] = []
         missing_arguments: list[dict[str, Any]] = []
@@ -4269,8 +4595,69 @@ class CoroutineWorkspace:
             # is not in this task's schema. No comparison to the original catalog.
             missing = [name for name in argument_names if name not in properties]
             if missing:
-                missing_arguments.append({"tool_name": tool_name, "missing_arguments": missing})
+                required = [str(name) for name in schema.get("required", []) or []]
+                missing_arguments.append(
+                    {
+                        "tool_name": tool_name,
+                        "missing_arguments": missing,
+                        "provided_arguments": argument_names,
+                        "available_arguments": sorted(str(name) for name in properties),
+                        "missing_required_arguments": [
+                            name for name in required if name not in argument_names
+                        ],
+                    }
+                )
         return sorted(set(missing_tools)), missing_arguments
+
+    def _invalid_tool_argument_retry_from_missing_arguments(
+        self,
+        gate_name: str,
+        missing_arguments: list[dict[str, Any]],
+    ) -> None:
+        retry_items = [
+            item
+            for item in missing_arguments
+            if item.get("missing_arguments") and item.get("missing_required_arguments")
+        ]
+        if not retry_items:
+            return
+
+        parts: list[str] = []
+        details: list[dict[str, Any]] = []
+        for item in retry_items:
+            tool_name = self._canonical_call_name(item.get("tool_name") or "")
+            invalid = [str(arg) for arg in item.get("missing_arguments", [])]
+            available = [str(arg) for arg in item.get("available_arguments", [])]
+            missing_required = [
+                str(arg) for arg in item.get("missing_required_arguments", [])
+            ]
+            details.append(
+                {
+                    "tool_name": tool_name,
+                    "invalid_arguments": invalid,
+                    "available_arguments": available,
+                    "missing_required_arguments": missing_required,
+                }
+            )
+            parts.append(
+                f"{tool_name} got unsupported argument(s) {invalid}; "
+                f"available arguments are {available}; "
+                f"missing required argument(s) are {missing_required}"
+            )
+
+        message = (
+            "Wrong wrapper argument key used. "
+            + " | ".join(parts)
+            + ". Retry the same task using one of the available argument names exactly. "
+            "If the available arguments cannot express the user's requested parameter, "
+            "then respond with the missing-capability limitation."
+        )
+        self.scratchpad["gates"][gate_name] = {
+            "status": "BAD_ARGUMENT",
+            "details": details,
+            "reason": message,
+        }
+        raise ValueError(message)
 
     def _require_tool_surface_for_calls(
         self,
@@ -4297,6 +4684,11 @@ class CoroutineWorkspace:
         missing_tools, missing_arguments = self._missing_tool_surface_for_calls(calls)
         if not missing_tools and not missing_arguments:
             return None
+        if not missing_tools and missing_arguments:
+            self._invalid_tool_argument_retry_from_missing_arguments(
+                gate_name,
+                missing_arguments,
+            )
         report = self._limitation_response(
             gate_name,
             action,
@@ -4785,6 +5177,62 @@ class CoroutineWorkspace:
             isinstance(call, dict) and call.get("tool_name") == "send_email"
             for call in calls
         )
+
+    def _active_send_email_blocker_response(self) -> str | None:
+        if self._has_successful_email_send() or self._pending_send_email_confirmation():
+            return None
+        facts = self.scratchpad.get("facts")
+        if not isinstance(facts, dict):
+            return None
+        blocker = facts.get("pending_send_email_blocker")
+        if not isinstance(blocker, dict):
+            return None
+        if blocker.get("blocked_tool") != "send_email":
+            return None
+        if blocker.get("created_user_turn_index") != self._user_turn_index:
+            facts.pop("pending_send_email_blocker", None)
+            return None
+        if self._send_email_blocker_is_resolved(blocker):
+            facts.pop("pending_send_email_blocker", None)
+            return None
+        blocker_name = str(blocker.get("name") or blocker.get("helper") or "")
+        if blocker_name in {
+            "pre_send_charging_plan_guard",
+            "pre_send_range_insufficiency_guard",
+        }:
+            # These blockers mean the email is not ready because user-level
+            # charging strategy or message scope is unresolved. Let the model
+            # ask the user instead of forcing an internal charger search.
+            return None
+        message = blocker.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        return None
+
+    def _send_email_blocker_is_resolved(self, blocker: dict[str, Any]) -> bool:
+        name = str(blocker.get("name") or blocker.get("helper") or "")
+        entities = self.scratchpad.get("entities")
+        if not isinstance(entities, dict):
+            return False
+        if name == "long_route_email_charging_fact_guard":
+            return isinstance(entities.get("last_charging_specs_and_status"), dict)
+        if name in {
+            "pre_send_charging_plan_guard",
+            "pre_send_range_insufficiency_guard",
+        }:
+            if isinstance(entities.get("selected_charging_plan"), dict):
+                return True
+            route_id = blocker.get("route_id")
+            route = {"route_id": route_id} if isinstance(route_id, str) else {}
+            return self._has_grounded_along_route_charging_station_for_email(route)
+        if name == "post_charge_email_distance_fact_guard":
+            target_soc = self._parse_first_number(blocker.get("target_state_of_charge"))
+            return (
+                isinstance(target_soc, (int, float))
+                and not isinstance(target_soc, bool)
+                and self._has_distance_by_soc_fact(target_soc, 0)
+            )
+        return False
 
     def _ungrounded_email_completion_response(self, message: str) -> str | None:
         if not self._claims_email_sent(message):
@@ -7659,11 +8107,29 @@ class CoroutineWorkspace:
         return result
 
     def navigation_replace_final_destination_guarded(self, **kwargs: Any) -> dict[str, Any]:
-        """Validate or fill the leading route without interpreting user language."""
+        """Validate or fill the leading route from grounded navigation facts."""
 
         new_id = kwargs.get("new_destination_id")
         if not isinstance(new_id, str):
             return self._call_raw_tool_sync("navigation_replace_final_destination", kwargs)
+        order = self._fresh_waypoint_order()
+        if len(order) >= 2 and new_id == order[-2]:
+            final_id = order[-1]
+            self.scratchpad["gates"]["final_destination_delete_redirect"] = {
+                "status": "REDIRECTED",
+                "from_tool": "navigation_replace_final_destination",
+                "to_tool": "navigation_delete_destination",
+                "new_destination_id": new_id,
+                "destination_id_to_delete": final_id,
+                "reason": (
+                    "requested replacement destination is already the penultimate "
+                    "waypoint, so the final destination must be deleted instead"
+                ),
+            }
+            return self._call_raw_tool_sync(
+                "navigation_delete_destination",
+                {"destination_id_to_delete": final_id},
+            )
         blocker = self._require_tool_surface_for_calls(
             "destination_replacement_surface",
             "change the destination",
@@ -7671,7 +8137,6 @@ class CoroutineWorkspace:
         )
         if blocker:
             return blocker
-        order = self._fresh_waypoint_order()
         if len(order) >= 2:
             previous_id = order[-2]
             provided_route_arg = kwargs.get("route_id_leading_to_new_destination")
@@ -7680,6 +8145,45 @@ class CoroutineWorkspace:
                 previous_id,
                 new_id,
             )
+            if not isinstance(route_id, str) and routes and isinstance(provided_route_arg, str):
+                repaired_route = self._unique_route_for_current_request_via(
+                    previous_id,
+                    new_id,
+                    routes,
+                )
+                repaired_id = (
+                    repaired_route.get("route_id") or repaired_route.get("id")
+                    if isinstance(repaired_route, dict)
+                    else None
+                )
+                if isinstance(repaired_id, str):
+                    route_id = repaired_id
+                    self.scratchpad["gates"]["final_destination_route_endpoint_guard"] = {
+                        "status": "REPAIRED",
+                        "from_route_id": provided_route_arg,
+                        "to_route_id": repaired_id,
+                        "required_start_id": previous_id,
+                        "required_destination_id": new_id,
+                        "reason": (
+                            "provided route id did not connect the active final "
+                            "replacement segment; repaired to the uniquely matching "
+                            "route for the grounded segment"
+                        ),
+                    }
+                else:
+                    self.scratchpad["gates"]["final_destination_route_endpoint_guard"] = {
+                        "status": "BLOCKED",
+                        "provided_route_id": provided_route_arg,
+                        "required_start_id": previous_id,
+                        "required_destination_id": new_id,
+                        "reason": (
+                            "provided route id does not connect the active final "
+                            "replacement segment"
+                        ),
+                    }
+                    self._abort_with_response(
+                        self._route_choice_prompt_for_final_destination(new_id, routes)
+                    )
             if isinstance(route_id, str):
                 if self._single_segment_final_destination_needs_route_choice(
                     order,
@@ -7698,6 +8202,26 @@ class CoroutineWorkspace:
                     selector=self._recorded_selector_for_route_id(route_id),
                 )
         return self._call_raw_tool_sync("navigation_replace_final_destination", kwargs)
+
+    def _unique_route_for_current_request_via(
+        self,
+        start_id: str,
+        destination_id: str,
+        routes: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Return a unique route whose already-fetched via roads were selected."""
+
+        if "via" not in self._effective_route_via_request_text().casefold():
+            return None
+        matches = [
+            route
+            for route in routes
+            if isinstance(route, dict)
+            and route.get("start_id") == start_id
+            and route.get("destination_id") == destination_id
+            and self._route_via_is_mentioned_in_current_request(route)
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def _single_segment_final_destination_needs_route_choice(
         self,
@@ -7837,6 +8361,7 @@ class CoroutineWorkspace:
                 if isinstance(history, list):
                     history.append(copy.deepcopy(entities["last_successful_email_send"]))
                     del history[:-8]
+                self.scratchpad["facts"].pop("pending_send_email_blocker", None)
                 continue
             if name == "delete_current_navigation":
                 revision = int(entities.get("navigation_revision") or 0) + 1
@@ -11138,13 +11663,11 @@ class CoroutineWorkspace:
         gate_name = "set_exterior_lights_safe"
         resolved_intent = self._normalize_exterior_lights_intent(intent)
         if resolved_intent is None:
-            return self._limitation_response(
+            self._invalid_helper_argument(
                 gate_name,
-                "handle the exterior-light request safely",
-                reason=(
-                    "set_exterior_lights_safe requires intent to be one of "
-                    "improve_visibility, turn_on_headlights, or turn_off_exterior_lights"
-                ),
+                "intent",
+                intent,
+                EXTERIOR_LIGHTS_SAFE_INTENTS,
             )
         if resolved_intent == "improve_visibility":
             return self.set_fog_lights_on_safe()
@@ -11181,11 +11704,7 @@ class CoroutineWorkspace:
         if not isinstance(intent, str):
             return None
         normalized = intent.strip().casefold().replace("-", "_").replace(" ", "_")
-        if normalized in {
-            "improve_visibility",
-            "turn_on_headlights",
-            "turn_off_exterior_lights",
-        }:
+        if normalized in EXTERIOR_LIGHTS_SAFE_INTENTS:
             return normalized
         return None
 
@@ -11744,11 +12263,160 @@ class CoroutineWorkspace:
             "report": report,
         }
 
+    @staticmethod
+    def _window_position_keys_for_selector(selector: Any) -> list[str]:
+        if isinstance(selector, str):
+            value = selector.strip()
+            upper = value.upper()
+            if upper == "FRONT":
+                return ["window_driver_position", "window_passenger_position"]
+            if upper == "REAR":
+                return ["window_driver_rear_position", "window_passenger_rear_position"]
+            if upper == "ALL":
+                return [
+                    "window_driver_position",
+                    "window_passenger_position",
+                    "window_driver_rear_position",
+                    "window_passenger_rear_position",
+                ]
+            if value in WINDOW_POSITION_KEY_TO_TOOL:
+                return [value]
+            if upper in _WINDOW_POSITION_KEYS:
+                return [_WINDOW_POSITION_KEYS[upper][0]]
+            lowered = value.lower().replace("_", " ")
+            tool_window = WINDOW_LABEL_TO_TOOL.get(lowered)
+            if tool_window and tool_window in _WINDOW_POSITION_KEYS:
+                return [_WINDOW_POSITION_KEYS[tool_window][0]]
+            return []
+        if isinstance(selector, (list, tuple)):
+            keys: list[str] = []
+            for item in selector:
+                for key in CoroutineWorkspace._window_position_keys_for_selector(item):
+                    if key not in keys:
+                        keys.append(key)
+            return keys
+        return []
+
+    def sync_window_positions(self, source_windows: Any, target_windows: Any) -> dict[str, Any]:
+        """Copy current window percentages from model-resolved source windows to targets."""
+
+        gate_name = "sync_window_positions"
+        source_keys = self._window_position_keys_for_selector(source_windows)
+        target_keys = self._window_position_keys_for_selector(target_windows)
+        if not source_keys or not target_keys:
+            return self._limitation_response(
+                gate_name,
+                "sync the window positions",
+                reason="the source and target windows were not resolved to supported windows",
+            )
+        if len(source_keys) == 1:
+            pairs = [(source_keys[0], target_key) for target_key in target_keys]
+        elif len(source_keys) == len(target_keys):
+            pairs = list(zip(source_keys, target_keys))
+        else:
+            return self._limitation_response(
+                gate_name,
+                "sync the window positions",
+                reason="the number of source windows does not match the number of target windows",
+            )
+
+        required_calls: list[tuple[str, dict[str, Any]]] = [("get_vehicle_window_positions", {})]
+        for _source_key, target_key in pairs:
+            required_calls.append(
+                (
+                    "open_close_window",
+                    {"window": WINDOW_POSITION_KEY_TO_TOOL[target_key], "percentage": 0},
+                )
+            )
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "sync the window positions",
+            required_calls,
+        )
+        if blocker:
+            return blocker
+
+        state_result = self._call_raw_tool_sync("get_vehicle_window_positions", {})
+        if state_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "read the window positions",
+                state_result,
+            )
+        windows = result_value(state_result)
+        if not isinstance(windows, dict):
+            return self._limitation_response(
+                gate_name,
+                "sync the window positions",
+                reason="the window-position result had an unexpected shape",
+            )
+
+        values: dict[str, float] = {}
+        for key in dict.fromkeys([key for pair in pairs for key in pair]):
+            value = windows.get(key)
+            if isinstance(value, UnknownToolResponseValue):
+                self._abort_missing_tool_response(
+                    f"result.get_vehicle_window_positions.{key}",
+                    "sync the window positions",
+                    gate_name,
+                )
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                self._abort_missing_tool_response(
+                    f"result.get_vehicle_window_positions.{key}",
+                    "sync the window positions",
+                    gate_name,
+                )
+            values[key] = float(value)
+
+        actions: list[dict[str, Any]] = []
+        for source_key, target_key in pairs:
+            target = max(0.0, min(100.0, values[source_key]))
+            target_arg: int | float = int(target) if target.is_integer() else target
+            if _numbers_equal(values[target_key], target_arg):
+                continue
+            action = self.open_close_window_safe(
+                window=WINDOW_POSITION_KEY_TO_TOOL[target_key],
+                percentage=target_arg,
+                _allow_state_derived_full_open=True,
+            )
+            if isinstance(action, dict):
+                actions.append(copy.deepcopy(action))
+
+        message = (
+            "Window positions already match."
+            if not actions
+            else "Window positions synchronized."
+        )
+        report = self._store_helper_report(
+            gate_name,
+            {
+                "helper": gate_name,
+                "status": "SUCCESS",
+                "source_windows": source_keys,
+                "target_windows": target_keys,
+                "pairs": [
+                    {
+                        "source": source_key,
+                        "target": target_key,
+                        "percentage": int(values[source_key])
+                        if values[source_key].is_integer()
+                        else values[source_key],
+                    }
+                    for source_key, target_key in pairs
+                ],
+                "actions": actions,
+                "message": message,
+            },
+        )
+        self._helper_message(message)
+        return {"status": "SUCCESS", "actions": actions, "report": report, "message": message}
+
     def open_close_window_safe(
         self,
         window: str,
         percentage: int | float,
         target_is_explicit: bool = False,
+        _allow_state_derived_full_open: bool = False,
     ) -> dict[str, Any]:
         """Move a window while applying CAR-bench policy 007."""
 
@@ -11770,6 +12438,8 @@ class CoroutineWorkspace:
         full_open_allowed = False
         if target >= 100:
             full_open_allowed = self._consume_pending_window_percentage_clarification(window)
+            if _allow_state_derived_full_open:
+                full_open_allowed = True
         else:
             self._clear_pending_window_percentage_clarification(window)
         if target >= 100 and not full_open_allowed:
@@ -12414,25 +13084,40 @@ class CoroutineWorkspace:
         for result in action_results:
             if result.get("status") != "SUCCESS":
                 return self._failed_tool_response(gate_name, "turn on AC safely", result)
+        unknown_window_disclosure = self._unknown_window_ac_disclosure(unknown_windows)
+        if unknown_window_disclosure:
+            self._add_response_obligation(
+                "ac_unknown_window_closed",
+                unknown_window_disclosure,
+            )
         report = self._store_helper_report(
             gate_name,
             {
                 "helper": gate_name,
                 "adjusted_windows": adjusted_windows,
                 "unknown_windows": unknown_windows,
+                "unknown_window_disclosure": unknown_window_disclosure,
                 "actions": [name for name, _ in action_calls],
                 "preferred_circulation": preferred_circulation,
             },
         )
         if preferred_circulation is not None:
-            self._helper_message(
+            message = (
                 "AC is on, and air circulation is set to your preferred "
                 f"{preferred_circulation} mode, with the required fan and "
                 "window safety settings handled."
             )
         else:
-            self._helper_message("AC is on, and I handled the required fan and window safety settings.")
-        return {"status": "SUCCESS", "actions": action_results, "report": report}
+            message = "AC is on, and I handled the required fan and window safety settings."
+        if unknown_window_disclosure:
+            message = message.rstrip().rstrip(".") + ". " + unknown_window_disclosure
+        self._helper_message(message)
+        return {
+            "status": "SUCCESS",
+            "actions": action_results,
+            "report": report,
+            "message": message,
+        }
 
     def close_known_windows_for_blocked_ac(self, window: str | None = None) -> dict[str, Any]:
         """Close only windows proven open in the last blocked AC/defrost helper report."""
@@ -12677,6 +13362,18 @@ class CoroutineWorkspace:
             "message": message,
             "report": report,
         }
+
+    def set_all_zones_climate_temperature_safe(
+        self,
+        temperature: int | float,
+    ) -> dict[str, Any]:
+        """Set the temperature for every climate zone through the safe helper."""
+
+        return self.set_climate_temperature_safe(
+            seat_zone="ALL_ZONES",
+            temperature=temperature,
+            explicit_all_zones=True,
+        )
 
     def _active_occupied_front_zone_scope(self) -> list[str]:
         entities = self.scratchpad.get("entities")
@@ -16117,6 +16814,50 @@ class CoroutineWorkspace:
                 return phone
         return None
 
+    def get_single_value_read_tool_value(
+        self,
+        tool_name: str,
+        *,
+        action: str,
+        **kwargs: Any,
+    ) -> Any:
+        field = SINGLE_VALUE_READ_TOOL_FIELDS[tool_name]
+        call = (tool_name, kwargs)
+        blocker = self._require_tool_surface_for_calls(tool_name, action, [call])
+        if blocker:
+            return blocker  # pragma: no cover - _limitation_response aborts.
+
+        result = self._call_raw_tool_sync(*call)
+        if result.get("status") != "SUCCESS":
+            return self._failed_tool_response(tool_name, action, result)
+
+        value = result_value(result)
+        if isinstance(value, UnknownToolResponseValue):
+            value.require()
+        if isinstance(value, str):
+            if value.strip():
+                return value.strip()
+        elif value is not None and not isinstance(value, dict):
+            return value
+        elif isinstance(value, dict):
+            field_value = value.get(field)
+            if isinstance(field_value, UnknownToolResponseValue):
+                field_value.require()
+            if isinstance(field_value, str) and field_value.strip():
+                return field_value.strip()
+            if field_value is not None and not isinstance(field_value, (dict, list)):
+                return field_value
+            return self._limitation_response(
+                tool_name,
+                action,
+                reason=f"the {field} result had an unexpected shape",
+            )
+        return self._limitation_response(
+            tool_name,
+            action,
+            reason=f"the {field} result had an unexpected shape",
+        )
+
     def get_preferred_ambient_light_color(self) -> dict[str, Any]:
         """Extract a unique ambient light color from user vehicle-setting preferences."""
 
@@ -16782,6 +17523,11 @@ class CoroutineWorkspace:
         parsed["tool_call_id"] = item.get("tool_call_id") or item.get("toolCallId") or ""
         if parsed.get("status") == "SUCCESS" and isinstance(parsed.get("result"), dict):
             parsed["result"] = self._normalize_result_payload(tool_name, parsed["result"])
+            if tool_name in SINGLE_VALUE_READ_TOOL_FIELDS:
+                parsed["result"] = self._single_result_field_value(
+                    parsed["result"],
+                    SINGLE_VALUE_READ_TOOL_FIELDS[tool_name],
+                )
         self._augment_success_result(tool_name, parsed)
         return parsed
 
@@ -16854,6 +17600,17 @@ class CoroutineWorkspace:
         if "pois_found_along_route" in normalized:
             normalized.setdefault("pois", normalized["pois_found_along_route"])
         return normalized
+
+    @staticmethod
+    def _single_result_field_value(result: dict[str, Any], field: str) -> Any:
+        value = result.get(field)
+        if isinstance(value, UnknownToolResponseValue):
+            return value
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is not None and not isinstance(value, (dict, list)):
+            return value
+        return result
 
     @staticmethod
     def _normalize_poi_result_record(poi: dict[str, Any]) -> dict[str, Any]:
@@ -17033,10 +17790,9 @@ def result_value(result: Any, index: int | None = None) -> Any:
             raise IndexError(f"Result index {index!r} is out of range")
         return result_value(result[index])
     if not isinstance(result, dict):
-        raise TypeError(
-            "result_value expected a result dict or list, got "
-            f"{type(result).__name__}"
-        )
+        if isinstance(result, UnknownToolResponseValue):
+            result.require()
+        return result
     if result.get("status") != "SUCCESS":
         raise RuntimeError(f"Tool {result.get('tool_name')} failed: {result}")
     value = result.get("result")
@@ -17284,6 +18040,7 @@ class BlockingPythonExecutor:
             "open_sunroof_safe": ws.open_sunroof_safe,
             "sync_sunshade_to_sunroof": ws.sync_sunshade_to_sunroof,
             "open_close_window_safe": ws.open_close_window_safe,
+            "sync_window_positions": ws.sync_window_positions,
             "set_fog_lights_on_safe": ws.set_fog_lights_on_safe,
             "set_high_beams_on_safe": ws.set_high_beams_on_safe,
             "set_exterior_lights_safe": ws.set_exterior_lights_safe,
@@ -17296,6 +18053,7 @@ class BlockingPythonExecutor:
             "set_air_conditioning_on_safe": ws.set_air_conditioning_on_safe,
             "close_known_windows_for_blocked_ac": ws.close_known_windows_for_blocked_ac,
             "set_climate_temperature_safe": ws.set_climate_temperature_safe,
+            "set_all_zones_climate_temperature_safe": ws.set_all_zones_climate_temperature_safe,
             "sync_climate_zone": ws.sync_climate_zone,
             "increase_fan_speed": ws.increase_fan_speed,
             "decrease_fan_speed": ws.decrease_fan_speed,
@@ -17372,6 +18130,12 @@ class BlockingPythonExecutor:
                 return self.workspace.set_fog_lights_on_safe()
             if tool_name == "set_head_lights_high_beams" and kwargs.get("on") is True:
                 return self.workspace.set_high_beams_on_safe()
+            if tool_name in SINGLE_VALUE_READ_TOOL_FIELDS:
+                return self.workspace.get_single_value_read_tool_value(
+                    tool_name,
+                    action=SINGLE_VALUE_READ_TOOL_ACTIONS[tool_name],
+                    **kwargs,
+                )
             if tool_name == "get_routes_from_start_to_destination":
                 return self.workspace.get_routes_guarded(**kwargs)
             if tool_name == "get_weather":

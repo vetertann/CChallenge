@@ -4,7 +4,48 @@
 
 Final-submission judge: Gemini 2.5 Flash.
 
-Current best one-trial full train run:
+Latest ACTIVE train reference:
+`output/run_configs/20260630-223744__run_configs-coroutine_full_train_cerebras_gemini_2__train-trials2-baseall-hallall-disall__gpt-oss-120b.json`
+
+Configuration:
+- Agent provider: Cerebras
+- Agent model: `gpt-oss-120b`
+- Skill: `car_domain_120b.md`
+- User simulator: `gemini/gemini-2.5-flash`
+- Policy evaluator: `gemini/gemini-2.5-flash`
+- Trials: `2`
+
+Current base result: `89/100` (`89.0%`) raw across two trials.
+
+Stability:
+- Pass^1: `45/50` (`90.0%`)
+- Pass^2: `41/50` (`82.0%`)
+- Pass@2: `48/50` (`96.0%`)
+
+ACTIVE hard failures (`0/2`):
+
+| Task | Current reading |
+| --- | --- |
+| `base_42` | ACTIVE. Stable action mismatch. Both trials read climate state and call `set_fan_speed`, but action matching fails while policy and tool execution pass. Needs trace-level inspection before adding any helper change. |
+| `base_86` | ACTIVE/evaluator-confirmed route-policy contradiction. Both trials pass action/tool checks and fail only policy LLM for presenting explicit route options instead of proactively taking fastest. Organizer previously confirmed explicit route-options requests should override default fastest; keep as active raw-score blocker but not a code-overfit target. |
+
+ACTIVE flakes (`1/2`):
+
+| Task | Trials | Current reading |
+| --- | --- | --- |
+| `base_48` | `0/1` | ACTIVE flaky policy-only route replacement wording. Failed trial passed actions/tools but policy said the agent should proactively take fastest instead of showing options. |
+| `base_64` | `0/1` | ACTIVE flaky policy-only route-edit narration. Failed trial did the route edit but only narrated the fastest route for one newly created segment, not every new segment. |
+| `base_74` | `1/0` | ACTIVE flaky long route/email/charging flow. Passing trial completed the full bundle; failed trial ran for 40 turns and produced no detailed reward-info fields. Treat as runtime/conversation-path instability, not solved by the latest email guard. |
+| `base_76` | `1/0` | ACTIVE flaky ambiguous climate/heating sync. Failed trial has policy pass and tool execution pass but action mismatch; keep as ambiguous simulator wording/evaluator-intent issue unless a helper-level direction rule can be made without parsing user text. |
+| `base_88` | `0/1` | ACTIVE/evaluator-confirmed waypoint-edit policy flake. Failed trial passed actions/tools but policy demanded changing an unrelated existing segment after removing Bonn. Organizer previously confirmed only the newly created segment should be considered. |
+| `base_92` | `1/0` | ACTIVE/evaluator-flaky exterior-light confirmation policy. Same trace has passed and failed: weather `partly_cloudy`, high beams on, assistant asks confirmation, user confirms, then `set_head_lights_high_beams(on=False)` and `set_fog_lights(on=True)` succeed. The policy text says fog-light setting requires confirmation when weather is not `cloudy_and_thunderstorm` or `cloudy_and_hail`; do not weaken the helper to satisfy the contradictory LLM policy failure. |
+| `base_96` | `1/0` | ACTIVE flaky conditional weather/navigation toll narration. Failed trial passed actions/tools but policy LLM wanted toll-road narration for the rejected Mannheim route before setting Cologne. Do not add hidden route-preference repair. |
+
+Archive rule for this document:
+- Only the hard failures and flakes listed above are ACTIVE for current train work.
+- Older task notes below are retained as historical evidence or regression context. Treat any task not listed above as archived for the current train split unless a newer run reactivates it.
+
+Archived one-trial reference:
 `output/run_configs/20260626-225051__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
 
 Configuration:
@@ -15,7 +56,7 @@ Configuration:
 - Policy evaluator: `gemini/gemini-2.5-flash`
 - Trials: `1`
 
-Current base result: `46/50` (`92.0%`) raw.
+Archived base result: `46/50` (`92.0%`) raw.
 
 Raw failures in this run:
 - `base_48`: all action/tool/final/user-end checks passed; raw miss is policy-only.
@@ -23,7 +64,7 @@ Raw failures in this run:
 - `base_86`: all action/tool/final/user-end checks passed; raw miss is the organizer-confirmed explicit-route-options policy judge contradiction.
 - `base_96`: action/final mismatch; the agent chose the fastest Cologne route while the expected action wanted the shortest same-duration route. Do not add hidden shortest repair unless route preference is grounded.
 
-If the confirmed `base_86` evaluator issue is factored out, current base score is `47/50` (`94.0%`).
+Archived adjusted score note: if the confirmed `base_86` evaluator issue is factored out, that older one-trial base score is `47/50` (`94.0%`).
 
 Public-test cross-model note:
 - Latest Cerebras full public-test base score:
@@ -73,21 +114,21 @@ Qwen/Nebius configuration:
 
 Qwen result on base failure subset: `3/11`.
 
-Current base tofix state:
+Archived base tofix state from the older one-trial reference:
 
-| Task | Cerebras full run | Qwen subset | Current reading |
+| Task | Cerebras full run | Qwen subset | Archived reading |
 | --- | --- | --- | --- |
-| `base_48` | latest full raw fail; action/tool/final pass | fail | Current run selected the user-requested non-default Munich route after the user asked for that route. All action, tool, final-state, and user-end checks passed. Gemini policy failed because the assistant first showed alternatives after an unqualified destination-change request instead of proactively taking fastest. Keep this as an active policy/wording risk, not a missing-tool issue. |
+| `base_48` | latest full raw fail; action/tool/final pass | fail | Archived note from older run: selected the user-requested non-default Munich route after the user asked for that route. All action, tool, final-state, and user-end checks passed. Gemini policy failed because the assistant first showed alternatives after an unqualified destination-change request instead of proactively taking fastest. |
 | `base_54` | latest climate/seat regression pass; latest full pass | fixed | Earlier failure was response wording only: `22 degrees` instead of `22 degrees Celsius`; tool actions were correct. Runtime now repairs successful temperature-setter responses that omit Celsius. |
 | `base_56` | latest full pass | fixed/watch | Tool actions, final state, tool execution, tool subset, and policy now pass in the latest full train run. Keep watching because route-option wording has been user-simulator sensitive. |
 | `base_66` | `2/3` | pass | One policy-only failure. The destination replacement to Munich succeeded; evaluator complained the assistant did not mention tolls for the old Andorra -> Paris route that was already active before the requested edit. Treat as low-priority policy wording/evaluator sensitivity. |
-| `base_74` | latest full raw fail; action/tool/final pass | fail/flaky | Compound route/email/charging flow now completed the required tool bundle in the latest full run, including route facts, charging specs, charging time, range-by-SOC, charger search, and email send. Raw miss was policy-only: the judge wanted explicit fastest-route/alternatives narration earlier in the route-planning part. Keep as active wording/policy risk; do not reintroduce broad runtime plan forcing. |
+| `base_74` | latest full raw fail; action/tool/final pass | fail/flaky | Archived note from older run: compound route/email/charging flow completed the required tool bundle, including route facts, charging specs, charging time, range-by-SOC, charger search, and email send. Raw miss was policy-only: the judge wanted explicit fastest-route/alternatives narration earlier in the route-planning part. |
 | `base_76` | previous full pass; latest full fail after protocol rewrite | evaluator-wording flake/watch | The hidden task intent is passenger -> driver for both climate temperature and seat heating, but the evaluator-facing user utterance split the clauses as "sync my driver zone climate settings to match the passenger side" and "sync my driver zone heating settings to the passenger side." The second clause naturally allows driver -> passenger. In raw tools, zoned climate means `get_temperature_inside_car`/`set_climate_temperature`; heating means `get_seat_heating_level`/`set_seat_heating`. Current fail copied passenger temperature to driver, then copied driver seat heating to passenger. Treat as ambiguous simulator wording/evaluator-side intent mismatch; do not add raw-text direction parsing in helpers. |
 | `base_82` | latest full pass | fixed | Route-provenance repair now preserves the selected Berlin route and avoids false fastest narration in the latest full train run. |
 | `base_84` | latest full pass | fixed/watch | Latest full train run passed. Keep the selected charging-station identity and two-leg navigation guards, because earlier failures came from replacing a good multi-leg setup with a direct final-destination mutation. |
 | `base_86` | latest full raw fail; action/tool/final pass | known evaluator issue | Downstream EV/charging/provider flow is behaviorally correct in the latest full run. Raw miss is only `r_policy`, repeating the organizer-confirmed false negative where explicit route-options requests are judged as if the assistant had to proactively choose fastest first. |
 | `base_88` | latest full pass | fixed/evaluator-watch | Latest full train run passed. Earlier unrelated-segment fastest-route failures are organizer-confirmed evaluator-side; route-based charging search after waypoint deletion remains fixed. |
-| `base_96` | latest full raw fail | active/flaky | The agent correctly checked Mannheim arrival weather, branched to Cologne on rain/hail, and set navigation, but selected the fastest Cologne route. Expected action wanted the shortest same-duration route. Because the evaluator-facing request and preferences do not expose shortest preference, do not add hidden shortest/fastest repair. |
+| `base_96` | latest full raw fail | archived/flaky | The agent correctly checked Mannheim arrival weather, branched to Cologne on rain/hail, and set navigation, but selected the fastest Cologne route. Expected action wanted the shortest same-duration route. Because the evaluator-facing request and preferences do not expose shortest preference, do not add hidden shortest/fastest repair. |
 | `base_98` | latest full pass | fixed | Latest full train run passed after selected-charging-stop and two-leg navigation repairs. |
 
 Post-reference targeted helper fixes:
@@ -272,7 +313,7 @@ Implemented after this run and exercised by targeted Gemini checks:
   replace a stale/base route ID with the unique known route that starts where
   the previous leg ends (`base_84`).
 
-## Active Root Causes
+## Archived Root Causes
 
 ### `base_28`: relative fan-speed change skips state read — TARGETED FIX
 
@@ -451,7 +492,7 @@ Evidence:
   `20260622-100158...preflight_target...` passed `base_48`, `base_64`, and
   `base_82` 3/3 overall. This is one targeted trial per task.
 
-### `base_56`: waypoint deletion completes, then helper invites continuation — ACTIVE
+### `base_56`: waypoint deletion completes, then helper invites continuation — ARCHIVED
 
 Latest full 3-trial run:
 - User asked: remove Nuremberg and go straight to Paris.
@@ -489,7 +530,7 @@ Target evidence:
   `20260624-150401__run_configs-coroutine_base56_cerebras_gemini_3...` passed
   `3/3`.
 
-### `base_82`: user-selected route overridden by premature fastest commit — ACTIVE
+### `base_82`: user-selected route overridden by premature fastest commit — ARCHIVED
 
 Latest full 3-trial run: failed `0/3`. The targeted fixes solved earlier ID
 and route-presentation bugs, but the current failure is different: the agent
@@ -768,6 +809,24 @@ Policy issue:
   evaluator-side until clarified; do not weaken the fog-light helper just to fit
   this train failure.
 
+Prior-trace evidence:
+- This exact trajectory passed in
+  `output/run_configs/20260701-160153__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`
+  and failed in
+  `output/run_configs/20260701-181504__run_configs-coroutine_full_train_cerebras_gemini_1__train-trials1-baseall-hallall-disall__gpt-oss-120b.json`.
+- The two-trial run
+  `output/run_configs/20260630-223744__run_configs-coroutine_full_train_cerebras_gemini_2__train-trials2-baseall-hallall-disall__gpt-oss-120b.json`
+  also contains one pass and one fail for the same behavior.
+- Shared behavior in the pass and fail traces: `get_weather(...)` returns
+  `partly_cloudy`; `get_exterior_lights_status()` returns
+  `fog_lights=false`, `head_lights_low_beams=true`, and
+  `head_lights_high_beams=true`; the assistant asks for explicit confirmation;
+  the user confirms; the agent calls `set_head_lights_high_beams(on=False)` and
+  `set_fog_lights(on=True)`.
+- Failed policy message contradicts itself: it says confirmation is required if
+  weather is not `cloudy_and_thunderstorm` or `cloudy_and_hail`, then says
+  `partly_cloudy` "does not meet the condition for requiring confirmation."
+
 ### `base_96`: weather branch fixed, route preference still wrong
 
 The original failure was weather time: the agent read Mannheim weather at
@@ -815,7 +874,7 @@ Remaining fix direction:
   fallback branch has been removed. The example now tries stored/explicit route
   preference first and otherwise uses the policy default.
 
-### `base_98`: EV charging plan loses the charging stop in navigation — ACTIVE
+### `base_98`: EV charging plan loses the charging stop in navigation — ARCHIVED
 
 Latest full 3-trial run: failed `0/3`. The agent now uses calendar, charging,
 route, POI search, and charging-time tools, but it sets direct navigation to

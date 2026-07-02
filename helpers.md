@@ -47,6 +47,7 @@ Current helper-risk pattern:
 - Do not describe a user-selected route as fastest unless that is true for the selected route.
 - Do not perform default side effects before a missing user parameter is resolved.
 - Do not infer missing user parameters by matching words in the user message. Helpers may rely on explicit helper arguments, grounded tool state, stored facts, policy constants, or a clarification answer.
+- Invalid helper or wrapper argument values are internal retry errors, not evaluator-facing limitations. The retry message should name the wrong value and the accepted values. Missing evaluator tools or live parameters remain direct capability limitations to the user.
 - ID arguments must come from policy state, successful tool results, or persisted grounded entities. Helpers and wrappers must not construct plausible IDs from names or placeholders.
 - Accepted exception: only via-road label preservation may compare current-turn text against already-fetched candidate labels for the same start/destination segment. This is not allowed to invent a missing value, choose among ambiguous candidates, default a side effect, or carry previous raw wording through a bare follow-up such as "continue". If a choice must survive a follow-up, it should be a recorded `select_route(...)` fact.
 - Do not claim a multi-step plan is complete unless the whole required action chain succeeded.

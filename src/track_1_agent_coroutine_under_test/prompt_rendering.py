@@ -53,10 +53,252 @@ Do not wrap the JSON in markdown fences. Do not add text before or after it.
 """
 
 
+_WRAPPED_TOOL_USAGE_NOTES = {
+    "calculate_charging_soc_by_time": (
+        "Python wrapper for a charging calculation. Use after a station and plug "
+        "ID are grounded to compute SOC after a charging duration."
+    ),
+    "calculate_charging_time_by_soc": (
+        "Python wrapper for a charging calculation. Use after a station and plug "
+        "ID are grounded to compute minutes from start SOC to target SOC."
+    ),
+    "calculate_datetime": (
+        "Python wrapper for evaluator date/time arithmetic. Use for policy-date "
+        "calculations instead of doing fragile manual datetime math."
+    ),
+    "calculate_math": (
+        "Python wrapper for evaluator arithmetic. Use for numeric calculations "
+        "when no domain-specific helper/tool already gives the value."
+    ),
+    "call_phone_by_number": (
+        "Python wrapper that places a phone call to an exact grounded number. For "
+        "selected charging providers, prefer call_selected_charging_provider()."
+    ),
+    "convert_route_distance_and_time": (
+        "Python wrapper for converting distance/time along a grounded route_id."
+    ),
+    "delete_current_navigation": (
+        "Python wrapper that deletes active navigation. Call only for an explicit "
+        "user request to stop/delete the whole route."
+    ),
+    "get_ambient_light_status_and_color": (
+        "Python read wrapper for current ambient-light on/off state and color."
+    ),
+    "get_car_color": (
+        "Python read wrapper for the vehicle color. Direct get_car_color() returns "
+        "the color string, e.g. PURPLE."
+    ),
+    "get_charging_specs_and_status": (
+        "Python read wrapper for battery specs, SOC, and remaining_range. Read it "
+        "before answering range or charging-need questions."
+    ),
+    "get_climate_settings": (
+        "Python read wrapper for fan, airflow, AC, circulation, and defrost state."
+    ),
+    "get_contact_id_by_contact_name": (
+        "Python wrapper for contact lookup by first/last name. It delegates through "
+        "the guarded lookup path and can narrow against recent calendar attendees."
+    ),
+    "get_contact_information": (
+        "Python read wrapper for contact details by grounded contact IDs. Prefer "
+        "get_contact_details(...) when roles or normalized fields matter."
+    ),
+    "get_current_navigation_state": (
+        "Python read wrapper for raw navigation state. Prefer get_navigation_state(...) "
+        "for normalized waypoints, routes, start, destination, and intermediates."
+    ),
+    "get_distance_by_soc": (
+        "Python wrapper for official distance from one SOC to another. Prefer "
+        "get_distance_by_soc_value(...) when you need normalized distance_km."
+    ),
+    "get_entries_from_calendar": (
+        "Python read wrapper for today's calendar entries. Use policy date; for the "
+        "next entry, prefer get_next_calendar_entry()."
+    ),
+    "get_exterior_lights_status": (
+        "Python read wrapper for fog, low-beam, and high-beam state."
+    ),
+    "get_location_id_by_location_name": (
+        "Python wrapper for city/location ID lookup. Pass the main city/location "
+        "name, then use the returned ID; never invent loc_* IDs."
+    ),
+    "get_reading_lights_status": (
+        "Python read wrapper for current reading-light states by position."
+    ),
+    "get_routes_from_start_to_destination": (
+        "Python wrapper for route alternatives between grounded IDs. It delegates "
+        "through guarded route normalization; prefer get_route_options(...) plus "
+        "select_route(...) for most reasoning."
+    ),
+    "get_seat_heating_level": (
+        "Python read wrapper for current front-seat heating levels."
+    ),
+    "get_seats_occupancy": (
+        "Python read wrapper for seat occupancy. Use before occupancy-scoped seat "
+        "heating or reading-light actions."
+    ),
+    "get_steering_wheel_heating_level": (
+        "Python read wrapper for current steering-wheel heating level. Direct "
+        "get_steering_wheel_heating_level() returns the integer level."
+    ),
+    "get_sunroof_and_sunshade_position": (
+        "Python read wrapper for current sunroof and sunshade percentages."
+    ),
+    "get_temperature_inside_car": (
+        "Python read wrapper for current driver/passenger cabin temperatures."
+    ),
+    "get_trunk_door_position": (
+        "Python read wrapper for current trunk-door position. Direct "
+        "get_trunk_door_position() returns the position string, e.g. closed."
+    ),
+    "get_user_preferences": (
+        "Python read wrapper for learned preferences. Treat preferences as evidence "
+        "only when they match the current decision point."
+    ),
+    "get_vehicle_window_positions": (
+        "Python read wrapper for current window percentages. Unknown values are "
+        "possible; policy helpers handle the safe unknown-window paths."
+    ),
+    "get_weather": (
+        "Python wrapper for weather at a grounded location/POI and policy date/time. "
+        "For navigation decisions, prefer arrival-time helpers."
+    ),
+    "navigation_add_one_waypoint": (
+        "Python wrapper that adds one waypoint to active navigation. It delegates "
+        "through guarded route/waypoint validation."
+    ),
+    "navigation_delete_destination": (
+        "Python wrapper that removes the final destination from an active multi-stop "
+        "route, making the previous waypoint the destination."
+    ),
+    "navigation_delete_waypoint": (
+        "Python wrapper that removes one intermediate waypoint. It delegates through "
+        "guarded replacement-route validation."
+    ),
+    "navigation_replace_final_destination": (
+        "Python wrapper that replaces only the final destination. It delegates "
+        "through guarded active-route validation."
+    ),
+    "navigation_replace_one_waypoint": (
+        "Python wrapper that replaces one intermediate waypoint. It delegates "
+        "through guarded two-segment route validation."
+    ),
+    "open_close_sunroof": (
+        "Python wrapper for exact sunroof percentage. It delegates to "
+        "open_sunroof_safe(...), which applies sunshade/weather/confirmation policy."
+    ),
+    "open_close_sunshade": (
+        "Python wrapper for exact sunshade percentage. For matching the sunshade to "
+        "the sunroof, prefer sync_sunshade_to_sunroof()."
+    ),
+    "open_close_trunk_door": (
+        "Python wrapper for trunk open/close when the live task exposes that capability."
+    ),
+    "open_close_window": (
+        "Python wrapper for exact window percentage. It delegates to "
+        "open_close_window_safe(...), which applies AC/full-open policy."
+    ),
+    "planning_tool": (
+        "Wrapped evaluator planning tool. Usually unnecessary in this REPL; use "
+        "Python variables, scratchpad, and helper reports unless the evaluator task "
+        "specifically benefits from an official plan update."
+    ),
+    "search_poi_along_the_route": (
+        "Python wrapper for POI search along a grounded route_id. For charging "
+        "stations, pass at_kilometer; prefer charging/search helpers when available."
+    ),
+    "search_poi_at_location": (
+        "Python wrapper for POI search at a grounded location_id. Use select_poi(...) "
+        "or open-at-arrival helpers to choose one grounded POI."
+    ),
+    "send_email": (
+        "Python wrapper for email send. It handles confirmation gating; call it with "
+        "the final grounded recipient email(s) and complete final content."
+    ),
+    "set_air_circulation": (
+        "Python wrapper for exact air-circulation mode after the mode is resolved."
+    ),
+    "set_air_conditioning": (
+        "Python wrapper for AC on/off. Turning AC on delegates to "
+        "set_air_conditioning_on_safe(), which applies window and fan policy."
+    ),
+    "set_ambient_lights": (
+        "Python wrapper for ambient lights. Use a grounded color when setting color; "
+        "get_preferred_ambient_light_color() can resolve stored preference."
+    ),
+    "set_climate_temperature": (
+        "Python wrapper for exact climate temperature. It delegates to "
+        "set_climate_temperature_safe(...) for zone-scope and warning policy."
+    ),
+    "set_fan_airflow_direction": (
+        "Python wrapper for exact fan airflow direction after the target direction is resolved."
+    ),
+    "set_fan_speed": (
+        "Python wrapper for exact fan speed level. For relative changes, prefer "
+        "increase_fan_speed(...) or decrease_fan_speed(...)."
+    ),
+    "set_fog_lights": (
+        "Python wrapper for fog lights. Turning them on delegates to "
+        "set_fog_lights_on_safe(), which applies weather and beam policy."
+    ),
+    "set_head_lights_high_beams": (
+        "Python wrapper for high beams. Turning them on delegates to "
+        "set_high_beams_on_safe(), which applies fog-light and confirmation policy."
+    ),
+    "set_head_lights_low_beams": (
+        "Python wrapper for low beams after the on/off target is resolved."
+    ),
+    "set_new_navigation": (
+        "Python wrapper for starting inactive navigation from ordered route IDs. It "
+        "delegates through guarded route validation; do not use it for active-route edits."
+    ),
+    "set_reading_light": (
+        "Python wrapper for one exact reading-light position. For occupancy-scoped "
+        "requests, prefer the reading-light helpers."
+    ),
+    "set_seat_heating": (
+        "Python wrapper for exact front-seat heating level. For occupancy or sync "
+        "requests, prefer the seat-heating helpers."
+    ),
+    "set_steering_wheel_heating": (
+        "Python wrapper for exact steering-wheel heating level."
+    ),
+    "set_window_defrost": (
+        "Python wrapper for window defrost. Front/all ON delegates to "
+        "set_window_defrost_safe(...), which applies fan/airflow/AC policy."
+    ),
+    "think": (
+        "Wrapped evaluator thinking tool. Usually unnecessary in this REPL; prefer "
+        "normal Python variables, comments, and scratchpad facts."
+    ),
+}
+
+
+_COMPACT_WRAPPED_TOOL_SIGNATURES = {
+    "get_car_color": "get_car_color() -> str",
+    "get_steering_wheel_heating_level": "get_steering_wheel_heating_level() -> int",
+    "get_trunk_door_position": "get_trunk_door_position() -> str",
+    "planning_tool": "planning_tool(command, ...)",
+}
+
+_SUPPRESSED_ARGUMENT_NOTES = {
+    "planning_tool",
+}
+
+
 def render_tool_functions(tools: list[dict[str, Any]]) -> str:
     if not tools:
-        return "No CAR-bench tools are currently available. Use respond(...).\n"
-    lines: list[str] = []
+        return "No low-level Python wrappers are documented. Use respond(...).\n"
+    lines: list[str] = [
+        "",
+        "Low-level Python wrappers:",
+        "These Python callable names match evaluator tools. A call first checks "
+        "the current task's live tool/parameter surface, then either emits the "
+        "official evaluator tool call or returns the safe missing-capability / "
+        "confirmation response. Prefer the helpers above when one covers the "
+        "request; use these directly for simple reads, simple grounded setters, "
+        "or fallback workflows.",
+    ]
     for tool in tools:
         fn = tool.get("function", {})
         name = fn.get("name", "")
@@ -79,16 +321,17 @@ def render_tool_functions(tools: list[dict[str, Any]]) -> str:
             _render_argument(name, properties.get(name) or {}, optional=True)
             for name in optional
         ]
-        signature = f"{name}({', '.join(args)})"
+        signature = _COMPACT_WRAPPED_TOOL_SIGNATURES.get(name) or f"{name}({', '.join(args)})"
         output_keys = ORIGINAL_TOOL_OUTPUTS.get(name)
         if output_keys:
             signature += " -> result{" + ", ".join(output_keys) + "}"
         lines.append(f"- `{signature}`")
-        if description:
-            lines.append(f"  {description}")
-        notes = _render_argument_notes(properties)
+        usage_note = _WRAPPED_TOOL_USAGE_NOTES.get(name) or description
+        if usage_note:
+            lines.append(f"  {usage_note}")
+        notes = "" if name in _SUPPRESSED_ARGUMENT_NOTES else _render_argument_notes(properties)
         if notes:
-            lines.append(f"  args: {notes}")
+            lines.append(f"  Key args: {notes}")
     return "\n".join(lines).strip() + "\n"
 
 

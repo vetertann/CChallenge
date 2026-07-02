@@ -43,6 +43,14 @@ PREFLIGHT_ATTENTION_REMINDER = (
     "Current-turn attention reminders:\n"
     "- Preference facts from preflight are evidence, not commands. Apply them only "
     "when they match the current decision point and current valid options.\n"
+    "- For multi-level controls, a current off/zero state plus a request to turn "
+    "the control on does not ground a numeric level. Unless policy, preferences, "
+    "a documented default, or the user supplies the level, ask before calling the "
+    "setter.\n"
+    "- For ambient-light color changes where the color is unresolved, call "
+    "`get_preferred_ambient_light_color()` before asking. If it returns "
+    "`SUCCESS`, use that `lightcolor` with `set_ambient_lights(...)`; if it "
+    "returns `AMBIGUOUS` or `NOT_FOUND`, ask for the color.\n"
     "- If navigation depends on destination weather, use arrival-time weather via "
     "`navigate_to_poi_unless_arrival_weather(...)` or "
     "`navigate_to_poi_by_arrival_weather(...)` for primary-location POI navigation, "
@@ -72,7 +80,7 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 
 ## Runtime
 - You have exactly one model action surface: execute Python code.
-- Persistent Python globals include `ws`, `scratchpad`, `respond`, `stop_after_response`, `batch`, `result_by_tool`, `result_value`, `id_value`, `unique_id_intersection`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `send_contact_details_to_contact`, `get_next_calendar_entry`, `defrost_front_window`, `open_sunroof_safe`, `sync_sunshade_to_sunroof`, `open_close_window_safe`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `set_exterior_lights_safe`, `present_climate_comfort_options`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `sync_climate_zone`, `increase_fan_speed`, `decrease_fan_speed`, `set_occupied_seat_heating`, `turn_off_unoccupied_seat_heating`, `optimize_seat_heating_by_occupancy`, `set_occupied_reading_lights`, `set_reading_lights_by_occupancy`, `get_route_options`, `select_route`, `select_route_by_user_preferences`, `select_poi`, `replace_final_destination_with_poi`, `get_weather_at_route_arrival`, `navigate_by_arrival_weather`, `navigate_to_poi_by_arrival_weather`, `navigate_to_poi_unless_arrival_weather`, `set_navigation_conditioned_on_arrival_weather`, `select_poi_at_location_open_at_route_arrival`, `select_charging_plug`, `find_charging_stop_on_active_route_by_soc`, `search_charging_stations_on_route`, `search_charging_stations_on_active_route`, `estimate_charging_stops_for_route_by_soc_window`, `set_navigation_via_route_stop_with_open_poi`, `set_new_navigation_via_stop`, `plan_charging_for_next_meeting`, `call_selected_charging_provider`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
+- Persistent Python globals include `ws`, `scratchpad`, `respond`, `stop_after_response`, `batch`, `result_by_tool`, `result_value`, `id_value`, `unique_id_intersection`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `send_contact_details_to_contact`, `get_next_calendar_entry`, `defrost_front_window`, `open_sunroof_safe`, `sync_sunshade_to_sunroof`, `open_close_window_safe`, `sync_window_positions`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `set_exterior_lights_safe`, `present_climate_comfort_options`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `set_all_zones_climate_temperature_safe`, `sync_climate_zone`, `increase_fan_speed`, `decrease_fan_speed`, `set_occupied_seat_heating`, `turn_off_unoccupied_seat_heating`, `optimize_seat_heating_by_occupancy`, `set_occupied_reading_lights`, `set_reading_lights_by_occupancy`, `get_route_options`, `select_route`, `select_route_by_user_preferences`, `select_poi`, `replace_final_destination_with_poi`, `get_weather_at_route_arrival`, `navigate_by_arrival_weather`, `navigate_to_poi_by_arrival_weather`, `navigate_to_poi_unless_arrival_weather`, `set_navigation_conditioned_on_arrival_weather`, `select_poi_at_location_open_at_route_arrival`, `select_charging_plug`, `find_charging_stop_on_active_route_by_soc`, `search_charging_stations_on_route`, `search_charging_stations_on_active_route`, `estimate_charging_stops_for_route_by_soc_window`, `set_navigation_via_route_stop_with_open_poi`, `set_new_navigation_via_stop`, `plan_charging_for_next_meeting`, `call_selected_charging_provider`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
 - Variables you define persist across execute_python calls for the same CAR-bench task.
 - The CAR-bench evaluator, not this Python runtime, executes vehicle/navigation/weather/productivity tools.
 - CAR-bench tool wrappers are API-like coroutine calls: calling a wrapper first checks the current evaluator tool surface. If the tool or a parameter is missing in this task, the wrapper does not emit an invalid evaluator call; it emits the prepared missing-capability response. If supported, it emits the official A2A tool call, waits for evaluator results on the next A2A inbound, then returns the parsed tool result to Python.
@@ -132,7 +140,7 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
   location charging, en-route charging, a specific station, or a route-kilometer
   search, do not invent a charger before confirmation; tell the user the range
   is insufficient and ask how they want charging details planned.
-- For relative fan-speed requests with a stated amount such as "one level" or "two levels", use `increase_fan_speed(steps=...)` or `decrease_fan_speed(steps=...)`; these helpers read climate state and then set the calculated level. For driver/passenger climate sync, use `sync_climate_zone(source_zone=..., target_zone=...)` so values are copied from the source zone to the target zone. "Set driver to match passenger" means `source_zone="PASSENGER", target_zone="DRIVER"`; "set passenger to match driver" means `source_zone="DRIVER", target_zone="PASSENGER"`. If one request has multiple sync clauses naming the same target side, keep that same target for every included subsystem; do not make a second opposite-direction call for seat heating. For AC plus stored air-circulation preference, call `set_air_conditioning_on_safe(use_preferred_air_circulation=True)` after you explicitly resolve that the request asks for the stored preference; otherwise leave the flag false. For seat heating, explicit zones constrain scope: use `seat_zone="DRIVER"` or `seat_zone="PASSENGER"` when the seat is resolved; use no seat zone only when the request really covers all occupied front seats. For energy-saving cleanup of seat heating on unoccupied seats, use `turn_off_unoccupied_seat_heating()`; it reads occupancy/current levels and does not change occupied seats. For occupancy-based final states with explicit levels for occupied and/or unoccupied heatable front seats, use `optimize_seat_heating_by_occupancy(occupied_level=..., unoccupied_level=...)`.
+- For relative fan-speed requests with a stated amount such as "one level" or "two levels", use `increase_fan_speed(steps=...)` or `decrease_fan_speed(steps=...)`; these helpers read climate state and then set the calculated level. For explicit all-zone climate temperature changes, use `set_all_zones_climate_temperature_safe(temperature=...)`; it keeps the request as native `ALL_ZONES` even after an occupied-seat workflow. For driver/passenger climate sync, use `sync_climate_zone(source_zone=..., target_zone=...)` so values are copied from the source zone to the target zone. "Set driver to match passenger" means `source_zone="PASSENGER", target_zone="DRIVER"`; "set passenger to match driver" means `source_zone="DRIVER", target_zone="PASSENGER"`. If one request has multiple sync clauses naming the same target side, keep that same target for every included subsystem; do not make a second opposite-direction call for seat heating. For AC plus stored air-circulation preference, call `set_air_conditioning_on_safe(use_preferred_air_circulation=True)` after you explicitly resolve that the request asks for the stored preference; otherwise leave the flag false. For seat heating, explicit zones constrain scope: use `seat_zone="DRIVER"` or `seat_zone="PASSENGER"` when the seat is resolved; use no seat zone only when the request really covers all occupied front seats. For energy-saving cleanup of seat heating on unoccupied seats, use `turn_off_unoccupied_seat_heating()`; it reads occupancy/current levels and does not change occupied seats. For occupancy-based final states with explicit levels for occupied and/or unoccupied heatable front seats, use `optimize_seat_heating_by_occupancy(occupied_level=..., unoccupied_level=...)`.
 - For broad comfort requests such as feeling too warm, wanting air circulating,
   or warming occupied zones efficiently, do not choose a side effect before the
   user picks an option and supplies any missing amount. Use
@@ -274,6 +282,7 @@ close_known_windows_for_blocked_ac(window="DRIVER")
 - For explicit temperature changes, prefer the policy-safe helper. If a previous occupied-seat helper resolved the current scope to occupied front zones, an unqualified `ALL_ZONES` call preserves that scope; pass `explicit_all_zones=True` only when every climate zone is explicitly intended:
 ```python
 set_climate_temperature_safe(seat_zone="DRIVER", temperature=22)
+set_all_zones_climate_temperature_safe(temperature=22)
 ```
 - For copying passenger settings to the driver side, use the sync helper. Source is where values come from; target is the side you change:
 ```python
@@ -528,17 +537,16 @@ routes = routes_value(get_routes_from_start_to_destination(start_id=current_id, 
 - Example simple branching over tool results:
 ```python
 climate = result_value(get_climate_settings())
-if climate.get("fan_speed", 0) == 0:
-    set_fan_speed(level=1)
-    respond("Fan speed is now set to 1.")
-else:
+if climate.get("fan_speed", 0) > 0:
     respond("The fan is already running.")
+else:
+    respond("The fan is currently off. What fan level would you like?")
 ```
 - Example missing-parameter routing: if the user explicitly asks for a value but that parameter is missing from the current visible signature, still route through the obvious Python wrapper. The runtime blocks it and sends the exact limitation; do not hand-write a weaker refusal.
 ```python
 set_ambient_lights(on=True, lightcolor="BROWN")
 open_close_window(window="DRIVER", percentage=50)
-set_fan_speed(level=1)
+set_fan_speed(level=3)
 send_email(email_addresses=["person@example.com"], content_message="I'll be late.")
 ```
 - Example multi-outcome request: use the helper for one subgoal, then finish the rest of the request before responding.
@@ -567,8 +575,8 @@ else:
 """
 
 
-def load_skill_text() -> str:
-    skill_name = (CAR_AGENT_SKILL or "").strip()
+def _read_skill_file(skill_name: str) -> str:
+    skill_name = skill_name.strip()
     if not skill_name:
         return ""
     skill_path = (SKILLS_DIR / skill_name).resolve()
@@ -577,9 +585,29 @@ def load_skill_text() -> str:
     except ValueError as exc:
         raise RuntimeError(f"Skill must be inside {SKILLS_DIR}") from exc
     if skill_path.exists():
-        text = skill_path.read_text().strip()
-        return f"\n\n## Active Domain Skill\n{text}\n" if text else ""
+        return skill_path.read_text().strip()
     raise RuntimeError(f"Skill file not found: {skill_name}")
+
+
+def _request_uses_email_skill(user_request: str | None) -> bool:
+    # Skill selection only. Helpers still must not infer tool arguments from raw
+    # user text.
+    return "email" in str(user_request or "").casefold()
+
+
+def load_skill_text(user_request: str | None = None) -> str:
+    skill_name = (CAR_AGENT_SKILL or "").strip()
+    if not skill_name:
+        return ""
+    sections: list[str] = []
+    main_text = _read_skill_file(skill_name)
+    if main_text:
+        sections.append(f"## Active Domain Skill\n{main_text}")
+    if _request_uses_email_skill(user_request):
+        email_text = _read_skill_file("email.md")
+        if email_text:
+            sections.append(f"## Active Email Skill Addendum\n{email_text}")
+    return "\n\n" + "\n\n".join(sections) + "\n" if sections else ""
 
 
 def strip_native_disambiguation_protocol(car_policy: str) -> str:
@@ -601,9 +629,10 @@ def build_system_prompt(
     car_policy: str,
     tools: list[dict[str, Any]],
     tool_mode: str,
+    user_request: str | None = None,
 ) -> str:
     visible_policy = strip_native_disambiguation_protocol(car_policy)
-    prompt = BASE_SYSTEM_PROMPT + load_skill_text()
+    prompt = BASE_SYSTEM_PROMPT + load_skill_text(user_request)
     prompt += "\n\n## CAR-bench Policy From Evaluator\n"
     prompt += visible_policy.strip() if visible_policy.strip() else "(No policy text was provided.)"
     prompt += "\n\n## Current Workspace Functions\n"
@@ -624,7 +653,23 @@ def rendered_public_tools() -> list[dict[str, Any]]:
 
 
 def render_workspace_helpers() -> str:
-    return (
+    text = (
+        "Workspace Python helpers:\n"
+        "  These callables run inside the REPL. They are not separate evaluator tools: they call the Python wrappers listed below, normalize results, update scratchpad, or produce a terminal user response. Pass model-resolved IDs, values, and choices; helpers do not infer missing arguments from raw message text.\n"
+        "- `respond(message)` / `stop_after_response()`\n"
+        "  `respond` sends the final user-facing assistant message for the current evaluator turn. `stop_after_response()` is only for early branch exits after `respond(...)`; otherwise let the Python code finish normally.\n"
+        "- `batch(calls)`\n"
+        "  Runs independent wrapped evaluator calls and workspace helpers. Raw wrapped calls are emitted in one parallel evaluator request; helper calls execute through their Python implementations. Do not put dependent calls in one batch.\n"
+        "- `result_by_tool(results, tool_name, index=0)` / `result_value(value, default=None)`\n"
+        "  Extraction helpers for wrapper or batch results. `result_by_tool` selects one envelope from a batch, including repeated calls with `index`; `result_value` returns the inner `result` payload or `default`.\n"
+        "- `remember(key, value)` / `remember_entity(key, value)`\n"
+        "  Store grounded facts or entities in `scratchpad` for follow-ups in the same task. Use this for values the model has already grounded, not for guesses.\n"
+        "- `list_tools()` / `describe_tool(name)` / `tool_schema(name)` / `tool_signature(name)` / `tool_required_arguments(name)` / `tool_optional_arguments(name)`\n"
+        "  Current-task tool-surface introspection. Use rarely when a signature or live argument set is genuinely unclear; normal action paths should call the documented wrapper or helper.\n"
+        "- `tool_available(name)` / `tool_supports_arguments(name, args)` / `capability_claim_gate(tool_name, arguments=None)`\n"
+        "  Current-task capability checks. Use before describing availability or alternatives; for actual requested actions, prefer calling the wrapper/helper and let it block safely if unavailable.\n"
+        "- `policy_now()` / `policy_location_id()`\n"
+        "  Return the evaluator policy date/time and current location ID. Use these instead of host clock/location; both are also mirrored into scratchpad facts.\n"
         "- `handle_pending_confirmation()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. On follow-up turns, resolves a stored pending confirmation from `scratchpad[\"facts\"][\"pending_confirmation\"]`: executes the stored evaluator calls only on a clear yes/proceed, cancels on a clear no/cancel, or asks for clearer confirmation.\n"
         "- `id_value(value, field=None)`\n"
@@ -642,19 +687,21 @@ def render_workspace_helpers() -> str:
         "- `get_navigation_state(detailed_information=True)`\n"
         "  Built-in read-only helper, not a direct evaluator tool. Calls `get_current_navigation_state(...)` and normalizes active state, waypoint IDs, route IDs, detailed waypoints/routes, start, destination, and intermediate waypoints. It directly reports required response fields that are unavailable instead of guessing them.\n"
         "- `get_contact_details(contact_ids, required_fields=None, role=None)`\n"
-        "  Built-in read-only helper, not a direct evaluator tool. Calls `get_contact_information(...)` and normalizes the contact-ID-keyed payload into `contacts`, `by_id`, and `first`, including flat `first_name`, `last_name`, and `display_name` aliases for nested name objects plus single-contact shortcuts such as `email` and `phone_number`. Pass fields needed by the next action in `required_fields` so unavailable response data is reported directly. When multiple contacts have different roles in the same email task, pass an explicit model-resolved `role` such as `email_recipient` or `contact_details_subject`; this stores role facts so later confirmation cannot drift through `last_contacts`. Contact-name lookups after calendar reads expose `unique_calendar_attendee_contact_id` when exactly one same-name result is among recent meeting attendees.\n"
+        "  Built-in read-only helper, not a direct evaluator tool. Calls `get_contact_information(...)`, normalizes contacts into `contacts`, `by_id`, `first`, and flat name/email/phone aliases, and reports unavailable requested fields directly. Pass `required_fields` for the next action and a model-resolved `role` such as `email_recipient` or `contact_details_subject` when one task has multiple contact roles.\n"
         "- `send_contact_details_to_contact(recipient_contact_id, subject_contact_id, required_fields=None, intro=None)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Use when the user asks to send one contact's details to another contact and both roles have been resolved to grounded contact IDs. The helper keeps recipient and subject contacts separate, reads the recipient email and subject fields, builds a grounded message, then routes through normal `send_email(...)` confirmation. It does not infer contacts from raw user text.\n"
         "- `get_next_calendar_entry()`\n"
         "  Built-in read-only helper, not a direct evaluator tool. Calls `get_entries_from_calendar(...)` for `policy_now()`'s month/day, normalizes meeting start times, and returns `entries` plus the chronologically next `next_entry` at or after the current policy time.\n"
         "- `defrost_front_window()`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Handles a front windshield defrost request by checking the current tool surface, reading climate/window state, applying CAR-bench policy 010/011 actions through evaluator tools, applying stored defrost airflow preferences that still include `WINDSHIELD`, otherwise preserving any current airflow mode that already includes `WINDSHIELD` and otherwise setting `WINDSHIELD`, remembering which windows it adjusted, and responding to the user. If any conditionally required evaluator tool is unavailable or fails, it responds with a short missing-capability limitation instead of claiming success.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Turns on front defrost under policies 010/011: reads climate/window state, sets defrost, raises fan speed to at least 2, ensures airflow includes `WINDSHIELD`, enables AC if needed, and closes windows over 20% or with unknown position before enabling AC. It reports missing required tools/results instead of claiming success.\n"
         "- `open_sunroof_safe(percentage, target_is_explicit=False)`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Sets the sunroof position under policies 005 and 008/009 after the exact target percentage is resolved. It checks sunshade state, opens the sunshade in parallel when needed, checks weather at the current policy location/time before opening, stores pending confirmation for unsafe weather, and emits a short missing-capability limitation if a required tool or parameter is unavailable. It does not infer missing percentages from user wording; ask the user first when the target percentage is unresolved. Use `target_is_explicit=True` only when the exact percentage came from the user, policy, or a resolved follow-up.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Sets an already resolved sunroof percentage under policies 005 and 008/009: opens the sunshade when needed, checks current-location weather before opening, asks confirmation for unsafe weather, and reports missing capability directly. Ask first when the percentage is unresolved; use `target_is_explicit=True` only for an exact resolved target.\n"
         "- `sync_sunshade_to_sunroof()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. For requests to match or synchronize the sunshade with the current sunroof position, reads `get_sunroof_and_sunshade_position(...)`, uses the returned `sunroof_position` as the target, and calls `open_close_sunshade(...)`. It does not infer percentages from user wording.\n"
         "- `open_close_window_safe(window, percentage, target_is_explicit=False)`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Moves a window under policy 007 after the target window and percentage are already resolved. For openings above 25%, it checks AC state and asks confirmation when AC is on or AC state is unavailable. It does not infer missing percentages from user wording; ask the user first when the target percentage is unresolved. For 100% opens, `target_is_explicit=True` is informational only; the helper must have prior clarification state before it executes the full-open side effect.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Moves an already resolved window to an already resolved percentage under policy 007. For openings above 25%, it reads AC state and asks confirmation if AC is on or unavailable. Ask first when the percentage is unresolved; for 100% opens, the helper also requires prior clarification state before executing.\n"
+        "- `sync_window_positions(source_windows, target_windows)`\n"
+        "  Built-in workspace helper, not a direct evaluator tool. For model-resolved window match/sync requests, reads `get_vehicle_window_positions(...)`, requires both source and target current position fields to be known, then copies source percentages to paired target windows through `open_close_window_safe(...)`. Use groups like `source_windows=\"FRONT\", target_windows=\"REAR\"` for front-to-rear pairing. It does not infer source/target from raw user text.\n"
         "- `set_fog_lights_on_safe()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Activates fog lights under policies 008/009 and 013: checks weather and exterior-light state, obtains explicit confirmation when required, turns low beams on and high beams off when needed, and directly reports missing capabilities or response fields.\n"
         "- `set_high_beams_on_safe()`\n"
@@ -662,11 +709,13 @@ def render_workspace_helpers() -> str:
         "- `set_exterior_lights_safe(intent)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Handles broad exterior-light intents only after the model has resolved the intent. It does not inspect raw user text. If the user only says to turn on the lights and gives no interior, ambient, reading-light, or color clue, use `intent=\"improve_visibility\"` so the helper checks weather and exterior-light state before asking. Use `intent=\"turn_on_headlights\"` for state-aware low/high-beam handling, and `intent=\"turn_off_exterior_lights\"` to read exterior-light state and turn off only lights known to be on.\n"
         "- `set_air_conditioning_on_safe(use_preferred_air_circulation=False)`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Turns AC on under policy 011 by checking climate/window state, closing each known window that is open more than 20%, setting fan speed to 1 if currently 0, remembering which windows it adjusted, and then turning AC on. Pass `use_preferred_air_circulation=True` only when you have explicitly resolved that the request asks for stored air-circulation preference; the helper does not inspect raw user text. If required evaluator tools are missing, it responds with a short missing-capability limitation.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Turns AC on under policy 011: reads climate/windows, closes windows over 20% and windows whose position is unknown, sets fan speed to 1 if it is 0, optionally applies a resolved stored circulation preference, then turns AC on. It reports missing required tools/results instead of treating unknown window position as unavailable.\n"
         "- `close_known_windows_for_blocked_ac(window=None)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. For follow-ups after an AC/defrost helper reported missing window-position information, closes only windows already recorded as known open more than 20%, then responds with the remaining limitation. Does not retry AC or infer unavailable window positions.\n"
         "- `set_climate_temperature_safe(seat_zone, temperature, explicit_all_zones=False)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Sets an explicit temperature and, for DRIVER or PASSENGER single-zone changes, informs the user if the resulting temperature difference to the other zone is more than 3 degrees Celsius. If a recent occupied-seat helper resolved the active front-zone scope, `seat_zone=\"ALL_ZONES\"` preserves that occupied-zone scope unless `explicit_all_zones=True` is supplied.\n"
+        "- `set_all_zones_climate_temperature_safe(temperature)`\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Use when every climate zone is explicitly intended. It calls `set_climate_temperature_safe(seat_zone=\"ALL_ZONES\", explicit_all_zones=True)` so an occupied-seat scope cannot narrow the request.\n"
         "- `sync_climate_zone(source_zone, target_zone, include_temperature=True, include_seat_heating=True)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Copies temperature and/or seat-heating values from DRIVER or PASSENGER to the other front zone by reading state first and then setting only the target zone. When one request asks for multiple subsystems to match the same side, use one call with the same source/target and the relevant include flags instead of making separate calls in opposite directions.\n"
         "- `present_climate_comfort_options(intent)`\n"
@@ -726,3 +775,20 @@ def render_workspace_helpers() -> str:
         "- `get_preferred_ambient_light_color()`\n"
         "  Built-in read-only helper, not a direct evaluator tool. Calls `get_user_preferences(...)` for vehicle settings and returns a unique valid ambient-light color when preferences resolve one; otherwise returns `AMBIGUOUS` or `NOT_FOUND`.\n"
     )
+    replacements = {
+        "Built-in workspace helper, not a direct evaluator tool. ": "Helper. ",
+        "Built-in read-only helper, not a direct evaluator tool. ": "Read-only helper. ",
+        "Built-in response helper, not a direct evaluator tool. ": "Response helper. ",
+        "Built-in side-effect helper, not a direct evaluator tool. ": "Side-effect helper. ",
+        "Built-in selector helper, not a direct evaluator tool. ": "Selector helper. ",
+        "Built-in selection helper, not a direct evaluator tool. ": "Selection helper. ",
+        "Built-in POI selector, not a direct evaluator tool. ": "POI selector. ",
+        "Built-in planning helper, not a direct evaluator tool. ": "Planning helper. ",
+        "Built-in navigation helper, not a direct evaluator tool. ": "Navigation helper. ",
+        "Built-in read helper, not a direct evaluator tool. ": "Read helper. ",
+        "Built-in read/selection helper, not a direct evaluator tool. ": "Read/selection helper. ",
+        "Built-in pure extraction helper. ": "Pure extraction helper. ",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
