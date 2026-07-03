@@ -1,0 +1,183 @@
+{
+ "calculate_charging_soc_by_time": [
+  "state_of_charge"
+ ],
+ "calculate_charging_time_by_soc": [
+  "minutes"
+ ],
+ "call_phone_by_number": [
+  "phone_number_called"
+ ],
+ "delete_current_navigation": [
+  "navigation_active",
+  "new_routes",
+  "new_waypoints"
+ ],
+ "get_charging_specs_and_status": [
+  "battery_capacity_kwh",
+  "max_charging_power_ac",
+  "max_charging_power_dc",
+  "remaining_range",
+  "state_of_charge"
+ ],
+ "get_climate_settings": [
+  "air_circulation",
+  "air_conditioning",
+  "fan_airflow_direction",
+  "fan_speed",
+  "window_front_defrost",
+  "window_rear_defrost"
+ ],
+ "get_contact_id_by_contact_name": [
+  "matches"
+ ],
+ "get_current_navigation_state": [
+  "details",
+  "navigation_active",
+  "routes_to_final_destination_id",
+  "waypoints_id"
+ ],
+ "get_distance_by_soc": [
+  "distance_km",
+  "distance"
+ ],
+ "get_entries_from_calendar": [
+  "date",
+  "meetings"
+ ],
+ "get_exterior_lights_status": [
+  "fog_lights",
+  "head_lights_high_beams",
+  "head_lights_low_beams"
+ ],
+ "get_location_id_by_location_name": [
+  "id"
+ ],
+ "get_routes_from_start_to_destination": [
+  "routes"
+ ],
+ "get_seat_heating_level": [
+  "seat_heating_driver",
+  "seat_heating_passenger"
+ ],
+ "get_seats_occupancy": [
+  "seats_occupied"
+ ],
+ "get_sunroof_and_sunshade_position": [
+  "description",
+  "sunroof_position",
+  "sunshade_position"
+ ],
+ "get_temperature_inside_car": [
+  "climate_temperature_driver",
+  "climate_temperature_passenger",
+  "temperature_unit"
+ ],
+ "get_user_preferences": [
+  "vehicle_settings"
+ ],
+ "get_vehicle_window_positions": [
+  "description",
+  "window_driver_position",
+  "window_driver_rear_position",
+  "window_passenger_position",
+  "window_passenger_rear_position"
+ ],
+ "get_weather": [
+  "current_slot",
+  "next_slot"
+ ],
+ "navigation_add_one_waypoint": [
+  "new_routes_id",
+  "new_waypoints_id",
+  "waypoint_added"
+ ],
+ "navigation_delete_destination": [
+  "destination_deleted",
+  "new_routes",
+  "new_waypoints"
+ ],
+ "navigation_delete_waypoint": [
+  "new_routes",
+  "new_waypoints",
+  "waypoint_deleted"
+ ],
+ "navigation_replace_final_destination": [
+  "destination_replaced",
+  "new_routes",
+  "new_waypoints"
+ ],
+ "navigation_replace_one_waypoint": [
+  "new_routes",
+  "new_waypoints",
+  "waypoint_replaced"
+ ],
+ "open_close_sunroof": [
+  "percentage"
+ ],
+ "open_close_sunshade": [
+  "percentage"
+ ],
+ "open_close_trunk_door": [
+  "action"
+ ],
+ "open_close_window": [
+  "percentage",
+  "window"
+ ],
+ "search_poi_along_the_route": [
+  "pois_found_along_route"
+ ],
+ "search_poi_at_location": [
+  "pois_found"
+ ],
+ "send_email": [
+  "email_sent"
+ ],
+ "set_air_circulation": [
+  "mode"
+ ],
+ "set_air_conditioning": [
+  "on"
+ ],
+ "set_ambient_lights": [
+  "lightcolor",
+  "on"
+ ],
+ "set_climate_temperature": [
+  "seat_zone",
+  "temperature"
+ ],
+ "set_fan_airflow_direction": [
+  "direction"
+ ],
+ "set_fan_speed": [
+  "level"
+ ],
+ "set_fog_lights": [
+  "on"
+ ],
+ "set_head_lights_high_beams": [
+  "on"
+ ],
+ "set_head_lights_low_beams": [
+  "on"
+ ],
+ "set_new_navigation": [
+  "destination_id",
+  "navigation_set",
+  "start_id",
+  "waypoints"
+ ],
+ "set_seat_heating": [
+  "level",
+  "seat_zone"
+ ],
+ "set_steering_wheel_heating": [
+  "level"
+ ],
+ "set_window_defrost": [
+  "defrost_window",
+  "on"
+ ]
+}

@@ -23,7 +23,9 @@ must send on each A2A turn.
 >
 > For more sophisticated harnessing, see
 > [`agent-under-test-harnessing.md`](agent-under-test-harnessing.md) and
-> [`cerebras-harness-patterns.md`](cerebras-harness-patterns.md).
+> [`cerebras-harness-patterns.md`](cerebras-harness-patterns.md). The current
+> participant coroutine implementation is documented in
+> [`coroutine-agent-architecture.md`](coroutine-agent-architecture.md).
 
 ---
 

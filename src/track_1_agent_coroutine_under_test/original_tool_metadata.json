@@ -1,0 +1,1570 @@
+[
+  {
+    "function": {
+      "description": "Charging Information: Calculates the reached state of charge when charging the car for the specified time. Calculation is based on charging plug specs, on car's maximum charging power for AC or DC charging, charging curve parameters.",
+      "name": "calculate_charging_soc_by_time",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "charging_station_id": {
+            "description": "The ID of the charging station.",
+            "type": "string"
+          },
+          "charging_station_plug_id": {
+            "description": "The ID of the specific plug of the charging station where the car is connected to.",
+            "type": "string"
+          },
+          "charging_time": {
+            "description": "The charging time in minutes.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_state_of_charge": {
+            "description": "The start state of charge of the electric vehicle (in percentage).",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "charging_station_id",
+          "charging_station_plug_id",
+          "start_state_of_charge",
+          "charging_time"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Charging Information: Calculates the charging time for charging from an start state of charge to a target state of charge of the car based charging plug specs, on car's maximum charging power for AC or DC charging, charging curve parameters.",
+      "name": "calculate_charging_time_by_soc",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "charging_station_id": {
+            "description": "The ID of the charging station.",
+            "type": "string"
+          },
+          "charging_station_plug_id": {
+            "description": "The ID of the specific plug of the charging station where the car is connected to.",
+            "type": "string"
+          },
+          "start_state_of_charge": {
+            "description": "The start state of charge of the electric vehicle (in percentage).",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "target_state_of_charge": {
+            "description": "The target state of charge of the electric vehicle (in percentage). If not specified, time until 80 percent and 100 percent is given.",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "charging_station_id",
+          "charging_station_plug_id",
+          "start_state_of_charge"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "additionalProperties": false,
+      "description": "Takes a datetime and adds specified times. It returns the new datetime",
+      "name": "calculate_datetime",
+      "parameters": {
+        "properties": {
+          "additionalProperties": false,
+          "original_datetime": {
+            "properties": {
+              "day": {
+                "description": "Day of the datetime",
+                "type": "number"
+              },
+              "hour": {
+                "description": "Hour of the datetime",
+                "type": "number"
+              },
+              "minute": {
+                "description": "Minute of the datetime",
+                "type": "number"
+              },
+              "month": {
+                "description": "Month of the datetime",
+                "type": "number"
+              },
+              "year": {
+                "description": "Year of the datetime",
+                "type": "number"
+              }
+            },
+            "required": [
+              "year",
+              "month",
+              "day",
+              "hour",
+              "minute"
+            ],
+            "type": "object"
+          },
+          "times_to_add": {
+            "description": "Array of objects containing hours and minutes to add. Each object will be added to the original datetime",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "hours": {
+                  "description": "Number of hours to add",
+                  "type": "number"
+                },
+                "minutes": {
+                  "description": "Number of minutes to add",
+                  "type": "number"
+                }
+              },
+              "required": [
+                "hours",
+                "minutes"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "original_datetime",
+          "times_to_add"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Calculate the result of a mathematical expression.",
+      "name": "calculate_math",
+      "parameters": {
+        "properties": {
+          "expression": {
+            "description": "The mathematical expression to calculate, such as '2 + 2'. The expression can contain numbers, operators (+, -, *, /), parentheses, and spaces.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "expression"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Phone Tool: calls the specified phone number.",
+      "name": "call_phone_by_number",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "phone_number": {
+            "description": "The phone number to call.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "phone_number"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Helper Tool: converts distance (in kilometer) into time (minutes) needed along specific route and vice versa.",
+      "name": "convert_route_distance_and_time",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "distance_km": {
+            "description": "The distance in kilometer to convert into time.",
+            "type": "integer"
+          },
+          "route_id": {
+            "description": "The route_id for which conversion should happen.",
+            "type": "string"
+          },
+          "time_minutes": {
+            "description": "The time in minutes to convert into distance.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "route_id"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigation Control: deletes the currently set navigation. Turns the navigation system to inactive and deletes all waypoints and routes.",
+      "name": "delete_current_navigation",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the status and color of the car ambient light (the soft, decorative lighting inside the cabin). Also referred to as 'surrounding light'.",
+      "name": "get_ambient_light_status_and_color",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the outside color of the car.",
+      "name": "get_car_color",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Charging Information: Get the charging specs of the car and current charging status of the electric vehicle. This includes battery_capacity_kwh, max_charging_power_ac, max_charging_power_dc, state_of_charge and remaining_range (calculated based on current power consumption, expected power consumption if route selected, or base power consumption if standing).",
+      "name": "get_charging_specs_and_status",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the climate settings inside the car including current fan speed, fan airflow direction, air conditioning status, air circulation mode, and window defrost status.",
+      "name": "get_climate_settings",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Contact Information: gets the contact 'id' for the specified contact name. You can search by first name, last name, or both.",
+      "name": "get_contact_id_by_contact_name",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "contact_first_name": {
+            "description": "The first name of the contact to get the 'id' for.",
+            "type": "string"
+          },
+          "contact_last_name": {
+            "description": "The last name of the contact to get the 'id' for.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Contact Information: gets the contact information for the specified contact 'id's. Contact information includes name, phone number, and email.",
+      "name": "get_contact_information",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "contact_ids": {
+            "description": "List of contact 'id's to get the contact information for.",
+            "items": {
+              "description": "Contact 'id'.",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "contact_ids"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigation State Information: gets the navigation state including if the navigation is active and the currently selected route. The route information includes the current waypoint 'id's and the current selected route part 'id's. If parameter 'detailed_information' is set, additional information about the waypoint names, positions, and the route starts, destinations, distances, and durations is returned.",
+      "name": "get_current_navigation_state",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "detailed_information": {
+            "default": false,
+            "description": "If False, only waypoint and route 'id's are returned. If True, additional information about the waypoint names, positions; and the route starts, destinations, distances, durations is returned.",
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Charging Information: Get the distance able to drive for a specified initial state until a final state of charge of the car.",
+      "name": "get_distance_by_soc",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "final_state_of_charge": {
+            "default": 0,
+            "description": "The final state of charge of the electric vehicle. Defaults to 0 (battery empty).",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "initial_state_of_charge": {
+            "description": "The initial state of charge of the electric vehicle.",
+            "maximum": 100,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "initial_state_of_charge"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Calendar Information: gets the entries (including meetings, events, appointment etc.) set in the calendar from the current day. Returns the entry start, duration, topic, and attendees.",
+      "name": "get_entries_from_calendar",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "day": {
+            "description": "The day for which the calendar entries are requested.",
+            "type": "integer"
+          },
+          "month": {
+            "description": "The month for which the calendar entries are requested.",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "month",
+          "day"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the status of car exterior lights including headlights (low beam and high beam), and fog lights.",
+      "name": "get_exterior_lights_status",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Location Information: gets the location 'id' for the specified location name or city name. It does not get the 'id' for points of interest.",
+      "name": "get_location_id_by_location_name",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "location": {
+            "description": "The location name to get the 'id' for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "location"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the status of car reading lights (interior).",
+      "name": "get_reading_lights_status",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Routes information: gets the fastest route (plus alternative routes if existent) for the car between start and destination. Each route information includes name_via, distance in km, duration in hours and minutes, arrival time, road types (highway, urban, country roads, includes toll roads), and an route alias (first, second, third; additionaly fastest, shortest). Routes can be requested between locations or between a location and a point of interest.",
+      "name": "get_routes_from_start_to_destination",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_id": {
+            "description": "The destination point of the route. The destination point has to be the location 'id' or a points of interest 'id'.",
+            "type": "string"
+          },
+          "start_id": {
+            "description": "The starting point of the route. The starting point has to be the location 'id' or a points of interest 'id'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_id",
+          "destination_id"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the level of seat heating in the different seat zones.",
+      "name": "get_seat_heating_level",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the occupancy of seats inside the car.",
+      "name": "get_seats_occupancy",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the level of the steering wheel heating.",
+      "name": "get_steering_wheel_heating_level",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get information about the position of the car sunroof and sunshade.",
+      "name": "get_sunroof_and_sunshade_position",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the temperature in the different seat zones inside the car.",
+      "name": "get_temperature_inside_car",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get information about the position of the car trunk door.",
+      "name": "get_trunk_door_position",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Retrieves user preferences for one or more specified categories and subcategories",
+      "name": "get_user_preferences",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "preference_categories": {
+            "description": "Categories of preferences to check for",
+            "properties": {
+              "navigation_and_routing": {
+                "description": "Navigation and routing preference categories",
+                "properties": {
+                  "route_selection": {
+                    "description": "If information about user's route selection preferences is required",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              },
+              "points_of_interest": {
+                "description": "Points of interest preference categories",
+                "properties": {
+                  "airports": {
+                    "description": "If information about user's preferred airports is required",
+                    "type": "boolean"
+                  },
+                  "bakery": {
+                    "description": "If information about user's preferred bakeries is required",
+                    "type": "boolean"
+                  },
+                  "charging_stations": {
+                    "description": "If information about user's preferred charging stations is required",
+                    "type": "boolean"
+                  },
+                  "fast_food": {
+                    "description": "If information about user's preferred fast food restaurants is required",
+                    "type": "boolean"
+                  },
+                  "parking": {
+                    "description": "If information about user's preferred parking options is required",
+                    "type": "boolean"
+                  },
+                  "public_toilets": {
+                    "description": "If information about user's preferred public toilets is required",
+                    "type": "boolean"
+                  },
+                  "restaurants": {
+                    "description": "If information about user's preferred restaurants is required",
+                    "type": "boolean"
+                  },
+                  "supermarkets": {
+                    "description": "If information about user's preferred supermarkets is required",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              },
+              "productivity_and_communication": {
+                "description": "Productivity and communication preference categories",
+                "properties": {
+                  "calendar": {
+                    "description": "If information about user's calendar preferences is required",
+                    "type": "boolean"
+                  },
+                  "email": {
+                    "description": "If information about user's email preferences is required",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              },
+              "vehicle_settings": {
+                "description": "Vehicle settings preference categories",
+                "properties": {
+                  "climate_control": {
+                    "description": "If information about user's climate control preferences is required",
+                    "type": "boolean"
+                  },
+                  "vehicle_settings": {
+                    "description": "If information about user's general vehicle settings preferences is required",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              },
+              "weather": {
+                "description": "Weather preference categories",
+                "properties": {
+                  "weather": {
+                    "description": "If information about user's weather preferences is required",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "preference_categories"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Information: Get the current position of the windows in the car.",
+      "name": "get_vehicle_window_positions",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Weather Information: gets the weather information for the specified location and the specified time (3h slot) plus the next time slot. Weather information includes temperature, wind speed, humidity, and condition (sunny, cloudy, rainy, foggy, etc.)",
+      "name": "get_weather",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "day": {
+            "description": "The day to get the weather information.",
+            "maximum": 31,
+            "minimum": 1,
+            "multipleOf": 1,
+            "type": "number"
+          },
+          "location_or_poi_id": {
+            "description": "The location 'id' or point of interest (POI) 'id' to get the weather information",
+            "type": "string"
+          },
+          "month": {
+            "description": "The month to get the weather information.",
+            "maximum": 12,
+            "minimum": 1,
+            "multipleOf": 1,
+            "type": "number"
+          },
+          "time_hour_24hformat": {
+            "description": "The time hour to get the weather information.",
+            "maximum": 23,
+            "minimum": 0,
+            "multipleOf": 1,
+            "type": "number"
+          },
+          "time_minutes": {
+            "default": 0,
+            "description": "The time minutes to get the weather information.",
+            "maximum": 59,
+            "minimum": 0,
+            "multipleOf": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "location_or_poi_id",
+          "month",
+          "day",
+          "time_hour_24hformat"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigation Control: adds the specified waypoint with the specified routes in the specified waypoint order. Only works if navigation system is active. Returns the navigation waypoint and routes with the waypoint and routes added.",
+      "name": "navigation_add_one_waypoint",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "route_id_leading_away_from_new_waypoint": {
+            "default": null,
+            "description": "The 'id' of the route leading away from the new waypoint. Destination has to match the 'waypoint_id_after_new_waypoint'. Mandatory if the new waypoint is not the final destination.",
+            "type": "string"
+          },
+          "route_id_leading_to_new_waypoint": {
+            "description": "The 'id' of the route leading to the new waypoint. Start has to match the 'waypoint_id_before_new_waypoint'.",
+            "type": "string"
+          },
+          "waypoint_id_after_new_waypoint": {
+            "default": null,
+            "description": "The 'id' of the waypoint after the new waypoint. Mandatory if the new waypoint is not the final destination.",
+            "type": "string"
+          },
+          "waypoint_id_before_new_waypoint": {
+            "description": "The 'id' of the waypoint before the new waypoint.",
+            "type": "string"
+          },
+          "waypoint_id_to_add": {
+            "description": "The 'id' of the waypoint to add to the route.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "waypoint_id_to_add",
+          "waypoint_id_before_new_waypoint",
+          "route_id_leading_to_new_waypoint"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigation Control: deletes the destination from the route set, with this the last intermediate stop becomes the new destination. Only works if navigation system is active and a multi-stop route is set. Returns the navigation waypoint and routes with the destination and corresponding route deleted.",
+      "name": "navigation_delete_destination",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_id_to_delete": {
+            "description": "The 'id' of the destination to delete.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "destination_id_to_delete"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigation Control: deletes the specified waypoint from the route set. Additionaly the route replacing the routes via the waypoint has the provided and will be set. Only works if navigation system is active and a multi-stop route is set. Returns the navigation waypoint and routes with the waypoint deleted and the replacing route set.",
+      "name": "navigation_delete_waypoint",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "route_id_without_waypoint": {
+            "description": "The 'id' of the route that should be set without the waypoint instead of the routes via the waypoint. Start has the match the previous waypoint of the deleted waypoint and destination has to match the next waypoint of the deleted waypoint.",
+            "type": "string"
+          },
+          "waypoint_id_to_delete": {
+            "description": "The 'id' of the waypoint to delete.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "waypoint_id_to_delete",
+          "route_id_without_waypoint"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigation Control: replaces the final destination and the specified route leading to the new destination. Only works if navigation system is active. Returns the navigation waypoint and routes with the new destination set.",
+      "name": "navigation_replace_final_destination",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "new_destination_id": {
+            "description": "The 'id' of the new destination location or point of interest.",
+            "type": "string"
+          },
+          "route_id_leading_to_new_destination": {
+            "description": "Route ID from route that leads to the new destination. Start has to match the destination of the previous route (if there is any).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_destination_id",
+          "route_id_leading_to_new_destination"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigation Control: replaces one waypoint and the specified routes leading to the new waypoint and away from the new waypoint. Only works if navigation system is active and a multi-stop route is set. Returns the navigation waypoint and routes with the new waypoints set.",
+      "name": "navigation_replace_one_waypoint",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "new_waypoint_id": {
+            "description": "The 'id' of the waypoint to include in the new route.",
+            "type": "string"
+          },
+          "route_id_leading_away_from_new_waypoint": {
+            "description": "Route ID from the route that leads away from the new waypoint, start of the route is the new waypoint. Destination has to match the start of the next route (if there is any).",
+            "type": "string"
+          },
+          "route_id_leading_to_new_waypoint": {
+            "description": "Route ID from route that leads to the new waypoint, destination of the route is the new waypoint. Start has to match the destination of the previous route (if there is any).",
+            "type": "string"
+          },
+          "waypoint_id_to_replace": {
+            "description": "The 'id' of the waypoint to replace.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "waypoint_id_to_replace",
+          "new_waypoint_id",
+          "route_id_leading_to_new_waypoint",
+          "route_id_leading_away_from_new_waypoint"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Control: Open or close the sunroof in the car to a specified percentage: 0 (closed) to 100 (open)",
+      "name": "open_close_sunroof",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "percentage": {
+            "description": "The percentage to open the sunroof, ranging from 0 to 100",
+            "maximum": 100,
+            "minimum": 0,
+            "multipleOf": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "percentage"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Control: Open or close the sunshade in the car to a specified percentage: 0 (closed) to 100 (open)",
+      "name": "open_close_sunshade",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "percentage": {
+            "description": "The percentage to open the sunshade, ranging from 0 to 100",
+            "maximum": 100,
+            "minimum": 0,
+            "multipleOf": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "percentage"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "REQUIRES_CONFIRMATION, Vehicle Control: Open or close the trunk door of the car",
+      "name": "open_close_trunk_door",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "Whether to open or close the trunk door.",
+            "enum": [
+              "OPEN",
+              "CLOSE"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Control: Moves the specified window in the car to a certain percentage open or closed.",
+      "name": "open_close_window",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "percentage": {
+            "description": "Percentage to open or close the specified window or windows, ranging from 0 to 100.",
+            "maximum": 100,
+            "minimum": 0,
+            "multipleOf": 1,
+            "type": "number"
+          },
+          "window": {
+            "description": "Which window to move. Use 'ALL' to refer to all windows.",
+            "enum": [
+              "ALL",
+              "DRIVER",
+              "PASSENGER",
+              "DRIVER_REAR",
+              "PASSENGER_REAR",
+              "RIGHT_REAR",
+              "LEFT_REAR"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "window",
+          "percentage"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "A planning tool that allows creating and managing plans for solving complex tasks. Provides functionality for creating plans, updating plan steps, and tracking progress. Last step of the plan should always be to check if all user intents could be resolved and if not, to note and communicate which intents could not be resolved (because no available tool, data, etc.).",
+      "name": "planning_tool",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "The command to execute. Available commands: create, update, list, get, set_active, mark_steps, delete.",
+            "enum": [
+              "create",
+              "update",
+              "list",
+              "get",
+              "set_active",
+              "mark_steps",
+              "delete"
+            ],
+            "type": "string"
+          },
+          "plan_id": {
+            "description": "Unique identifier for the plan. Required for create, update, set_active, and delete commands. Optional for get and mark_steps (uses active plan if not specified).",
+            "type": "string"
+          },
+          "step_updates": {
+            "description": "List of step updates for mark_steps command. Each update can specify a step's status and notes. Only mark as completed if expected result is found, if another tool execution is needed for step mark as in_progress.",
+            "items": {
+              "properties": {
+                "step_index": {
+                  "description": "Index of the step to update (0-based)",
+                  "type": "integer"
+                },
+                "step_notes": {
+                  "description": "Additional notes for the step. Can be used for intermediate result notes.",
+                  "type": "string"
+                },
+                "step_status": {
+                  "description": "Status to set for the step",
+                  "enum": [
+                    "not_started",
+                    "in_progress",
+                    "completed",
+                    "blocked"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "step_index"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "steps": {
+            "description": "List of plan steps. Each step must have a description and list of dependencies. Required for create command, optional for update command.",
+            "items": {
+              "properties": {
+                "step_dependent_on": {
+                  "description": "List of step indices (0-based) that this step depends on the result of. Cannot depend on itself or future steps. No dependencies means that the step can be executed independently.",
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                "step_description": {
+                  "description": "Description of what needs to be done in this step",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "step_description",
+                "step_dependent_on"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "title": {
+            "description": "Title for the plan. Required for create command, optional for update command.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Points of Interest Search: searches for points of interest in the specified category along the specified route. Points of interest information includes name, position (long, lat), detour from route in km, detour from route in hour and minutes, opening hours, and phone number. Returns 3 points of interest with the smallest detour time (sorting can be changed to smallest detour distance with filter).",
+      "name": "search_poi_along_the_route",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "at_kilometer": {
+            "description": "at what kilometer of the route to look for the place (with radius of 10 km). If not set, search is done along whole route. This parameter is required if category_poi is charging_stations.",
+            "type": "integer"
+          },
+          "category_poi": {
+            "description": "The category of the point of interest to search for.",
+            "enum": [
+              "airports",
+              "bakery",
+              "fast_food",
+              "parking",
+              "public_toilets",
+              "restaurants",
+              "supermarkets",
+              "charging_stations"
+            ],
+            "type": "string"
+          },
+          "filters": {
+            "description": "List of filter strings to apply to search results. any:: filters can be applied to all categories, charging_stations:: filters can be applied only if category is charging stations. Default sorting is by detour time.",
+            "items": {
+              "enum": [
+                "any::currently_open",
+                "any::sort_by_distance",
+                "charging_stations::has_available_plug",
+                "charging_stations::has_dc_plug"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "route_id": {
+            "description": "The route_id to search for points of interest along the route.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "route_id",
+          "category_poi"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Points of Interest Search: searches for points of interest in the specified category around the specified location. Points of interest information includes name, position (long, lat), distance from location in km, duration from location in hour and minutes, opening hours, and phone number.",
+      "name": "search_poi_at_location",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "category_poi": {
+            "description": "The category of the point of interest to search for.",
+            "enum": [
+              "airports",
+              "bakery",
+              "fast_food",
+              "parking",
+              "public_toilets",
+              "restaurants",
+              "supermarkets",
+              "charging_stations"
+            ],
+            "type": "string"
+          },
+          "filters": {
+            "description": "List of filter strings to apply to search results. any:: filters can be applied to all categories, charging_stations:: filters can be applied only if category is charging stations.",
+            "items": {
+              "enum": [
+                "any::currently_open",
+                "charging_stations::has_available_plug",
+                "charging_stations::has_dc_plug"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "location_id": {
+            "description": "The location 'id' to search for a POI",
+            "type": "string"
+          }
+        },
+        "required": [
+          "location_id",
+          "category_poi"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "REQUIRES_CONFIRMATION, Email Tool: sends an email with the specified message to the specified email adresses.",
+      "name": "send_email",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "content_message": {
+            "description": "The content of the email message which is sent. Generate a suitable email message based on the user request if the user does not explicitely provide one. If there is no request about the content ask the user for it.",
+            "type": "string"
+          },
+          "email_addresses": {
+            "description": "List of email adresses to send the email to.",
+            "items": {
+              "description": "Email adress, f.e. joe@gmail.com.",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "content_message",
+          "email_addresses"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Climate Control: Set the mode of air circulation to draw fresh air or recirculate air inside the car.",
+      "name": "set_air_circulation",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "description": "In which mode the air should be circulated.",
+            "enum": [
+              "FRESH_AIR",
+              "RECIRCULATION",
+              "AUTO"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Climate Control: Turns on or off the air conditioning (AC) inside the car.",
+      "name": "set_air_conditioning",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "on": {
+            "description": "True to turn on the air conditioning, False to turn off the air conditioning.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "on"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Control: Turns the ambient light inside the car on (including the color) or off. Ambient light is the soft, decorative lighting inside the cabin, also referred to as 'surrounding light.",
+      "name": "set_ambient_lights",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "lightcolor": {
+            "description": "The color of the ambient light, None if the ambient light is turned off.",
+            "enum": [
+              "RED",
+              "GREEN",
+              "BLUE",
+              "YELLOW",
+              "WHITE",
+              "PINK",
+              "ORANGE",
+              "PURPLE",
+              "CYAN",
+              "NONE"
+            ],
+            "type": "string"
+          },
+          "on": {
+            "description": "True to turn on the specified ambient light, False to turn off the ambient light.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "on",
+          "lightcolor"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Climate Control: Sets the climate inside the car to the specified temperature in the specified seat zones.",
+      "name": "set_climate_temperature",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "seat_zone": {
+            "description": "The seat zone to set the temperature.",
+            "enum": [
+              "ALL_ZONES",
+              "DRIVER",
+              "PASSENGER"
+            ],
+            "type": "string"
+          },
+          "temperature": {
+            "description": "Sets the temperature of the AC inside the car in degree Celsius. Must be explicitly stated by the driver.",
+            "maximum": 28,
+            "minimum": 16,
+            "multipleOf": 0.5,
+            "type": "number"
+          }
+        },
+        "required": [
+          "temperature",
+          "seat_zone"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Climate Control: Set fan airflow direction inside the car.",
+      "name": "set_fan_airflow_direction",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "direction": {
+            "description": "The airflow direction to set the fans to.",
+            "enum": [
+              "FEET",
+              "HEAD",
+              "HEAD_FEET",
+              "WINDSHIELD",
+              "WINDSHIELD_FEET",
+              "WINDSHIELD_HEAD",
+              "WINDSHIELD_HEAD_FEET"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "direction"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Climate Control: Sets the fan speed to the specified level inside the car.",
+      "name": "set_fan_speed",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "description": "The level to set the fan speed to.",
+            "maximum": 5,
+            "minimum": 0,
+            "multipleOf": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "level"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Control: Turns the fog lights outside the car on or off.",
+      "name": "set_fog_lights",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "on": {
+            "description": "True to turn on the fog lights, False to turn off the fog lights.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "on"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "REQUIRES_CONFIRMATION, Vehicle Control: Turns the high beam headlights outside the car on or off.",
+      "name": "set_head_lights_high_beams",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "on": {
+            "description": "True to turn on the high beam headlights, False to turn off the high beam headlights.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "on"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Control: Turns the low beam headlights outside the car on or off.",
+      "name": "set_head_lights_low_beams",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "on": {
+            "description": "True to turn on the low beam headlights, False to turn off the low beam headlights.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "on"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigation Control: sets and starts new navigation in the navigation system. It fully replaces any previously set navigation. If multiple route 'id' are given it automatically sets a waypoint. It activates the navigation system and returns the waypoints set.",
+      "name": "set_new_navigation",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "route_ids": {
+            "description": "Ordered list of route IDs to set for navigation. Order of list is from start, over optional waypoints, to destination. If multiple route 'id' are given, the destination of the first route has to match the start of next route.",
+            "items": {
+              "description": "The route 'id' of the corresponding route part.",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "route_ids"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Control: Turns the specified reading light in the car on or off.",
+      "name": "set_reading_light",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "on": {
+            "description": "True to turn on the reading light, False to turn off the reading light.",
+            "type": "boolean"
+          },
+          "position": {
+            "description": "Which reading light to turn on or off. Use 'ALL' to refer to all reading lights.",
+            "enum": [
+              "ALL",
+              "DRIVER",
+              "PASSENGER",
+              "DRIVER_REAR",
+              "PASSENGER_REAR",
+              "RIGHT_REAR",
+              "LEFT_REAR"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "position",
+          "on"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Climate Control: Sets the seat heating inside the car to the specified seat zones.",
+      "name": "set_seat_heating",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "description": "The level to set the seat heating to.",
+            "maximum": 3,
+            "minimum": 0,
+            "multipleOf": 1,
+            "type": "number"
+          },
+          "seat_zone": {
+            "description": "The seat zone to set the seat heating to.",
+            "enum": [
+              "ALL_ZONES",
+              "DRIVER",
+              "PASSENGER"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "level",
+          "seat_zone"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Climate Control: Sets the steering wheel heating to the specified level inside the car.",
+      "name": "set_steering_wheel_heating",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "level": {
+            "description": "The level to set the steering wheel heating to.",
+            "maximum": 3,
+            "minimum": 0,
+            "multipleOf": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "level"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Vehicle Climate Control: Turns on or off the defrost of the specified window inside the car.",
+      "name": "set_window_defrost",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "defrost_window": {
+            "description": "The window to turn on or off the defrost.",
+            "enum": [
+              "ALL",
+              "FRONT",
+              "REAR"
+            ],
+            "type": "string"
+          },
+          "on": {
+            "description": "True to turn on the defrost, False to turn off the defrost.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "on",
+          "defrost_window"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Use the tool to think about something. It will not obtain new information or change the database, but just append the thought to the log. Use it when complex reasoning is needed.",
+      "name": "think",
+      "parameters": {
+        "properties": {
+          "thought": {
+            "description": "A thought to think about.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "thought"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  }
+]

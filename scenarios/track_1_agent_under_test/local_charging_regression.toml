@@ -1,0 +1,29 @@
+# Local regression scenario for charging-related train tasks, single trial.
+
+[evaluator]
+endpoint = "http://127.0.0.1:8081"
+cmd = "python src/evaluator/server.py --host 127.0.0.1 --port 8081"
+
+[agent_under_test]
+endpoint = "http://127.0.0.1:8080"
+cmd = "python src/track_1_agent_under_test/server.py --host 127.0.0.1 --port 8080"
+
+[config]
+num_trials = 1
+task_split = "train"
+tasks_base_task_id_filter = [
+  "base_98",
+  "base_14",
+  "base_16",
+  "base_18",
+]
+max_steps = 50
+
+# Evaluator-side user simulator settings
+user_model = "gpt-4.1-mini"
+user_provider = "openai"
+user_thinking = false
+
+# Evaluator-side policy judge settings
+policy_evaluator_model = "gpt-4.1-mini"
+policy_evaluator_provider = "openai"

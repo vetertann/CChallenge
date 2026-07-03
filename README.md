@@ -441,6 +441,7 @@ For implementation details, see the original CAR-bench reward calculators in
 src/
   agentbeats/                         inherited internal A2A runner helpers
   evaluator/                          CAR-bench evaluator A2A server
+  track_1_agent_coroutine_under_test/ active coroutine-bridge participant agent
   track_1_agent_under_test/           Track 1 minimal template
   track_2_agent_under_test_cerebras/  Track 2 direct Cerebras agent
   track_2_agent_under_test_cerebras_planner/
@@ -457,6 +458,7 @@ docs/
   development-guide.md                detailed A2A turn contract
   agent-under-test-harnessing.md      allowed harness boundaries
   cerebras-harness-patterns.md        Track 2 model/harness patterns
+  coroutine-agent-architecture.md     active coroutine agent design and techniques
 ```
 
 ---
@@ -474,6 +476,7 @@ Use this reading path when building your own agent:
 3. **Design a more sophisticated harness**
    - [`docs/agent-under-test-harnessing.md`](docs/agent-under-test-harnessing.md)
    - [`docs/cerebras-harness-patterns.md`](docs/cerebras-harness-patterns.md)
+   - [`docs/coroutine-agent-architecture.md`](docs/coroutine-agent-architecture.md)
 4. **Protocol background**
    - [`docs/a2a-introduction.md`](docs/a2a-introduction.md)
 
