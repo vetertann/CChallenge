@@ -694,7 +694,7 @@ def render_workspace_helpers() -> str:
         "- `set_fog_lights_on_safe()`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Activates fog lights under policies 008/009 and 013: checks weather and exterior-light state, obtains explicit confirmation when required, turns low beams on and high beams off when needed, and directly reports missing capabilities or response fields.\n"
         "- `set_high_beams_on_safe()`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Activates high beams under policy 014: reads fog-light state, blocks only when fog lights are known on, records unknown fog state internally without surfacing it after success, and routes the high-beam setter through explicit confirmation.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Activates high beams under policy 014: reads fog-light state, blocks when fog lights are on or fog-light status is unavailable, and routes the high-beam setter through explicit confirmation.\n"
         "- `set_exterior_lights_safe(intent)`\n"
         "  Built-in workspace helper, not a direct evaluator tool. Handles broad exterior-light intents only after the model has resolved the intent. It does not inspect raw user text. If the user only says to turn on the lights and gives no interior, ambient, reading-light, or color clue, use `intent=\"improve_visibility\"` so the helper checks weather and exterior-light state before asking. Use `intent=\"turn_on_headlights\"` for state-aware low/high-beam handling, and `intent=\"turn_off_exterior_lights\"` to read exterior-light state and turn off only lights known to be on.\n"
         "- `set_air_conditioning_on_safe(use_preferred_air_circulation=False)`\n"

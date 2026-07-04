@@ -1627,9 +1627,8 @@ class CoroutineWorkspace:
                 "confirmation_required": False,
                 "description": (
                     "Built-in policy helper for activating high beams. It reads fog-light state, "
-                    "blocks activation only when fog lights are known on under policy 014, records "
-                    "unknown fog state internally, and routes the high-beam setter through its "
-                    "explicit confirmation requirement."
+                    "blocks activation when fog lights are on or fog-light status is unavailable, "
+                    "and routes the high-beam setter through its explicit confirmation requirement."
                 ),
                 "required_arguments": [],
                 "optional_arguments": [],
@@ -11625,7 +11624,10 @@ class CoroutineWorkspace:
         unknown_response_fields: list[str] = []
         fog_on = lights.get("fog_lights")
         high_on = lights.get("head_lights_high_beams")
-        if isinstance(fog_on, UnknownToolResponseValue) or "fog_lights" not in lights:
+        fog_state_unknown = (
+            isinstance(fog_on, UnknownToolResponseValue) or "fog_lights" not in lights
+        )
+        if fog_state_unknown:
             unknown_response_fields.append("result.get_exterior_lights_status.fog_lights")
         elif not isinstance(fog_on, bool):
             return self._limitation_response(
@@ -11643,8 +11645,8 @@ class CoroutineWorkspace:
             )
         if fog_on is True:
             message = (
-                "I can't turn on the high beams while the fog lights are on because policy 014 "
-                "prohibits that combination."
+                "I can't turn on the high beams while the fog lights are on because those lights "
+                "can't be used together."
             )
             report = {
                 "helper": gate_name,
@@ -11673,6 +11675,15 @@ class CoroutineWorkspace:
             )
             self._helper_message(message)
             return {"status": "SUCCESS", "actions": [], "message": message}
+        if fog_state_unknown:
+            return self._limitation_response(
+                gate_name,
+                "turn on the high beams safely",
+                reason=(
+                    "the car system did not provide the fog-light status, so I can't "
+                    "verify that the fog lights are off"
+                ),
+            )
 
         action_call = ("set_head_lights_high_beams", {"on": True})
         blocker = self._require_tool_surface_for_calls(
@@ -11884,8 +11895,8 @@ class CoroutineWorkspace:
             return {"status": "SUCCESS", "actions": [], "report": report, "message": message}
         if fog_on is True:
             message = (
-                "I can't turn on the high beams while the fog lights are on because policy 014 "
-                "prohibits that combination."
+                "I can't turn on the high beams while the fog lights are on because those lights "
+                "can't be used together."
             )
             report = {
                 "helper": gate_name,

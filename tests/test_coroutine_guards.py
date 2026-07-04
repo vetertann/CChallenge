@@ -586,7 +586,7 @@ class GuardTests(unittest.TestCase):
         result = ex.run("set_fan_speed(level=3)\nrespond('Fan set to 3.')")
         self.assertEqual(result.response_text, "Fan set to 3.")
 
-    def test_high_beam_helper_attempts_setter_when_fog_state_unknown(self):
+    def test_high_beam_helper_blocks_when_fog_state_unknown(self):
         ws, _ = self.make(
             {
                 "get_exterior_lights_status": (
@@ -611,25 +611,21 @@ class GuardTests(unittest.TestCase):
             },
         )
 
-        result = ws.set_high_beams_on_safe()
+        with self.assertRaises(ResponseReady):
+            ws.set_high_beams_on_safe()
 
-        self.assertEqual(result["status"], "SUCCESS")
-        self.assertEqual(result["message"], "High beams turned on.")
+        self.assertIn("can't turn on the high beams safely", ws._response_text or "")
+        self.assertIn("fog-light status", ws._response_text or "")
+        self.assertIn("verify that the fog lights are off", ws._response_text or "")
         self.assertEqual(
             [[call["tool_name"] for call in request] for request in ws.bridge.requests],
-            [["get_exterior_lights_status"], ["set_head_lights_high_beams"]],
+            [["get_exterior_lights_status"]],
         )
-        self.assertEqual(
-            ws.bridge.requests[-1][0]["arguments"],
-            {"on": True},
-        )
-        self.assertIn(
-            "result.get_exterior_lights_status.fog_lights",
-            ws.scratchpad["facts"]["last_helper_report"]["unknown_response_fields"],
-        )
+        self.assertIsNone(self._emitted(ws, "set_head_lights_high_beams"))
+        self.assertEqual(ws.scratchpad["facts"]["last_helper_report"]["status"], "UNAVAILABLE")
 
-    def test_high_beam_helper_confirmation_mentions_unknown_fog_state(self):
-        ws, ex = self.make(
+    def test_high_beam_helper_confirmation_does_not_override_unknown_fog_state(self):
+        ws, _ = self.make(
             {
                 "get_exterior_lights_status": (
                     "SUCCESS",
@@ -658,28 +654,15 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(ResponseReady):
             ws.set_high_beams_on_safe()
 
-        self.assertIn("fog-light status is unavailable", ws._response_text or "")
-        self.assertIn("high beams are currently off", ws._response_text or "")
-        self.assertIn("on=True", ws._response_text or "")
+        self.assertIn("can't turn on the high beams safely", ws._response_text or "")
+        self.assertIn("fog-light status", ws._response_text or "")
+        self.assertNotIn("on=True", ws._response_text or "")
         self.assertEqual(
             [[call["tool_name"] for call in request] for request in ws.bridge.requests],
             [["get_exterior_lights_status"]],
         )
-        pending = ws.scratchpad["facts"]["pending_confirmation"]
-        self.assertEqual(pending["response_on_success"], "High beams turned on.")
-        self.assertIn(
-            "result.get_exterior_lights_status.fog_lights",
-            pending["unknown_response_fields"],
-        )
-
-        ws.observe_user("Yes, proceed.")
-        result = ex.run("handle_pending_confirmation()")
-
-        self.assertEqual(result.response_text, "High beams turned on.")
-        self.assertEqual(
-            self._emitted(ws, "set_head_lights_high_beams"),
-            {"on": True},
-        )
+        self.assertNotIn("pending_confirmation", ws.scratchpad["facts"])
+        self.assertIsNone(self._emitted(ws, "set_head_lights_high_beams"))
 
     def test_high_beam_helper_blocks_when_fog_lights_known_on(self):
         ws, _ = self.make(
@@ -707,7 +690,9 @@ class GuardTests(unittest.TestCase):
             [[call["tool_name"] for call in request] for request in ws.bridge.requests],
             [["get_exterior_lights_status"]],
         )
-        self.assertIn("policy 014", ws._response_text or "")
+        self.assertIn("fog lights are on", ws._response_text or "")
+        self.assertIn("can't be used together", ws._response_text or "")
+        self.assertNotIn("policy 014", ws._response_text or "")
 
     def test_fog_lights_helper_confirms_when_weather_and_light_state_unknown(self):
         ws, ex = self.make(

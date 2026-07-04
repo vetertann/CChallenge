@@ -936,7 +936,7 @@ Current helpers:
 | `set_occupied_reading_lights(on=True, include_rear=True)` | Reads occupancy and sets only occupied canonical reading-light positions, normalizing rear aliases so the runtime does not emit duplicate left/right rear calls. |
 | `set_reading_lights_by_occupancy(occupied_on=True, unoccupied_on=False, include_rear=True)` | Reads occupancy and current reading-light state when available, computes one final state for each canonical reading-light position, then emits at most one setter call per position. |
 | `set_fog_lights_on_safe()` | Checks weather and lights, applies low/high-beam prerequisites, and confirms when required. |
-| `set_high_beams_on_safe()` | Blocks high beams while fog lights are on and applies tool confirmation. |
+| `set_high_beams_on_safe()` | Blocks high beams while fog lights are on or fog-light status is unavailable, and applies tool confirmation only when activation is known-safe. |
 | `set_exterior_lights_safe(intent)` | Handles model-resolved broad exterior-light intents (`improve_visibility`, `turn_on_headlights`, `turn_off_exterior_lights`) by reading grounded light/weather state and then calling policy-safe raw light tools. |
 | `get_route_options(...)` | Normalizes route choices, aliases, durations, and toll metadata. |
 | `select_route(...)` | Selects one uniquely identified route without guessing and records revision-bound provenance. |
