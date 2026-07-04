@@ -79,6 +79,7 @@ WORKSPACE_HELPER_NAMES = (
     "get_contact_details",
     "send_contact_details_to_contact",
     "get_next_calendar_entry",
+    "resolve_calendar_attendee_recipients",
     "defrost_front_window",
     "set_window_defrost_safe",
     "open_sunroof_safe",
@@ -1092,6 +1093,11 @@ class CoroutineWorkspace:
                 "recipient_contact_id, subject_contact_id, required_fields=None, intro=None)"
             ),
             "get_next_calendar_entry": "get_next_calendar_entry()",
+            "resolve_calendar_attendee_recipients": (
+                "resolve_calendar_attendee_recipients("
+                "topic=None, start_hour=None, start_minute=None, location=None, "
+                "month=None, day=None)"
+            ),
             "set_air_conditioning_on_safe": (
                 "set_air_conditioning_on_safe(use_preferred_air_circulation=False)"
             ),
@@ -1376,6 +1382,53 @@ class CoroutineWorkspace:
                     "properties": {},
                 },
                 "argument_descriptions": {},
+            }
+        if tool_name == "resolve_calendar_attendee_recipients":
+            return {
+                "name": "resolve_calendar_attendee_recipients",
+                "signature": (
+                    "resolve_calendar_attendee_recipients("
+                    "topic=None, start_hour=None, start_minute=None, location=None, "
+                    "month=None, day=None)"
+                ),
+                "confirmation_required": False,
+                "description": (
+                    "Built-in read-only helper. For email-to-meeting-attendees requests, "
+                    "reads the policy-day calendar, resolves one meeting from explicit "
+                    "structured selectors, requires concrete attendee contact IDs, then "
+                    "reads attendee emails. If the calendar entry does not provide attendee "
+                    "identities, it reports that limitation directly instead of asking the "
+                    "user to invent attendees."
+                ),
+                "required_arguments": [],
+                "optional_arguments": [
+                    "topic",
+                    "start_hour",
+                    "start_minute",
+                    "location",
+                    "month",
+                    "day",
+                ],
+                "schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "topic": {"type": ["string", "null"], "default": None},
+                        "start_hour": {"type": ["integer", "null"], "default": None},
+                        "start_minute": {"type": ["integer", "null"], "default": None},
+                        "location": {"type": ["string", "null"], "default": None},
+                        "month": {"type": ["integer", "null"], "default": None},
+                        "day": {"type": ["integer", "null"], "default": None},
+                    },
+                },
+                "argument_descriptions": {
+                    "topic": "Exact meeting topic from grounded task/calendar context.",
+                    "start_hour": "Meeting start hour in 24-hour time, if resolved.",
+                    "start_minute": "Meeting start minute, if resolved.",
+                    "location": "Exact meeting location name, if resolved.",
+                    "month": "Calendar month; defaults to policy_now().",
+                    "day": "Calendar day; defaults to policy_now().",
+                },
             }
         if tool_name == "defrost_front_window":
             return {
@@ -8964,6 +9017,11 @@ class CoroutineWorkspace:
         if attendee_ids:
             entry["attendee_ids"] = attendee_ids
             entry["attendee_count"] = len(attendee_ids)
+        elif isinstance(entry.get("attendees"), UnknownToolResponseValue):
+            entry["attendees_unknown"] = True
+            entry["unknown_response_fields"] = [
+                "result.get_entries_from_calendar.meetings.attendees"
+            ]
         entry["display"] = " ".join(parts)
         return entry
 
@@ -11376,6 +11434,242 @@ class CoroutineWorkspace:
         }
         if next_entry is not None:
             self.remember_entity("next_calendar_entry", next_entry)
+        self._store_helper_report(gate_name, normalized)
+        return normalized
+
+    def resolve_calendar_attendee_recipients(
+        self,
+        topic: str | None = None,
+        start_hour: int | str | None = None,
+        start_minute: int | str | None = None,
+        location: str | None = None,
+        month: int | str | None = None,
+        day: int | str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve attendee contact emails for one selected calendar meeting."""
+
+        gate_name = "resolve_calendar_attendee_recipients"
+        now = self.policy_now()
+
+        def int_or_none(value: Any, label: str) -> int | None:
+            if value is None:
+                return None
+            parsed = self._parse_first_number(value)
+            if not isinstance(parsed, (int, float)) or isinstance(parsed, bool):
+                return self._limitation_response(
+                    gate_name,
+                    "resolve the calendar attendees",
+                    reason=f"the {label} selector was not a number",
+                )
+            return int(parsed)
+
+        month_value = int_or_none(month, "month")
+        day_value = int_or_none(day, "day")
+        if month_value is None:
+            month_value = now.get("month")
+        if day_value is None:
+            day_value = now.get("day")
+        if not isinstance(month_value, int) or not isinstance(day_value, int):
+            return self._limitation_response(
+                gate_name,
+                "resolve the calendar attendees",
+                reason="the current policy date is unavailable",
+            )
+
+        start_hour_value = int_or_none(start_hour, "start_hour")
+        start_minute_value = int_or_none(start_minute, "start_minute")
+        topic_key = self._normalized_entity_name(topic)
+        location_key = self._normalized_entity_name(location)
+
+        call = ("get_entries_from_calendar", {"month": month_value, "day": day_value})
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "read the calendar attendees",
+            [call],
+        )
+        if blocker:
+            return blocker
+        result = self._call_raw_tool_sync(*call)
+        if result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "read the calendar attendees",
+                result,
+            )
+        payload = result_value(result)
+        if not isinstance(payload, dict):
+            return self._limitation_response(
+                gate_name,
+                "resolve the calendar attendees",
+                reason="the calendar result had an unexpected shape",
+            )
+        meetings = payload.get("meetings")
+        normalized_entries = self._normalize_calendar_entries(
+            meetings if isinstance(meetings, list) else []
+        )
+        self.remember_entity(
+            "last_calendar",
+            {
+                "date": copy.deepcopy(payload.get("date")),
+                "entries": copy.deepcopy(normalized_entries),
+                "meetings": copy.deepcopy(normalized_entries),
+            },
+        )
+
+        selectors_provided = any(
+            value is not None
+            for value in (topic_key, location_key, start_hour_value, start_minute_value)
+        )
+
+        def matches(entry: dict[str, Any]) -> bool:
+            if topic_key is not None:
+                if self._normalized_entity_name(entry.get("topic")) != topic_key:
+                    return False
+            if location_key is not None:
+                entry_location = entry.get("location_name") or entry.get("location")
+                if self._normalized_entity_name(entry_location) != location_key:
+                    return False
+            if start_hour_value is not None and entry.get("start_hour") != start_hour_value:
+                return False
+            if start_minute_value is not None and entry.get("start_minute") != start_minute_value:
+                return False
+            return True
+
+        if selectors_provided:
+            candidates = [entry for entry in normalized_entries if matches(entry)]
+        else:
+            hour = now.get("hour")
+            minute = now.get("minute")
+            if not isinstance(hour, int) or not isinstance(minute, int):
+                return self._limitation_response(
+                    gate_name,
+                    "resolve the calendar attendees",
+                    reason="the current policy time is unavailable",
+                )
+            current_minutes = hour * 60 + minute
+            candidates = [
+                entry
+                for entry in normalized_entries
+                if isinstance(entry.get("start_minutes"), int)
+                and entry["start_minutes"] >= current_minutes
+            ]
+            if candidates:
+                next_minutes = min(entry["start_minutes"] for entry in candidates)
+                candidates = [
+                    entry for entry in candidates if entry.get("start_minutes") == next_minutes
+                ]
+
+        if not candidates:
+            message = "I couldn't find a matching calendar meeting to resolve attendee recipients."
+            report = self._store_helper_report(
+                gate_name,
+                {
+                    "helper": gate_name,
+                    "status": "NOT_FOUND",
+                    "date": {"month": month_value, "day": day_value},
+                    "selectors": {
+                        "topic": topic,
+                        "start_hour": start_hour_value,
+                        "start_minute": start_minute_value,
+                        "location": location,
+                    },
+                    "message": message,
+                },
+            )
+            self.scratchpad["gates"][gate_name] = report
+            self._abort_with_response(message)
+
+        if len(candidates) > 1:
+            displays = [
+                str(entry.get("display") or entry.get("topic") or "calendar meeting")
+                for entry in candidates[:5]
+            ]
+            message = (
+                "Which calendar meeting should I use for the attendee recipients? "
+                + "Options: "
+                + "; ".join(displays)
+            )
+            report = self._store_helper_report(
+                gate_name,
+                {
+                    "helper": gate_name,
+                    "status": "NEEDS_CLARIFICATION",
+                    "matches": copy.deepcopy(candidates),
+                    "message": message,
+                },
+            )
+            self.scratchpad["gates"][gate_name] = report
+            self._abort_with_response(message)
+
+        selected = copy.deepcopy(candidates[0])
+        self.remember_entity("selected_calendar_entry", copy.deepcopy(selected))
+        attendee_ids = self._string_list(selected.get("attendee_ids"))
+        if not attendee_ids:
+            attendee_ids = self._string_list(selected.get("attendees"))
+        if not attendee_ids:
+            meeting_label = str(
+                selected.get("display")
+                or selected.get("topic")
+                or "the calendar meeting"
+            )
+            message = (
+                f"I found {meeting_label}, but the calendar entry does not provide "
+                "attendee identities, so I can't address an email to the attendees."
+            )
+            report = self._store_helper_report(
+                gate_name,
+                {
+                    "helper": gate_name,
+                    "status": "UNAVAILABLE",
+                    "meeting": selected,
+                    "missing_response_fields": [
+                        "result.get_entries_from_calendar.meetings.attendees"
+                    ],
+                    "message": message,
+                },
+            )
+            self.scratchpad["gates"][gate_name] = {
+                "status": "NO",
+                "missing_response_fields": report["missing_response_fields"],
+                "reason": message,
+            }
+            self._abort_with_response(message)
+
+        contacts = self.get_contact_details(
+            attendee_ids,
+            required_fields=["email"],
+            role="email_recipient",
+        )
+        if contacts.get("status") != "SUCCESS":
+            return contacts
+        contact_records = [
+            contact
+            for contact in contacts.get("contacts", [])
+            if isinstance(contact, dict)
+        ]
+        email_addresses = [
+            email.strip()
+            for contact in contact_records
+            for email in [contact.get("email")]
+            if isinstance(email, str) and email.strip()
+        ]
+        if len(email_addresses) != len(attendee_ids):
+            return self._limitation_response(
+                gate_name,
+                "resolve the calendar attendee email addresses",
+                reason="one or more attendee email addresses are unavailable",
+            )
+        normalized = {
+            "helper": gate_name,
+            "status": "SUCCESS",
+            "meeting": selected,
+            "attendee_contact_ids": attendee_ids,
+            "contact_ids": attendee_ids,
+            "contacts": contact_records,
+            "email_addresses": email_addresses,
+            "raw_calendar_result": result,
+        }
+        self.remember_entity("calendar_attendee_recipients", copy.deepcopy(normalized))
         self._store_helper_report(gate_name, normalized)
         return normalized
 
@@ -18150,6 +18444,7 @@ class BlockingPythonExecutor:
             "get_contact_details": ws.get_contact_details,
             "send_contact_details_to_contact": ws.send_contact_details_to_contact,
             "get_next_calendar_entry": ws.get_next_calendar_entry,
+            "resolve_calendar_attendee_recipients": ws.resolve_calendar_attendee_recipients,
             "set_air_conditioning_on_safe": ws.set_air_conditioning_on_safe,
             "close_known_windows_for_blocked_ac": ws.close_known_windows_for_blocked_ac,
             "set_climate_temperature_safe": ws.set_climate_temperature_safe,

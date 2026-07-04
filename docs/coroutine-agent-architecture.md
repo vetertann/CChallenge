@@ -938,6 +938,7 @@ Current helpers:
 | `set_fog_lights_on_safe()` | Checks weather and lights, applies low/high-beam prerequisites, and confirms when required. |
 | `set_high_beams_on_safe()` | Blocks high beams while fog lights are on or fog-light status is unavailable, and applies tool confirmation only when activation is known-safe. |
 | `set_exterior_lights_safe(intent)` | Handles model-resolved broad exterior-light intents (`improve_visibility`, `turn_on_headlights`, `turn_off_exterior_lights`) by reading grounded light/weather state and then calling policy-safe raw light tools. |
+| `resolve_calendar_attendee_recipients(...)` | Reads calendar entries for a resolved meeting, requires concrete attendee contact IDs, reads attendee emails, and stops with a limitation if attendee identities are unavailable. |
 | `get_route_options(...)` | Normalizes route choices, aliases, durations, and toll metadata. |
 | `select_route(...)` | Selects one uniquely identified route without guessing and records revision-bound provenance. |
 | `select_poi(..., role=None)` | Selects one grounded POI without guessing; optional explicit `role` stores `selected_<role>_poi` so later steps can preserve stop, companion, destination, or charging-station identity without relying only on the latest POI alias. |

@@ -203,7 +203,7 @@ sync_window_positions(source_windows="FRONT", target_windows="REAR")
 - Route dicts include `display` with route id, via, full distance, duration, aliases, and toll disclosure. Prefer `route["display"]` when presenting route facts so distance/duration are not accidentally shortened and tolls are mentioned in the same message as the route.
 - When a contact lookup returns several people with the recipient's first name, do not choose the first result. Resolve the surname or other identity from the conversation and already-grounded contacts; ask only if multiple candidates still fit. Do not include the recipient's own contact card in a message containing colleagues' contact details unless the user explicitly asks for it.
 - If two contact searches express two known constraints, intersect their `contact_ids`. Prefer `unique_id_intersection(last_name_lookup, first_name_lookup)`, which returns the one shared grounded ID and rejects empty or ambiguous intersections. The second normalized lookup also exposes `unique_intersection_with_previous_contact_id` when the overlap with the immediately previous lookup is exactly one ID.
-- After reading calendar entries, a contact-name lookup exposes `intersection_with_calendar_attendee_ids` and, when exactly one lookup result is among recent meeting attendees, `unique_calendar_attendee_contact_id`. The unique attendee is ranked first while `unconstrained_contact_ids` preserves the raw order. If the current request asks to message or call a meeting attendee, call `get_contact_id_by_contact_name(..., constrain_to_recent_calendar_attendees=True)` so the result is narrowed to recent attendee IDs, then use that ID with `get_contact_details(...)` before asking which same-name contact the user meant.
+- After reading calendar entries, a contact-name lookup exposes `intersection_with_calendar_attendee_ids` and, when exactly one lookup result is among recent meeting attendees, `unique_calendar_attendee_contact_id`. The unique attendee is ranked first while `unconstrained_contact_ids` preserves the raw order. If the current request asks to message or call a named meeting attendee, call `get_contact_id_by_contact_name(..., constrain_to_recent_calendar_attendees=True)` so the result is narrowed to recent attendee IDs, then use that ID with `get_contact_details(...)` before asking which same-name contact the user meant. If the request is to email the meeting attendees themselves, call `resolve_calendar_attendee_recipients(...)`; it resolves one meeting, requires concrete attendee contact IDs, reads attendee emails, and stops if attendee identities are unavailable instead of asking the user to supply identities that should have come from the calendar.
 - When sending one contact's details to another contact, keep recipient and subject roles in separate variables. After both grounded IDs are resolved, prefer `send_contact_details_to_contact(recipient_contact_id=..., subject_contact_id=..., required_fields=[...])` instead of relying on `last_contacts`, because later lookups overwrite that convenience alias. If you need to read contacts manually before composing a custom email, call `get_contact_details(..., role="email_recipient")` for the recipient and `get_contact_details(..., role="contact_details_subject")` for the contact whose details will appear in the message.
 
 ```python
@@ -217,6 +217,17 @@ recipient = get_contact_details(
     required_fields=["email"],
     role="email_recipient",
 )["first"]
+```
+
+```python
+# User asks to email all attendees of a resolved meeting.
+attendees = resolve_calendar_attendee_recipients(
+    topic="Marketing Campaign",
+    start_hour=15,
+    start_minute=30,
+    location="Bratislava",
+)
+send_email(email_addresses=attendees["email_addresses"], content_message=message)
 ```
 
 ```python

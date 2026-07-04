@@ -9036,6 +9036,134 @@ class GuardTests(unittest.TestCase):
 
         self.assertEqual(result.response_text, "None|con_1977,con_4970")
 
+    def test_calendar_attendee_recipient_helper_blocks_unknown_attendees(self):
+        tools = {
+            "get_entries_from_calendar": tool_schema(
+                "get_entries_from_calendar",
+                {"month": {"type": "integer"}, "day": {"type": "integer"}},
+                required=["month", "day"],
+            ),
+            "get_contact_information": tool_schema(
+                "get_contact_information",
+                {"contact_ids": {"type": "array", "items": {"type": "string"}}},
+                required=["contact_ids"],
+            ),
+        }
+        responses = {
+            "get_entries_from_calendar": (
+                "SUCCESS",
+                {
+                    "date": {"year": 2025, "month": 3, "day": 13},
+                    "meetings": [
+                        {
+                            "start": {"hour": "15", "minute": "30"},
+                            "duration": "30min",
+                            "location": "Bratislava",
+                            "attendees": "unknown",
+                            "topic": "Marketing Campaign",
+                        }
+                    ],
+                },
+            ),
+            "get_contact_information": ("SUCCESS", {}),
+        }
+        ws, _ = self.make(responses, tools)
+
+        with self.assertRaises(ResponseReady):
+            ws.resolve_calendar_attendee_recipients(
+                topic="Marketing Campaign",
+                start_hour=15,
+                start_minute=30,
+                location="Bratislava",
+                month=3,
+                day=13,
+            )
+
+        self.assertIn("I found 15:30", ws._response_text or "")
+        self.assertIn("does not provide attendee identities", ws._response_text or "")
+        self.assertEqual(
+            [[call["tool_name"] for call in request] for request in ws.bridge.requests],
+            [["get_entries_from_calendar"]],
+        )
+        report = ws.scratchpad["facts"]["last_helper_report"]
+        self.assertEqual(report["helper"], "resolve_calendar_attendee_recipients")
+        self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertIn(
+            "result.get_entries_from_calendar.meetings.attendees",
+            report["missing_response_fields"],
+        )
+        self.assertTrue(ws.entities["last_calendar"]["entries"][0]["attendees_unknown"])
+
+    def test_calendar_attendee_recipient_helper_returns_emails_for_known_attendees(self):
+        tools = {
+            "get_entries_from_calendar": tool_schema(
+                "get_entries_from_calendar",
+                {"month": {"type": "integer"}, "day": {"type": "integer"}},
+                required=["month", "day"],
+            ),
+            "get_contact_information": tool_schema(
+                "get_contact_information",
+                {"contact_ids": {"type": "array", "items": {"type": "string"}}},
+                required=["contact_ids"],
+            ),
+        }
+        responses = {
+            "get_entries_from_calendar": (
+                "SUCCESS",
+                {
+                    "date": {"year": 2025, "month": 8, "day": 15},
+                    "meetings": [
+                        {
+                            "start": {"hour": "13", "minute": "30"},
+                            "duration": "60min",
+                            "location": "Frankfurt",
+                            "attendees": ["con_4970", "con_8656"],
+                            "topic": "Risk Management",
+                        }
+                    ],
+                },
+            ),
+            "get_contact_information": (
+                "SUCCESS",
+                {
+                    "con_4970": {
+                        "name": {"first_name": "Tina", "last_name": "Phillips"},
+                        "email": "tina.phillips@example.com",
+                    },
+                    "con_8656": {
+                        "name": {"first_name": "Alex", "last_name": "Morgan"},
+                        "email": "alex.morgan@example.com",
+                    },
+                },
+            ),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "attendees = resolve_calendar_attendee_recipients(\n"
+            "    topic='Risk Management',\n"
+            "    start_hour=13,\n"
+            "    start_minute=30,\n"
+            "    location='Frankfurt',\n"
+            "    month=8,\n"
+            "    day=15,\n"
+            ")\n"
+            "respond(','.join(attendees['email_addresses']))"
+        )
+
+        self.assertEqual(
+            result.response_text,
+            "tina.phillips@example.com,alex.morgan@example.com",
+        )
+        self.assertEqual(
+            [[call["tool_name"] for call in request] for request in ws.bridge.requests],
+            [["get_entries_from_calendar"], ["get_contact_information"]],
+        )
+        self.assertEqual(
+            ws.entities["calendar_attendee_recipients"]["contact_ids"],
+            ["con_4970", "con_8656"],
+        )
+
     def test_send_email_confirmation_uses_unique_contact_intersection_email(self):
         tools = {"send_email": tool_schema(
             "send_email",
