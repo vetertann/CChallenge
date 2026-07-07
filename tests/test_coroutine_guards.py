@@ -578,6 +578,52 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(guard["status"], "CLEARED")
         self.assertEqual(guard["cleared_actions"], ["send_email"])
 
+    def test_non_confirmation_followup_clears_pending_confirmation(self):
+        ws, ex = self.make(
+            {},
+            {
+                "send_email": tool_schema(
+                    "send_email",
+                    {
+                        "email_addresses": {"type": "array", "items": {"type": "string"}},
+                        "content_message": {"type": "string"},
+                    },
+                    required=["email_addresses", "content_message"],
+                    description="REQUIRES_CONFIRMATION Send an email.",
+                ),
+            },
+        )
+        ws._user_turn_index = 1
+        ws.remember(
+            "pending_confirmation",
+            {
+                "created_user_turn_index": 1,
+                "gate_name": "tool_confirmation",
+                "policy": "004",
+                "on_confirm_calls": [
+                    {
+                        "tool_name": "send_email",
+                        "arguments": {
+                            "email_addresses": ["alex@example.com"],
+                            "content_message": "Old draft",
+                        },
+                    }
+                ],
+                "confirmation_retry_prompt": "Please confirm with yes.",
+            },
+        )
+        ws.observe_user("Actually, answer a different question first.")
+
+        result = ex.run("handle_pending_confirmation()")
+
+        self.assertIsNone(result.error)
+        self.assertIsNone(result.response_text)
+        self.assertNotIn("pending_confirmation", ws.scratchpad["facts"])
+        guard = ws.scratchpad["gates"]["stale_pending_confirmation_guard"]
+        self.assertEqual(guard["status"], "CLEARED")
+        self.assertEqual(guard["cleared_actions"], ["send_email"])
+        self.assertEqual(ws.bridge.requests, [])
+
     def test_clean_mutation_allows_success_text(self):
         ws, ex = self.make(
             {"set_fan_speed": ("SUCCESS", {})},
@@ -7420,7 +7466,7 @@ class GuardTests(unittest.TestCase):
         self.assertIn("post-edit route becomes a single direct", attention)
         self.assertIn("Bonn", attention)
 
-    def test_delete_only_mid_waypoint_requires_route_choice_when_multiple_routes(self):
+    def test_delete_only_mid_waypoint_defaults_fastest_when_multiple_routes(self):
         tools = {
             "get_current_navigation_state": tool_schema(
                 "get_current_navigation_state",
@@ -7471,14 +7517,76 @@ class GuardTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(result.response_text)
-        self.assertIn("Which route should I use?", result.response_text)
+        self.assertNotIn("Which route should I use?", result.response_text)
         self.assertIn("A11, A51", result.response_text)
-        self.assertIn("B634, K322", result.response_text)
-        self.assertIsNone(self._emitted(ws, "navigation_delete_waypoint"))
+        self.assertIn("fastest route", result.response_text)
         self.assertEqual(
-            ws.scratchpad["gates"]["waypoint_delete_route_choice_guard"]["status"],
-            "BLOCKED",
+            self._emitted(ws, "navigation_delete_waypoint")["route_id_without_waypoint"],
+            "R_fast",
         )
+        self.assertNotIn("waypoint_delete_route_choice_guard", ws.scratchpad["gates"])
+
+    def test_delete_only_mid_waypoint_preserves_supplied_nonfastest_route(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+            ),
+            "navigation_delete_waypoint": tool_schema(
+                "navigation_delete_waypoint",
+                {
+                    "waypoint_id_to_delete": {"type": "string"},
+                    "route_id_without_waypoint": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": ("SUCCESS", self.NAV_3WP),
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {
+                    "routes": [
+                        {
+                            "route_id": "R_fast",
+                            "start_id": "loc_a",
+                            "destination_id": "loc_c",
+                            "name_via": "A11, A51",
+                            "alias": ["fastest", "first"],
+                        },
+                        {
+                            "route_id": "R_short",
+                            "start_id": "loc_a",
+                            "destination_id": "loc_c",
+                            "name_via": "B634, K322",
+                            "alias": ["shortest", "second"],
+                        },
+                    ]
+                },
+            ),
+            "navigation_delete_waypoint": ("SUCCESS", {"waypoint_deleted": True}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "routes = get_route_options(start_id='loc_a', destination_id='loc_c')\n"
+            "shortest = select_route(routes['routes'], route_id='R_short')\n"
+            "navigation_delete_waypoint(\n"
+            "    waypoint_id_to_delete='loc_b',\n"
+            "    route_id_without_waypoint=shortest['selected_route_id'],\n"
+            ")\n"
+            "respond('Done, Bonn has been removed.')"
+        )
+
+        self.assertEqual(
+            self._emitted(ws, "navigation_delete_waypoint")["route_id_without_waypoint"],
+            "R_short",
+        )
+        self.assertIn("shortest route via B634, K322", result.response_text)
+        self.assertNotIn("fastest route", result.response_text)
 
     def test_delete_only_mid_waypoint_uses_single_available_route(self):
         tools = {

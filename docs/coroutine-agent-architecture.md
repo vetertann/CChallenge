@@ -1003,6 +1003,9 @@ helpers. Currently:
   For middle-waypoint deletion, the guard preserves a supplied route only when
   it is already grounded and connects the deleted waypoint's previous and next
   waypoints; otherwise it derives the policy-default fastest connecting route.
+  This default also applies when deleting the only intermediate waypoint leaves a
+  single direct route. The full matrix is tracked in
+  `docs/route-selection-matrix.md`.
 - `navigation_replace_one_waypoint(...)` delegates to
   `navigation_replace_one_waypoint_guarded(...)`.
 - `navigation_replace_final_destination(...)` delegates to

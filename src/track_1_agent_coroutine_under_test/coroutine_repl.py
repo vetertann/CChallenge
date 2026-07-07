@@ -8034,10 +8034,9 @@ class CoroutineWorkspace:
         The required `route_id_without_waypoint` must connect the deleted
         waypoint's previous and next neighbours; a stale id raises
         `NavigationDeleteOneWaypoint_007`. Preserve a valid grounded route that
-        the model selected. If deleting the only intermediate waypoint leaves a
-        single direct segment and multiple connecting routes are available, ask
-        for route choice instead of silently applying the multi-stop fastest
-        default.
+        the model selected. If no valid grounded route is supplied, derive the
+        fastest previous-to-next replacement route, including when deleting the
+        only intermediate waypoint leaves one direct segment.
         """
 
         target = kwargs.get("waypoint_id_to_delete")
@@ -8077,24 +8076,10 @@ class CoroutineWorkspace:
                             selector=self._recorded_selector_for_route_id(route_id),
                             offer_alternatives=True,
                         )
-                    elif routes:
-                        self.scratchpad["gates"]["waypoint_delete_route_choice_guard"] = {
-                            "status": "BLOCKED",
-                            "waypoint_id_to_delete": target,
-                            "previous_waypoint_id": previous_id,
-                            "next_waypoint_id": next_id,
-                            "reason": (
-                                "deleting this waypoint leaves a single direct "
-                                "segment with multiple possible replacement routes"
-                            ),
-                        }
-                        self._abort_with_response(
-                            self._route_choice_prompt_for_waypoint_delete(
-                                previous_id,
-                                next_id,
-                                routes,
-                            )
-                        )
+                    else:
+                        route_id = self._fastest_route_id(previous_id, next_id)
+                        if route_id:
+                            kwargs = dict(kwargs, route_id_without_waypoint=route_id)
                 else:
                     route_id = self._fastest_route_id(previous_id, next_id)
                     if route_id:
@@ -10796,16 +10781,30 @@ class CoroutineWorkspace:
             self._abort_with_response(message)
 
         if intent != "YES":
-            self.scratchpad["gates"][gate_name] = {
-                "status": "WAITING_CONFIRMATION",
+            self.scratchpad["facts"].pop("pending_confirmation", None)
+            pending_calls = pending.get("on_confirm_calls")
+            report = {
+                "helper": "stale_pending_confirmation_guard",
+                "status": "CLEARED",
                 "policy": pending.get("policy"),
-                "reason": "confirmation was not explicit",
+                "reason": (
+                    "the latest user message was not an explicit yes/no for "
+                    "the stored confirmation action"
+                ),
+                "cleared_actions": [
+                    call.get("tool_name")
+                    for call in pending_calls
+                    if isinstance(call, dict)
+                ] if isinstance(pending_calls, list) else [],
             }
-            message = str(
-                pending.get("confirmation_retry_prompt")
-                or "Please confirm with yes if you want me to proceed."
-            )
-            self._abort_with_response(message)
+            self.scratchpad["gates"]["stale_pending_confirmation_guard"] = report
+            self._store_helper_report("stale_pending_confirmation_guard", report)
+            self.scratchpad["gates"][gate_name] = {
+                "status": "NO",
+                "policy": pending.get("policy"),
+                "reason": "confirmation was not explicit; pending action cleared",
+            }
+            return report
 
         raw_calls = pending.get("on_confirm_calls") or []
         calls = [self._normalize_call_spec(item) for item in raw_calls]

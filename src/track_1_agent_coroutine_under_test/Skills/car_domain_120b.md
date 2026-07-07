@@ -198,7 +198,7 @@ sync_window_positions(source_windows="FRONT", target_windows="REAR")
 - Current navigation is preflighted into `scratchpad["entities"]["navigation_state"]` before the first model decision when available. Use its waypoint order and route shape directly; call `get_navigation_state(...)` only if that state is absent or stale.
 - For a final-destination replacement, inspect the current waypoint order and branch explicitly. If the active route is a single start-to-destination segment and route lookup returns multiple alternatives, present the fastest/shortest route information and wait unless an explicit model-resolved route choice, stored preferences, or unique route metadata already selects exactly one route. If exactly one route is selected or only one route exists, call `navigation_replace_final_destination(...)` with that grounded route. For multi-stop route construction or replacement, policy 022 supplies the proactive-fastest default per new segment unless the user or stored preferences specify another route.
 - For replacing an intermediate waypoint with a different waypoint, use `navigation_replace_one_waypoint(...)`. Do not decompose one replacement into `navigation_delete_waypoint(...)` followed by `navigation_add_one_waypoint(...)`; those are different edit intents and the evaluator expects the replacement operation when the user asked to replace.
-- For deleting an intermediate waypoint, the replacement route must connect the deleted waypoint's previous and next waypoints. Decide whether policy 022 supplies a fastest default from the route shape after deletion, not from the active route shape before deletion. If deleting that waypoint leaves only the start and final destination, route choice is unresolved when multiple connecting routes exist. Present the route options and wait unless the user, stored preferences, a prior accepted route, or exactly one returned route selects one grounded route. If the route remains multi-stop after deletion, policy 022 supplies the fastest previous-to-next default unless the user or stored preferences specify another route. Do not let any default override an explicit non-fastest route choice.
+- For deleting an intermediate waypoint, the replacement route must connect the deleted waypoint's previous and next waypoints. If the user, stored preferences, or a prior accepted route selects a grounded non-default route, pass that exact route ID to `navigation_delete_waypoint(...)`. Otherwise call `navigation_delete_waypoint(...)` with the target waypoint; the helper derives the fastest valid previous-to-next replacement route even when deletion leaves a direct start-to-final route. Do not let the fastest default override an explicit non-fastest route choice.
 - Before offering one particular route for the user to accept, record it with `select_route(..., route_id=...)`. If the next user message accepts that route, the fresh `selected_route` is an explicit choice and should be reused without another clarification. Presenting several alternatives does not itself choose one.
 - Route dicts include `display` with route id, via, full distance, duration, aliases, and toll disclosure. Prefer `route["display"]` when presenting route facts so distance/duration are not accidentally shortened and tolls are mentioned in the same message as the route.
 - When a contact lookup returns several people with the recipient's first name, do not choose the first result. Resolve the surname or other identity from the conversation and already-grounded contacts; ask only if multiple candidates still fit. Do not include the recipient's own contact card in a message containing colleagues' contact details unless the user explicitly asks for it.
@@ -367,31 +367,21 @@ previous_id = waypoints[target_index - 1]["id"]
 target_id = waypoints[target_index]["id"]
 next_id = waypoints[target_index + 1]["id"]
 route_options = get_route_options(start_id=previous_id, destination_id=next_id)
-deletion_leaves_one_segment = len(waypoints) - 1 == 2
 
-if deletion_leaves_one_segment and requested_route_preference is None:
-    # Do not use prefer="fastest" just because the route was multi-stop before
-    # deletion. After this edit it would be a single start-to-destination route.
-    selected = select_route(route_options["routes"])
-    if selected["status"] != "SUCCESS":
-        lines = [
-            f"{index}. {route['display']}"
-            for index, route in enumerate(route_options["routes"], 1)
-        ]
-        respond("Route options after deleting that waypoint:\n" + "\n".join(lines) + "\nWhich route should I use?")
-        stop_after_response()
-else:
-    # The fastest default is for a route that remains multi-stop, or for a
-    # request/preference that has already resolved fastest as the desired route.
+if requested_route_preference is not None:
     selected = select_route(
         route_options["routes"],
-        prefer=requested_route_preference or "fastest",
+        prefer=requested_route_preference,
     )
+    navigation_delete_waypoint(
+        waypoint_id_to_delete=target_id,
+        route_id_without_waypoint=selected["route_id"],
+    )
+else:
+    # No explicit/stored/accepted route choice: the helper derives the fastest
+    # valid previous-to-next replacement route.
+    navigation_delete_waypoint(waypoint_id_to_delete=target_id)
 
-navigation_delete_waypoint(
-    waypoint_id_to_delete=target_id,
-    route_id_without_waypoint=selected["route_id"],
-)
 ```
 
 ```python
