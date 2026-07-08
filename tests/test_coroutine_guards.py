@@ -1956,8 +1956,12 @@ class GuardTests(unittest.TestCase):
             323,
         )
         self.assertEqual(
-            ws.scratchpad["entities"]["last_distance_by_soc"]["distance_raw"],
-            "323.0km",
+            ws.scratchpad["entities"]["last_distance_by_soc"]["result"]["distance"],
+            "323 km",
+        )
+        self.assertNotIn(
+            "distance_km_for_85.0_until_0.0_percent_soc",
+            ws.scratchpad["entities"]["last_distance_by_soc"]["result"],
         )
 
     def test_first_number_value_accepts_normalized_distance_dict(self):
@@ -2101,7 +2105,7 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(result.response_text, "466")
 
-    def test_remaining_range_raw_key_is_numeric_in_model_result_and_scratchpad(self):
+    def test_remaining_range_splits_display_and_numeric_fields(self):
         ws, ex = self.make(
             {
                 "get_charging_specs_and_status": (
@@ -2121,14 +2125,15 @@ class GuardTests(unittest.TestCase):
             "status = get_charging_specs_and_status()\n"
             "stored = scratchpad['entities']['last_charging_specs_and_status']\n"
             "respond('|'.join([\n"
-            "    str(status['remaining_range'] >= 100),\n"
+            "    str(status['remaining_range']),\n"
             "    str(status['remaining_range_km']),\n"
-            "    str(stored['remaining_range'] >= 100),\n"
+            "    str(stored['remaining_range']),\n"
             "    str(stored['remaining_range_km']),\n"
-            "    str(status['remaining_range_raw']),\n"
+            "    str(status['remaining_range_km'] >= 100),\n"
+            "    str('remaining_range_raw' in status),\n"
             "]))"
         )
-        self.assertEqual(result.response_text, "True|155|True|155|155.0km")
+        self.assertEqual(result.response_text, "155 km|155|155 km|155|True|False")
 
     def test_unparseable_remaining_range_is_unknown_range(self):
         ws, ex = self.make(
@@ -11062,6 +11067,76 @@ class GuardTests(unittest.TestCase):
         ex.run("set_fan_speed(level=2)")
         ex.run("get_temperature_inside_car()")
         self.assertEqual(len(ws.bridge.requests), 3)
+
+    def test_climate_read_wrappers_expose_stable_summary_aliases(self):
+        tools = {
+            "get_temperature_inside_car": tool_schema("get_temperature_inside_car", {}),
+            "get_seat_heating_level": tool_schema("get_seat_heating_level", {}),
+            "get_seats_occupancy": tool_schema("get_seats_occupancy", {}),
+        }
+        responses = {
+            "get_temperature_inside_car": (
+                "SUCCESS",
+                {
+                    "climate_temperature_driver": 26.0,
+                    "climate_temperature_passenger": 23.0,
+                    "temperature_unit": "Celsius",
+                },
+            ),
+            "get_seat_heating_level": (
+                "SUCCESS",
+                {"seat_heating_driver": 2, "seat_heating_passenger": 3},
+            ),
+            "get_seats_occupancy": (
+                "SUCCESS",
+                {
+                    "seats_occupied": {
+                        "driver": True,
+                        "passenger": False,
+                        "driver_rear": False,
+                        "passenger_rear": False,
+                    }
+                },
+            ),
+        }
+        _ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "results = batch([\n"
+            "    ('get_temperature_inside_car', {}),\n"
+            "    ('get_seat_heating_level', {}),\n"
+            "    ('get_seats_occupancy', {}),\n"
+            "])\n"
+            "temp = result_value(result_by_tool(results, 'get_temperature_inside_car'))\n"
+            "heat = result_value(result_by_tool(results, 'get_seat_heating_level'))\n"
+            "occ = result_value(result_by_tool(results, 'get_seats_occupancy'))\n"
+            "respond(json.dumps({\n"
+            "    'temperatures_by_zone': temp['temperatures_by_zone'],\n"
+            "    'temperature_summary': temp['summary'],\n"
+            "    'seat_heating_by_zone': heat['seat_heating_by_zone'],\n"
+            "    'seat_heating_summary': heat['summary'],\n"
+            "    'occupied_seats': occ['occupied_seats'],\n"
+            "    'unoccupied_seats': occ['unoccupied_seats'],\n"
+            "    'occupied_front_seats': occ['occupied_front_seats'],\n"
+            "    'unoccupied_front_seats': occ['unoccupied_front_seats'],\n"
+            "    'occupancy_summary': occ['summary'],\n"
+            "}, sort_keys=True))"
+        )
+
+        self.assertIsNone(result.error)
+        payload = json.loads(result.response_text or "{}")
+        self.assertEqual(payload["temperatures_by_zone"], {"DRIVER": 26.0, "PASSENGER": 23.0})
+        self.assertEqual(payload["seat_heating_by_zone"], {"DRIVER": 2, "PASSENGER": 3})
+        self.assertEqual(payload["occupied_seats"], ["DRIVER"])
+        self.assertEqual(
+            payload["unoccupied_seats"],
+            ["PASSENGER", "DRIVER_REAR", "PASSENGER_REAR"],
+        )
+        self.assertEqual(payload["occupied_front_seats"], ["DRIVER"])
+        self.assertEqual(payload["unoccupied_front_seats"], ["PASSENGER"])
+        self.assertIn("driver 26", payload["temperature_summary"])
+        self.assertIn("driver level 2", payload["seat_heating_summary"])
+        self.assertIn("occupied: driver", payload["occupancy_summary"])
 
     def test_navigation_mutation_persists_returned_state_and_revision(self):
         tools = {

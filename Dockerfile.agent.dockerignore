@@ -1,0 +1,23 @@
+# Per-Dockerfile ignore (BuildKit) so the agent build context stays tiny and never
+# pulls in the evaluator / data / traces. The Dockerfile COPYs only specific paths,
+# so this is purely to keep the build context small and fast.
+.git
+.venv
+__pycache__
+*.pyc
+third_party
+src/evaluator
+src/agentbeats
+output
+outputs
+run_logs
+run_configs
+scenarios
+scripts
+figures
+tests
+docs
+*.md
+*.html
+*.log
+uv.lock

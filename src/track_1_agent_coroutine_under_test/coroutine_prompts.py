@@ -128,6 +128,7 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 - If the user asked for multiple outcomes in one request, do not stop after the first successful helper or tool path. Finish all grounded remaining subgoals, or explicitly state what is still blocked.
 - Before calling a confirmation-gated communication wrapper, finish gathering every fact the user requested in the message. Confirmation is the final side-effect gate, not a way to pause an incomplete research or planning workflow.
 - When the user identifies a retrievable object such as their next calendar event, current route, current charging state, or nearby POIs, call the corresponding read or search tool before asking them to repeat those facts. If the user asks whether a trip needs charging, first read `get_charging_specs_and_status()`; route distance or charger search results alone are not enough to decide vehicle range. `get_next_calendar_entry()` returns the next entry with direct aliases including `start_hour`, `start_minute`, `start_time_hour`, `start_time_minute`, `start_minutes`, `location`, and `location_name`.
+- For climate-status questions, use the read tool that actually owns the requested fact. `get_climate_settings()` gives fan speed, airflow direction, AC, circulation, and defrost state only; it does not give cabin temperatures or seat-heating levels. For temperatures call `get_temperature_inside_car()`. For seat-heating levels call `get_seat_heating_level()`. For who is in the car call `get_seats_occupancy()`. For broad current-climate/status questions, batch the needed read tools and use their normalized `summary`, `temperatures_by_zone`, `seat_heating_by_zone`, `occupied_seats`, and `unoccupied_seats` fields instead of interpreting raw boolean maps by hand.
 - For relative fan-speed requests with a stated amount such as "one level" or "two levels", use `increase_fan_speed(steps=...)` or `decrease_fan_speed(steps=...)`; these helpers read climate state and then set the calculated level. For explicit all-zone climate temperature changes, use `set_all_zones_climate_temperature_safe(temperature=...)`; it keeps the request as native `ALL_ZONES` even after an occupied-seat workflow. For driver/passenger climate sync, use `sync_climate_zone(source_zone=..., target_zone=...)` so values are copied from the source zone to the target zone. "Set driver to match passenger" means `source_zone="PASSENGER", target_zone="DRIVER"`; "set passenger to match driver" means `source_zone="DRIVER", target_zone="PASSENGER"`. If one request has multiple sync clauses naming the same target side, keep that same target for every included subsystem; do not make a second opposite-direction call for seat heating. For AC plus stored air-circulation preference, call `set_air_conditioning_on_safe(use_preferred_air_circulation=True)` after you explicitly resolve that the request asks for the stored preference; otherwise leave the flag false. For seat heating, explicit zones constrain scope: use `seat_zone="DRIVER"` or `seat_zone="PASSENGER"` when the seat is resolved; use no seat zone only when the request really covers all occupied front seats. For energy-saving cleanup of seat heating on unoccupied seats, use `turn_off_unoccupied_seat_heating()`; it reads occupancy/current levels and does not change occupied seats. For occupancy-based final states with explicit levels for occupied and/or unoccupied heatable front seats, use `optimize_seat_heating_by_occupancy(occupied_level=..., unoccupied_level=...)`.
 - For broad comfort requests such as feeling too warm, wanting air circulating,
   or warming occupied zones efficiently, do not choose a side effect before the
@@ -212,7 +213,7 @@ send_email(email_addresses=attendees["email_addresses"], content_message=message
 ```
 - POIs expose `poi_id`/`navigation_id` next to `host_location_id` and, when known, `host_location_name`. Navigate to the named POI's `navigation_id`, not its host city/area ID. Charging POIs also expose `charging_plugs`, `plug_ids`, and `available_plug_ids`.
 - For "fastest charger" or charging-time calculations from charger power, prefer `select_charging_plug(pois)` after a charging-POI search. It selects the highest-power plug and keeps station id, plug id, power, availability, phone number, and navigation id together. Use `require_available=True` only when current availability is an explicit hard constraint; for time calculation, an occupied high-power plug can still be the fastest charger if the user allows it.
-- Charging status exposes numeric `remaining_range_km`; do not compare the formatted `remaining_range` string directly with a number. For a charging search on a later segment of a multi-stop route, first account for range consumed before reaching that segment's start waypoint.
+- Charging status exposes numeric `remaining_range_km` for math and formatted `remaining_range` for user-facing answers. Do not compare the formatted `remaining_range` string directly with a number. For a charging search on a later segment of a multi-stop route, first account for range consumed before reaching that segment's start waypoint.
 - For a conditional request, ground the condition first, select exactly one branch, and execute only that branch. Use `policy_now()` for an unspecified current weather time. A bare "confirm" with no `pending_confirmation` is not permission to repeat or replace a completed side effect.
 - If the last helper report has `status: "UNAVAILABLE"` and the user asks why, what is missing, or which known items are affected, answer from that report. Do not perform side effects to work around a missing capability or missing information.
 - If the last helper report has `status: "UNAVAILABLE"` for AC/window policy 011 and the follow-up asks only to close a known blocking window, call `close_known_windows_for_blocked_ac(...)` and stop. Do not retry the blocked AC/defrost parent action unless the missing information becomes available.
@@ -352,6 +353,17 @@ respond(f"I found {plug['station_name']} near kilometer {search['at_kilometer']:
 search = search_charging_stations_on_route(route_id=selected_route["route_id"], at_kilometer=150)
 plug = search["selected_charging_plug"]
 respond(f"I found {plug['station_name']} near kilometer {search['at_kilometer']:.0f} of the planned route.")
+```
+- Navigation intent carries through a route-choice clarification. If the user
+  originally asked to navigate/start/set guidance, you showed route options, and
+  the follow-up selects one route, call `set_new_navigation(...)` immediately
+  with that selected route. Do not only answer that the route is selected:
+```python
+# Prior turn: user asked "Navigate to Frankfurt" and you showed route options.
+# Follow-up: user selects the fastest route.
+selected = select_route(last_route_options["routes"], prefer="fastest")
+set_new_navigation(route_ids=[selected["selected_route_id"]])
+respond("Navigation started on the fastest route.")
 ```
 - When initially answering a planning-only route request, do not ask whether to
   "start navigation" or "set navigation" unless the user asked for navigation.
@@ -682,7 +694,7 @@ def render_workspace_helpers() -> str:
         "- `first_number_value(value, default=None)`\n"
         "  Built-in pure extraction helper. Extracts the first numeric value from a number or string such as `155.0km`; returns `default` if provided and no number is found.\n"
         "- `get_distance_by_soc_value(initial_state_of_charge, final_state_of_charge=0)`\n"
-        "  Built-in workspace helper, not a direct evaluator tool. Calls `get_distance_by_soc(...)` and normalizes the dynamic `distance_*` output key into `distance`, `unit`, `distance_km` when unit is km, `raw_key`, and `raw_value`.\n"
+        "  Built-in workspace helper, not a direct evaluator tool. Calls `get_distance_by_soc(...)` and normalizes the dynamic `distance_*` output key into numeric `distance_km`, formatted `distance`, and `summary`.\n"
         "- `get_navigation_state(detailed_information=True)`\n"
         "  Built-in read-only helper, not a direct evaluator tool. Calls `get_current_navigation_state(...)` and normalizes active state, waypoint IDs, route IDs, detailed waypoints/routes, start, destination, and intermediate waypoints. It directly reports required response fields that are unavailable instead of guessing them.\n"
         "- `get_contact_details(contact_ids, required_fields=None, role=None)`\n"

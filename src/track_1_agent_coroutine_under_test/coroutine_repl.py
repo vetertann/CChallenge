@@ -17938,9 +17938,12 @@ class CoroutineWorkspace:
             if parsed_range is None:
                 parsed_range = self._parse_first_number(normalized.get("remaining_range_km"))
             if parsed_range is not None:
-                normalized.setdefault("remaining_range_raw", remaining_range)
-                normalized["remaining_range"] = parsed_range
                 normalized["remaining_range_km"] = parsed_range
+                normalized["remaining_range"] = self._format_km(parsed_range)
+                normalized.setdefault(
+                    "summary",
+                    f"remaining range: {normalized['remaining_range']}",
+                )
             else:
                 unknown_range = UnknownToolResponseValue(
                     self,
@@ -17953,6 +17956,112 @@ class CoroutineWorkspace:
                     normalized.setdefault("remaining_range_raw", remaining_range)
                 normalized["remaining_range"] = unknown_range
                 normalized["remaining_range_km"] = unknown_range
+        if tool_name == "get_distance_by_soc":
+            for key in list(normalized):
+                if not isinstance(key, str):
+                    continue
+                if not key.startswith("distance") or (
+                    "_until_" not in key and "_for_" not in key
+                ):
+                    continue
+                value = normalized.pop(key)
+                distance_km = self._parse_first_number(value)
+                if distance_km is None:
+                    continue
+                distance_display = self._format_km(distance_km)
+                normalized.setdefault("distance_km", distance_km)
+                normalized.setdefault("distance", distance_display)
+                normalized.setdefault("summary", f"distance: {distance_display}")
+        if tool_name == "get_temperature_inside_car":
+            temperatures_by_zone: dict[str, Any] = {}
+            for zone, key in (
+                ("DRIVER", "climate_temperature_driver"),
+                ("PASSENGER", "climate_temperature_passenger"),
+            ):
+                if key in normalized:
+                    temperatures_by_zone[zone] = normalized[key]
+            if temperatures_by_zone:
+                normalized.setdefault("temperatures_by_zone", temperatures_by_zone)
+                unit = normalized.get("temperature_unit")
+                unit_text = str(unit) if isinstance(unit, str) and unit.strip() else "Celsius"
+                parts = [
+                    f"{zone.lower()} {value:g} {unit_text}"
+                    for zone, value in temperatures_by_zone.items()
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                ]
+                if parts:
+                    normalized.setdefault("summary", ", ".join(parts) + ".")
+        if tool_name == "get_seat_heating_level":
+            seat_heating_by_zone: dict[str, Any] = {}
+            for zone, key in (
+                ("DRIVER", "seat_heating_driver"),
+                ("PASSENGER", "seat_heating_passenger"),
+            ):
+                if key in normalized:
+                    seat_heating_by_zone[zone] = normalized[key]
+            if seat_heating_by_zone:
+                normalized.setdefault("seat_heating_by_zone", seat_heating_by_zone)
+                parts = [
+                    f"{zone.lower()} level {value:g}"
+                    for zone, value in seat_heating_by_zone.items()
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                ]
+                if parts:
+                    normalized.setdefault("summary", ", ".join(parts) + ".")
+        if tool_name == "get_seats_occupancy":
+            seats_occupied = normalized.get("seats_occupied")
+            if isinstance(seats_occupied, dict):
+                label_by_key = {
+                    "driver": "DRIVER",
+                    "passenger": "PASSENGER",
+                    "driver_rear": "DRIVER_REAR",
+                    "passenger_rear": "PASSENGER_REAR",
+                }
+                occupied = [
+                    label
+                    for key, label in label_by_key.items()
+                    if seats_occupied.get(key) is True
+                ]
+                unoccupied = [
+                    label
+                    for key, label in label_by_key.items()
+                    if seats_occupied.get(key) is False
+                ]
+                unknown = [
+                    label
+                    for key, label in label_by_key.items()
+                    if key in seats_occupied
+                    and seats_occupied.get(key) is not True
+                    and seats_occupied.get(key) is not False
+                ]
+                normalized.setdefault("occupied_seats", occupied)
+                normalized.setdefault("unoccupied_seats", unoccupied)
+                normalized.setdefault(
+                    "occupied_front_seats",
+                    [seat for seat in occupied if seat in {"DRIVER", "PASSENGER"}],
+                )
+                normalized.setdefault(
+                    "unoccupied_front_seats",
+                    [seat for seat in unoccupied if seat in {"DRIVER", "PASSENGER"}],
+                )
+                summary_parts = []
+                if occupied:
+                    summary_parts.append(
+                        "occupied: "
+                        + ", ".join(seat.lower().replace("_", " ") for seat in occupied)
+                    )
+                if unoccupied:
+                    summary_parts.append(
+                        "empty: "
+                        + ", ".join(seat.lower().replace("_", " ") for seat in unoccupied)
+                    )
+                if unknown:
+                    summary_parts.append(
+                        "unknown: "
+                        + ", ".join(seat.lower().replace("_", " ") for seat in unknown)
+                    )
+                if summary_parts:
+                    normalized.setdefault("summary", "; ".join(summary_parts) + ".")
         if tool_name == "get_weather":
             current_slot = normalized.get("current_slot")
             if isinstance(current_slot, dict):
@@ -18127,9 +18236,8 @@ class CoroutineWorkspace:
             if key == "remaining_range":
                 remaining_range = CoroutineWorkspace._parse_first_number(value)
                 if remaining_range is not None:
-                    parsed.setdefault("remaining_range_raw", value)
-                    parsed["remaining_range"] = remaining_range
                     parsed.setdefault("remaining_range_km", remaining_range)
+                    parsed.setdefault("remaining_range", CoroutineWorkspace._format_km(remaining_range))
             if "charging_time" in key or key.startswith("time_") or key.endswith("_time"):
                 minutes = CoroutineWorkspace._parse_first_number(value)
                 if minutes is not None:
@@ -18143,10 +18251,12 @@ class CoroutineWorkspace:
             if key.startswith("distance") and ("_until_" in key or "_for_" in key):
                 km = CoroutineWorkspace._parse_first_number(value)
                 if km is not None:
-                    if isinstance(value, str):
-                        parsed.setdefault("distance_raw", value)
                     parsed.setdefault("distance_km", km)
-                    parsed.setdefault("distance", km)
+                    parsed.setdefault("distance", CoroutineWorkspace._format_km(km))
+
+    @staticmethod
+    def _format_km(value: int | float) -> str:
+        return f"{value:g} km"
 
     @staticmethod
     def _parse_first_number(value: Any) -> int | float | None:
