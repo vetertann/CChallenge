@@ -56,6 +56,7 @@ wording for helpers to infer missing intent.
 
 ### Climate and Comfort Helpers
 
+- For climate-status questions, call the read tool that owns the requested fact. `get_climate_settings()` gives fan speed, airflow direction, AC, circulation, and defrost state only; it does not give cabin temperatures or seat-heating levels. For temperatures call `get_temperature_inside_car()`. For seat-heating levels call `get_seat_heating_level()`. For who is in the car call `get_seats_occupancy()`. For broad current-climate/status questions, batch the needed read tools and use their normalized `summary`, `temperatures_by_zone`, `seat_heating_by_zone`, `occupied_seats`, and `unoccupied_seats` fields instead of interpreting raw boolean maps by hand.
 - For relative fan-speed requests with a stated amount, prefer `increase_fan_speed(steps=...)` or `decrease_fan_speed(steps=...)`; these helpers read the current climate settings and then call `set_fan_speed` with the calculated level. If the current fan speed is unavailable, say that the relative change cannot be calculated because the car system did not provide the current fan speed; do not ask the user to supply system state. For explicit all-zone climate temperature changes, use `set_all_zones_climate_temperature_safe(temperature=...)`; it keeps the request as native `ALL_ZONES` even after an occupied-seat workflow. For driver/passenger climate sync, prefer `sync_climate_zone(source_zone=..., target_zone=...)` so source and target are not reversed. "Set driver to match passenger" means `source_zone="PASSENGER", target_zone="DRIVER"`; "set passenger to match driver" means `source_zone="DRIVER", target_zone="PASSENGER"`. If one request has multiple sync clauses naming the same target side, keep that same target for every included subsystem; do not make a second opposite-direction call for seat heating. For AC plus stored air-circulation preference, call `set_air_conditioning_on_safe(use_preferred_air_circulation=True)` after you explicitly resolve that the request asks for stored preference; otherwise leave the flag false. For seat heating, explicit zones constrain scope: pass `seat_zone="DRIVER"` or `seat_zone="PASSENGER"` when that zone is resolved; omit `seat_zone` only when the request really covers all occupied front seats. For energy-saving cleanup of seat heating on unoccupied front seats, call `turn_off_unoccupied_seat_heating()`; it reads occupancy/current levels and does not change occupied seats. When occupied and unoccupied heatable front seats have different resolved final levels in the same request, prefer `optimize_seat_heating_by_occupancy(occupied_level=..., unoccupied_level=...)` so one final level is computed per heatable front zone and occupied rear seats are reported as unsupported instead of treated as heatable.
 - For broad comfort requests, do not choose a side effect before the user picks an option and gives any missing amount. Use `present_climate_comfort_options(intent="too_warm")`, `present_climate_comfort_options(intent="stuffy_air")`, or `present_climate_comfort_options(intent="warm_up")`; the helper asks options and performs no side effects. For broad warm-up requests focused on occupied or efficient zones, ask for both cabin temperature and seat-heating level together if both are unresolved; do not ask for only one subsystem and stop. This clarification rule does not apply to a concrete unavailable sub-action: if the user explicitly requested steering-wheel heating and that wrapper is missing, report that missing capability instead of asking what steering-wheel-heating level they want. After the follow-up, call the appropriate setter or helper with the explicit value.
 - Broad warm-up plus occupied/efficient scope is a two-control clarification when either value is missing. The next action should be `present_climate_comfort_options(intent="warm_up")`, not a hand-written question about only seat heating or only cabin temperature.
@@ -198,12 +199,12 @@ sync_window_positions(source_windows="FRONT", target_windows="REAR")
 - Current navigation is preflighted into `scratchpad["entities"]["navigation_state"]` before the first model decision when available. Use its waypoint order and route shape directly; call `get_navigation_state(...)` only if that state is absent or stale.
 - For a final-destination replacement, inspect the current waypoint order and branch explicitly. If the active route is a single start-to-destination segment and route lookup returns multiple alternatives, present the fastest/shortest route information and wait unless an explicit model-resolved route choice, stored preferences, or unique route metadata already selects exactly one route. If exactly one route is selected or only one route exists, call `navigation_replace_final_destination(...)` with that grounded route. For multi-stop route construction or replacement, policy 022 supplies the proactive-fastest default per new segment unless the user or stored preferences specify another route.
 - For replacing an intermediate waypoint with a different waypoint, use `navigation_replace_one_waypoint(...)`. Do not decompose one replacement into `navigation_delete_waypoint(...)` followed by `navigation_add_one_waypoint(...)`; those are different edit intents and the evaluator expects the replacement operation when the user asked to replace.
-- For deleting an intermediate waypoint, the replacement route must connect the deleted waypoint's previous and next waypoints. Decide whether policy 022 supplies a fastest default from the route shape after deletion, not from the active route shape before deletion. If deleting that waypoint leaves only the start and final destination, route choice is unresolved when multiple connecting routes exist. Present the route options and wait unless the user, stored preferences, a prior accepted route, or exactly one returned route selects one grounded route. If the route remains multi-stop after deletion, policy 022 supplies the fastest previous-to-next default unless the user or stored preferences specify another route. Do not let any default override an explicit non-fastest route choice.
+- For deleting an intermediate waypoint, the replacement route must connect the deleted waypoint's previous and next waypoints. If the user, stored preferences, or a prior accepted route selects a grounded non-default route, pass that exact route ID to `navigation_delete_waypoint(...)`. Otherwise call `navigation_delete_waypoint(...)` with the target waypoint; the helper derives the fastest valid previous-to-next replacement route even when deletion leaves a direct start-to-final route. Do not let the fastest default override an explicit non-fastest route choice.
 - Before offering one particular route for the user to accept, record it with `select_route(..., route_id=...)`. If the next user message accepts that route, the fresh `selected_route` is an explicit choice and should be reused without another clarification. Presenting several alternatives does not itself choose one.
 - Route dicts include `display` with route id, via, full distance, duration, aliases, and toll disclosure. Prefer `route["display"]` when presenting route facts so distance/duration are not accidentally shortened and tolls are mentioned in the same message as the route.
 - When a contact lookup returns several people with the recipient's first name, do not choose the first result. Resolve the surname or other identity from the conversation and already-grounded contacts; ask only if multiple candidates still fit. Do not include the recipient's own contact card in a message containing colleagues' contact details unless the user explicitly asks for it.
 - If two contact searches express two known constraints, intersect their `contact_ids`. Prefer `unique_id_intersection(last_name_lookup, first_name_lookup)`, which returns the one shared grounded ID and rejects empty or ambiguous intersections. The second normalized lookup also exposes `unique_intersection_with_previous_contact_id` when the overlap with the immediately previous lookup is exactly one ID.
-- After reading calendar entries, a contact-name lookup exposes `intersection_with_calendar_attendee_ids` and, when exactly one lookup result is among recent meeting attendees, `unique_calendar_attendee_contact_id`. The unique attendee is ranked first while `unconstrained_contact_ids` preserves the raw order. If the current request asks to message or call a meeting attendee, call `get_contact_id_by_contact_name(..., constrain_to_recent_calendar_attendees=True)` so the result is narrowed to recent attendee IDs, then use that ID with `get_contact_details(...)` before asking which same-name contact the user meant.
+- After reading calendar entries, a contact-name lookup exposes `intersection_with_calendar_attendee_ids` and, when exactly one lookup result is among recent meeting attendees, `unique_calendar_attendee_contact_id`. The unique attendee is ranked first while `unconstrained_contact_ids` preserves the raw order. If the current request asks to message or call a named meeting attendee, call `get_contact_id_by_contact_name(..., constrain_to_recent_calendar_attendees=True)` so the result is narrowed to recent attendee IDs, then use that ID with `get_contact_details(...)` before asking which same-name contact the user meant. If the request is to email the meeting attendees themselves, call `resolve_calendar_attendee_recipients(...)`; it resolves one meeting, requires concrete attendee contact IDs, reads attendee emails, and stops if attendee identities are unavailable instead of asking the user to supply identities that should have come from the calendar.
 - When sending one contact's details to another contact, keep recipient and subject roles in separate variables. After both grounded IDs are resolved, prefer `send_contact_details_to_contact(recipient_contact_id=..., subject_contact_id=..., required_fields=[...])` instead of relying on `last_contacts`, because later lookups overwrite that convenience alias. If you need to read contacts manually before composing a custom email, call `get_contact_details(..., role="email_recipient")` for the recipient and `get_contact_details(..., role="contact_details_subject")` for the contact whose details will appear in the message.
 
 ```python
@@ -217,6 +218,17 @@ recipient = get_contact_details(
     required_fields=["email"],
     role="email_recipient",
 )["first"]
+```
+
+```python
+# User asks to email all attendees of a resolved meeting.
+attendees = resolve_calendar_attendee_recipients(
+    topic="Marketing Campaign",
+    start_hour=15,
+    start_minute=30,
+    location="Bratislava",
+)
+send_email(email_addresses=attendees["email_addresses"], content_message=message)
 ```
 
 ```python
@@ -252,7 +264,7 @@ send_email(
 
 ## Route, POI, Charging, and Weather Helper Usage
 
-- Charging status exposes numeric `remaining_range_km`; use it instead of comparing the formatted `remaining_range` string to a distance.
+- Charging status exposes numeric `remaining_range_km` for math and formatted `remaining_range` for user-facing answers. Use `remaining_range_km` for comparisons; use `remaining_range` or `summary` when answering the user so the `km` unit stays attached.
 - For "fastest charger" and charging-time calculations, prefer `select_charging_plug(pois)` after a charging-station search. It selects the highest-power plug and keeps station id, plug id, power, availability, phone number, and navigation id together. Use `require_available=True` for real charging plans, navigation via a charger, "charge before the trip", or any case where the selected plug is meant to be used now. Only allow an occupied high-power plug for purely informational timing when the user explicitly accepts occupied/unavailable plugs.
 - If the user explicitly chooses a named POI from search results, first resolve that exact POI with `select_poi(...)`, then pass only that POI to downstream helpers. Use `role="charging_stop"`, `role="meal_stop"`, `role="destination"`, or another explicit plan role when that role is already resolved, so later steps can use `scratchpad["entities"]["selected_<role>_poi"]` instead of a generic latest-POI alias. Do not call `select_charging_plug(pois=all_results)` after the user picked a specific station, because that helper chooses the highest-power plug across everything it receives.
 - If the selected POI is now the active route's final destination, call `replace_final_destination_with_poi(...)` only after the route choice is resolved. If route options are still ambiguous, present route options first and wait for the user's choice instead of defaulting to fastest. If the user only selected the POI, only the POI is resolved; the route is still unresolved. After the user selects one route option, pass that exact selector, e.g. `route_alias="second"` or `route_id=<selected route id>`. For a single-destination or POI-destination replacement, do not use `route_prefer="fastest"` merely because a fastest route exists. Use it only when the user explicitly asks for the fastest route, one valid route exists, or a specific policy/helper contract for this request supplies a fastest-route default. Do not call `navigation_replace_final_destination(...)` with the host city ID after the POI is selected.
@@ -261,6 +273,7 @@ send_email(
 - If navigation needs an intermediate route stop of one POI category and another POI category open at the same route position during a resolved time window, prefer `set_navigation_via_route_stop_with_open_poi(...)`. The model supplies the grounded destination, stop category, companion category, route preference, and clock window; the helper derives route-kilometer buckets from route facts and policy time, searches both categories along the selected route, pairs same-position POIs, checks opening hours, and sets the two-leg navigation through the stop.
 - After deleting or replacing a waypoint, use the newly created route segment for charging searches that are still about that trip. For example, after deleting an intermediate waypoint, a charging-station search for the trip should use `search_poi_along_the_route(route_id=<new previous-to-next route>, ...)`, not `search_poi_at_location(location_id=<next waypoint location>, ...)`.
 - If navigation is inactive and the user only asked to plan, inspect, email, or search along a route, do not call `set_new_navigation(...)` just to make route POI search easier. Use the known planned route id with `search_charging_stations_on_route(route_id=..., at_kilometer=...)`.
+- Navigation intent carries through route-choice clarification. If the user originally asked to navigate/start/set guidance, you presented route options, and the follow-up selects one route, immediately call `set_new_navigation(route_ids=[selected_route_id])`. Do not only say the route was selected.
 - When initially answering a planning-only route request, do not ask whether to "start navigation" or "set navigation" unless the user asked for navigation. Say that the route is selected for planning, charging search, email, or route details. Offering navigation in that first response turns a planning task into an unintended side effect.
 - In a plan-only conversation, "confirm the fastest route" or "use that route" selects the route for the requested planning, email, or search work. It is not a navigation mutation unless the user explicitly asks to start, set, or update navigation.
 - Do not add `set_new_navigation(...)` as an extra side effect in a route planning turn whose requested actions are route inspection, charging search, contact lookup, or email. Route selection is enough for those actions unless navigation itself was explicitly requested.
@@ -356,31 +369,21 @@ previous_id = waypoints[target_index - 1]["id"]
 target_id = waypoints[target_index]["id"]
 next_id = waypoints[target_index + 1]["id"]
 route_options = get_route_options(start_id=previous_id, destination_id=next_id)
-deletion_leaves_one_segment = len(waypoints) - 1 == 2
 
-if deletion_leaves_one_segment and requested_route_preference is None:
-    # Do not use prefer="fastest" just because the route was multi-stop before
-    # deletion. After this edit it would be a single start-to-destination route.
-    selected = select_route(route_options["routes"])
-    if selected["status"] != "SUCCESS":
-        lines = [
-            f"{index}. {route['display']}"
-            for index, route in enumerate(route_options["routes"], 1)
-        ]
-        respond("Route options after deleting that waypoint:\n" + "\n".join(lines) + "\nWhich route should I use?")
-        stop_after_response()
-else:
-    # The fastest default is for a route that remains multi-stop, or for a
-    # request/preference that has already resolved fastest as the desired route.
+if requested_route_preference is not None:
     selected = select_route(
         route_options["routes"],
-        prefer=requested_route_preference or "fastest",
+        prefer=requested_route_preference,
     )
+    navigation_delete_waypoint(
+        waypoint_id_to_delete=target_id,
+        route_id_without_waypoint=selected["route_id"],
+    )
+else:
+    # No explicit/stored/accepted route choice: the helper derives the fastest
+    # valid previous-to-next replacement route.
+    navigation_delete_waypoint(waypoint_id_to_delete=target_id)
 
-navigation_delete_waypoint(
-    waypoint_id_to_delete=target_id,
-    route_id_without_waypoint=selected["route_id"],
-)
 ```
 
 ```python
@@ -589,6 +592,14 @@ charging_search = search_charging_stations_on_route(
     at_kilometer=150,
 )
 # Continue contact/email flow. Do not call set_new_navigation here.
+```
+
+```python
+# Prior turn: user asked "Navigate to Frankfurt" and you showed route options.
+# Follow-up: user selects the fastest route.
+selected_route = select_route(last_route_options["routes"], prefer="fastest")
+set_new_navigation(route_ids=[selected_route["selected_route_id"]])
+respond("Navigation started on the fastest route.")
 ```
 
 ```python

@@ -578,6 +578,52 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(guard["status"], "CLEARED")
         self.assertEqual(guard["cleared_actions"], ["send_email"])
 
+    def test_non_confirmation_followup_clears_pending_confirmation(self):
+        ws, ex = self.make(
+            {},
+            {
+                "send_email": tool_schema(
+                    "send_email",
+                    {
+                        "email_addresses": {"type": "array", "items": {"type": "string"}},
+                        "content_message": {"type": "string"},
+                    },
+                    required=["email_addresses", "content_message"],
+                    description="REQUIRES_CONFIRMATION Send an email.",
+                ),
+            },
+        )
+        ws._user_turn_index = 1
+        ws.remember(
+            "pending_confirmation",
+            {
+                "created_user_turn_index": 1,
+                "gate_name": "tool_confirmation",
+                "policy": "004",
+                "on_confirm_calls": [
+                    {
+                        "tool_name": "send_email",
+                        "arguments": {
+                            "email_addresses": ["alex@example.com"],
+                            "content_message": "Old draft",
+                        },
+                    }
+                ],
+                "confirmation_retry_prompt": "Please confirm with yes.",
+            },
+        )
+        ws.observe_user("Actually, answer a different question first.")
+
+        result = ex.run("handle_pending_confirmation()")
+
+        self.assertIsNone(result.error)
+        self.assertIsNone(result.response_text)
+        self.assertNotIn("pending_confirmation", ws.scratchpad["facts"])
+        guard = ws.scratchpad["gates"]["stale_pending_confirmation_guard"]
+        self.assertEqual(guard["status"], "CLEARED")
+        self.assertEqual(guard["cleared_actions"], ["send_email"])
+        self.assertEqual(ws.bridge.requests, [])
+
     def test_clean_mutation_allows_success_text(self):
         ws, ex = self.make(
             {"set_fan_speed": ("SUCCESS", {})},
@@ -586,7 +632,7 @@ class GuardTests(unittest.TestCase):
         result = ex.run("set_fan_speed(level=3)\nrespond('Fan set to 3.')")
         self.assertEqual(result.response_text, "Fan set to 3.")
 
-    def test_high_beam_helper_attempts_setter_when_fog_state_unknown(self):
+    def test_high_beam_helper_blocks_when_fog_state_unknown(self):
         ws, _ = self.make(
             {
                 "get_exterior_lights_status": (
@@ -611,25 +657,21 @@ class GuardTests(unittest.TestCase):
             },
         )
 
-        result = ws.set_high_beams_on_safe()
+        with self.assertRaises(ResponseReady):
+            ws.set_high_beams_on_safe()
 
-        self.assertEqual(result["status"], "SUCCESS")
-        self.assertEqual(result["message"], "High beams turned on.")
+        self.assertIn("can't turn on the high beams safely", ws._response_text or "")
+        self.assertIn("fog-light status", ws._response_text or "")
+        self.assertIn("verify that the fog lights are off", ws._response_text or "")
         self.assertEqual(
             [[call["tool_name"] for call in request] for request in ws.bridge.requests],
-            [["get_exterior_lights_status"], ["set_head_lights_high_beams"]],
+            [["get_exterior_lights_status"]],
         )
-        self.assertEqual(
-            ws.bridge.requests[-1][0]["arguments"],
-            {"on": True},
-        )
-        self.assertIn(
-            "result.get_exterior_lights_status.fog_lights",
-            ws.scratchpad["facts"]["last_helper_report"]["unknown_response_fields"],
-        )
+        self.assertIsNone(self._emitted(ws, "set_head_lights_high_beams"))
+        self.assertEqual(ws.scratchpad["facts"]["last_helper_report"]["status"], "UNAVAILABLE")
 
-    def test_high_beam_helper_confirmation_mentions_unknown_fog_state(self):
-        ws, ex = self.make(
+    def test_high_beam_helper_confirmation_does_not_override_unknown_fog_state(self):
+        ws, _ = self.make(
             {
                 "get_exterior_lights_status": (
                     "SUCCESS",
@@ -658,28 +700,15 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(ResponseReady):
             ws.set_high_beams_on_safe()
 
-        self.assertIn("fog-light status is unavailable", ws._response_text or "")
-        self.assertIn("high beams are currently off", ws._response_text or "")
-        self.assertIn("on=True", ws._response_text or "")
+        self.assertIn("can't turn on the high beams safely", ws._response_text or "")
+        self.assertIn("fog-light status", ws._response_text or "")
+        self.assertNotIn("on=True", ws._response_text or "")
         self.assertEqual(
             [[call["tool_name"] for call in request] for request in ws.bridge.requests],
             [["get_exterior_lights_status"]],
         )
-        pending = ws.scratchpad["facts"]["pending_confirmation"]
-        self.assertEqual(pending["response_on_success"], "High beams turned on.")
-        self.assertIn(
-            "result.get_exterior_lights_status.fog_lights",
-            pending["unknown_response_fields"],
-        )
-
-        ws.observe_user("Yes, proceed.")
-        result = ex.run("handle_pending_confirmation()")
-
-        self.assertEqual(result.response_text, "High beams turned on.")
-        self.assertEqual(
-            self._emitted(ws, "set_head_lights_high_beams"),
-            {"on": True},
-        )
+        self.assertNotIn("pending_confirmation", ws.scratchpad["facts"])
+        self.assertIsNone(self._emitted(ws, "set_head_lights_high_beams"))
 
     def test_high_beam_helper_blocks_when_fog_lights_known_on(self):
         ws, _ = self.make(
@@ -707,7 +736,9 @@ class GuardTests(unittest.TestCase):
             [[call["tool_name"] for call in request] for request in ws.bridge.requests],
             [["get_exterior_lights_status"]],
         )
-        self.assertIn("policy 014", ws._response_text or "")
+        self.assertIn("fog lights are on", ws._response_text or "")
+        self.assertIn("can't be used together", ws._response_text or "")
+        self.assertNotIn("policy 014", ws._response_text or "")
 
     def test_fog_lights_helper_confirms_when_weather_and_light_state_unknown(self):
         ws, ex = self.make(
@@ -1925,8 +1956,12 @@ class GuardTests(unittest.TestCase):
             323,
         )
         self.assertEqual(
-            ws.scratchpad["entities"]["last_distance_by_soc"]["distance_raw"],
-            "323.0km",
+            ws.scratchpad["entities"]["last_distance_by_soc"]["result"]["distance"],
+            "323 km",
+        )
+        self.assertNotIn(
+            "distance_km_for_85.0_until_0.0_percent_soc",
+            ws.scratchpad["entities"]["last_distance_by_soc"]["result"],
         )
 
     def test_first_number_value_accepts_normalized_distance_dict(self):
@@ -2070,7 +2105,7 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(result.response_text, "466")
 
-    def test_remaining_range_raw_key_is_numeric_in_model_result_and_scratchpad(self):
+    def test_remaining_range_splits_display_and_numeric_fields(self):
         ws, ex = self.make(
             {
                 "get_charging_specs_and_status": (
@@ -2090,14 +2125,15 @@ class GuardTests(unittest.TestCase):
             "status = get_charging_specs_and_status()\n"
             "stored = scratchpad['entities']['last_charging_specs_and_status']\n"
             "respond('|'.join([\n"
-            "    str(status['remaining_range'] >= 100),\n"
+            "    str(status['remaining_range']),\n"
             "    str(status['remaining_range_km']),\n"
-            "    str(stored['remaining_range'] >= 100),\n"
+            "    str(stored['remaining_range']),\n"
             "    str(stored['remaining_range_km']),\n"
-            "    str(status['remaining_range_raw']),\n"
+            "    str(status['remaining_range_km'] >= 100),\n"
+            "    str('remaining_range_raw' in status),\n"
             "]))"
         )
-        self.assertEqual(result.response_text, "True|155|True|155|155.0km")
+        self.assertEqual(result.response_text, "155 km|155|155 km|155|True|False")
 
     def test_unparseable_remaining_range_is_unknown_range(self):
         ws, ex = self.make(
@@ -7435,7 +7471,7 @@ class GuardTests(unittest.TestCase):
         self.assertIn("post-edit route becomes a single direct", attention)
         self.assertIn("Bonn", attention)
 
-    def test_delete_only_mid_waypoint_requires_route_choice_when_multiple_routes(self):
+    def test_delete_only_mid_waypoint_defaults_fastest_when_multiple_routes(self):
         tools = {
             "get_current_navigation_state": tool_schema(
                 "get_current_navigation_state",
@@ -7486,14 +7522,76 @@ class GuardTests(unittest.TestCase):
         )
 
         self.assertIsNotNone(result.response_text)
-        self.assertIn("Which route should I use?", result.response_text)
+        self.assertNotIn("Which route should I use?", result.response_text)
         self.assertIn("A11, A51", result.response_text)
-        self.assertIn("B634, K322", result.response_text)
-        self.assertIsNone(self._emitted(ws, "navigation_delete_waypoint"))
+        self.assertIn("fastest route", result.response_text)
         self.assertEqual(
-            ws.scratchpad["gates"]["waypoint_delete_route_choice_guard"]["status"],
-            "BLOCKED",
+            self._emitted(ws, "navigation_delete_waypoint")["route_id_without_waypoint"],
+            "R_fast",
         )
+        self.assertNotIn("waypoint_delete_route_choice_guard", ws.scratchpad["gates"])
+
+    def test_delete_only_mid_waypoint_preserves_supplied_nonfastest_route(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+            ),
+            "navigation_delete_waypoint": tool_schema(
+                "navigation_delete_waypoint",
+                {
+                    "waypoint_id_to_delete": {"type": "string"},
+                    "route_id_without_waypoint": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": ("SUCCESS", self.NAV_3WP),
+            "get_routes_from_start_to_destination": (
+                "SUCCESS",
+                {
+                    "routes": [
+                        {
+                            "route_id": "R_fast",
+                            "start_id": "loc_a",
+                            "destination_id": "loc_c",
+                            "name_via": "A11, A51",
+                            "alias": ["fastest", "first"],
+                        },
+                        {
+                            "route_id": "R_short",
+                            "start_id": "loc_a",
+                            "destination_id": "loc_c",
+                            "name_via": "B634, K322",
+                            "alias": ["shortest", "second"],
+                        },
+                    ]
+                },
+            ),
+            "navigation_delete_waypoint": ("SUCCESS", {"waypoint_deleted": True}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "routes = get_route_options(start_id='loc_a', destination_id='loc_c')\n"
+            "shortest = select_route(routes['routes'], route_id='R_short')\n"
+            "navigation_delete_waypoint(\n"
+            "    waypoint_id_to_delete='loc_b',\n"
+            "    route_id_without_waypoint=shortest['selected_route_id'],\n"
+            ")\n"
+            "respond('Done, Bonn has been removed.')"
+        )
+
+        self.assertEqual(
+            self._emitted(ws, "navigation_delete_waypoint")["route_id_without_waypoint"],
+            "R_short",
+        )
+        self.assertIn("shortest route via B634, K322", result.response_text)
+        self.assertNotIn("fastest route", result.response_text)
 
     def test_delete_only_mid_waypoint_uses_single_available_route(self):
         tools = {
@@ -9050,6 +9148,134 @@ class GuardTests(unittest.TestCase):
         )
 
         self.assertEqual(result.response_text, "None|con_1977,con_4970")
+
+    def test_calendar_attendee_recipient_helper_blocks_unknown_attendees(self):
+        tools = {
+            "get_entries_from_calendar": tool_schema(
+                "get_entries_from_calendar",
+                {"month": {"type": "integer"}, "day": {"type": "integer"}},
+                required=["month", "day"],
+            ),
+            "get_contact_information": tool_schema(
+                "get_contact_information",
+                {"contact_ids": {"type": "array", "items": {"type": "string"}}},
+                required=["contact_ids"],
+            ),
+        }
+        responses = {
+            "get_entries_from_calendar": (
+                "SUCCESS",
+                {
+                    "date": {"year": 2025, "month": 3, "day": 13},
+                    "meetings": [
+                        {
+                            "start": {"hour": "15", "minute": "30"},
+                            "duration": "30min",
+                            "location": "Bratislava",
+                            "attendees": "unknown",
+                            "topic": "Marketing Campaign",
+                        }
+                    ],
+                },
+            ),
+            "get_contact_information": ("SUCCESS", {}),
+        }
+        ws, _ = self.make(responses, tools)
+
+        with self.assertRaises(ResponseReady):
+            ws.resolve_calendar_attendee_recipients(
+                topic="Marketing Campaign",
+                start_hour=15,
+                start_minute=30,
+                location="Bratislava",
+                month=3,
+                day=13,
+            )
+
+        self.assertIn("I found 15:30", ws._response_text or "")
+        self.assertIn("does not provide attendee identities", ws._response_text or "")
+        self.assertEqual(
+            [[call["tool_name"] for call in request] for request in ws.bridge.requests],
+            [["get_entries_from_calendar"]],
+        )
+        report = ws.scratchpad["facts"]["last_helper_report"]
+        self.assertEqual(report["helper"], "resolve_calendar_attendee_recipients")
+        self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertIn(
+            "result.get_entries_from_calendar.meetings.attendees",
+            report["missing_response_fields"],
+        )
+        self.assertTrue(ws.entities["last_calendar"]["entries"][0]["attendees_unknown"])
+
+    def test_calendar_attendee_recipient_helper_returns_emails_for_known_attendees(self):
+        tools = {
+            "get_entries_from_calendar": tool_schema(
+                "get_entries_from_calendar",
+                {"month": {"type": "integer"}, "day": {"type": "integer"}},
+                required=["month", "day"],
+            ),
+            "get_contact_information": tool_schema(
+                "get_contact_information",
+                {"contact_ids": {"type": "array", "items": {"type": "string"}}},
+                required=["contact_ids"],
+            ),
+        }
+        responses = {
+            "get_entries_from_calendar": (
+                "SUCCESS",
+                {
+                    "date": {"year": 2025, "month": 8, "day": 15},
+                    "meetings": [
+                        {
+                            "start": {"hour": "13", "minute": "30"},
+                            "duration": "60min",
+                            "location": "Frankfurt",
+                            "attendees": ["con_4970", "con_8656"],
+                            "topic": "Risk Management",
+                        }
+                    ],
+                },
+            ),
+            "get_contact_information": (
+                "SUCCESS",
+                {
+                    "con_4970": {
+                        "name": {"first_name": "Tina", "last_name": "Phillips"},
+                        "email": "tina.phillips@example.com",
+                    },
+                    "con_8656": {
+                        "name": {"first_name": "Alex", "last_name": "Morgan"},
+                        "email": "alex.morgan@example.com",
+                    },
+                },
+            ),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "attendees = resolve_calendar_attendee_recipients(\n"
+            "    topic='Risk Management',\n"
+            "    start_hour=13,\n"
+            "    start_minute=30,\n"
+            "    location='Frankfurt',\n"
+            "    month=8,\n"
+            "    day=15,\n"
+            ")\n"
+            "respond(','.join(attendees['email_addresses']))"
+        )
+
+        self.assertEqual(
+            result.response_text,
+            "tina.phillips@example.com,alex.morgan@example.com",
+        )
+        self.assertEqual(
+            [[call["tool_name"] for call in request] for request in ws.bridge.requests],
+            [["get_entries_from_calendar"], ["get_contact_information"]],
+        )
+        self.assertEqual(
+            ws.entities["calendar_attendee_recipients"]["contact_ids"],
+            ["con_4970", "con_8656"],
+        )
 
     def test_send_email_confirmation_uses_unique_contact_intersection_email(self):
         tools = {"send_email": tool_schema(
@@ -10841,6 +11067,76 @@ class GuardTests(unittest.TestCase):
         ex.run("set_fan_speed(level=2)")
         ex.run("get_temperature_inside_car()")
         self.assertEqual(len(ws.bridge.requests), 3)
+
+    def test_climate_read_wrappers_expose_stable_summary_aliases(self):
+        tools = {
+            "get_temperature_inside_car": tool_schema("get_temperature_inside_car", {}),
+            "get_seat_heating_level": tool_schema("get_seat_heating_level", {}),
+            "get_seats_occupancy": tool_schema("get_seats_occupancy", {}),
+        }
+        responses = {
+            "get_temperature_inside_car": (
+                "SUCCESS",
+                {
+                    "climate_temperature_driver": 26.0,
+                    "climate_temperature_passenger": 23.0,
+                    "temperature_unit": "Celsius",
+                },
+            ),
+            "get_seat_heating_level": (
+                "SUCCESS",
+                {"seat_heating_driver": 2, "seat_heating_passenger": 3},
+            ),
+            "get_seats_occupancy": (
+                "SUCCESS",
+                {
+                    "seats_occupied": {
+                        "driver": True,
+                        "passenger": False,
+                        "driver_rear": False,
+                        "passenger_rear": False,
+                    }
+                },
+            ),
+        }
+        _ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "results = batch([\n"
+            "    ('get_temperature_inside_car', {}),\n"
+            "    ('get_seat_heating_level', {}),\n"
+            "    ('get_seats_occupancy', {}),\n"
+            "])\n"
+            "temp = result_value(result_by_tool(results, 'get_temperature_inside_car'))\n"
+            "heat = result_value(result_by_tool(results, 'get_seat_heating_level'))\n"
+            "occ = result_value(result_by_tool(results, 'get_seats_occupancy'))\n"
+            "respond(json.dumps({\n"
+            "    'temperatures_by_zone': temp['temperatures_by_zone'],\n"
+            "    'temperature_summary': temp['summary'],\n"
+            "    'seat_heating_by_zone': heat['seat_heating_by_zone'],\n"
+            "    'seat_heating_summary': heat['summary'],\n"
+            "    'occupied_seats': occ['occupied_seats'],\n"
+            "    'unoccupied_seats': occ['unoccupied_seats'],\n"
+            "    'occupied_front_seats': occ['occupied_front_seats'],\n"
+            "    'unoccupied_front_seats': occ['unoccupied_front_seats'],\n"
+            "    'occupancy_summary': occ['summary'],\n"
+            "}, sort_keys=True))"
+        )
+
+        self.assertIsNone(result.error)
+        payload = json.loads(result.response_text or "{}")
+        self.assertEqual(payload["temperatures_by_zone"], {"DRIVER": 26.0, "PASSENGER": 23.0})
+        self.assertEqual(payload["seat_heating_by_zone"], {"DRIVER": 2, "PASSENGER": 3})
+        self.assertEqual(payload["occupied_seats"], ["DRIVER"])
+        self.assertEqual(
+            payload["unoccupied_seats"],
+            ["PASSENGER", "DRIVER_REAR", "PASSENGER_REAR"],
+        )
+        self.assertEqual(payload["occupied_front_seats"], ["DRIVER"])
+        self.assertEqual(payload["unoccupied_front_seats"], ["PASSENGER"])
+        self.assertIn("driver 26", payload["temperature_summary"])
+        self.assertIn("driver level 2", payload["seat_heating_summary"])
+        self.assertIn("occupied: driver", payload["occupancy_summary"])
 
     def test_navigation_mutation_persists_returned_state_and_revision(self):
         tools = {

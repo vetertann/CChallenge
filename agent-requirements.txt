@@ -1,0 +1,18 @@
+# Runtime dependencies for the CAR-bench agent-under-test image (Track 1 & Track 2).
+# The agent is a lightweight A2A server + two LLM SDKs. It is fully decoupled from
+# the evaluator: NO car-bench, litellm, nest-asyncio, or google-genai.
+# Versions pinned from uv.lock for reproducibility.
+
+a2a-sdk[http-server]==1.0.2
+uvicorn==0.41.0
+openai==2.21.0
+cerebras-cloud-sdk==1.67.0
+loguru==0.7.3
+python-dotenv==1.2.1
+
+# Transitive (pulled by a2a-sdk[http-server]) — pinned so the image is reproducible.
+pydantic==2.12.5
+httpx==0.28.1
+starlette==0.52.1
+sse-starlette==3.2.0
+protobuf==6.33.5
