@@ -10961,7 +10961,7 @@ class GuardTests(unittest.TestCase):
             "Temperature set to 22 degrees Celsius for all zones.",
         )
 
-    def test_sync_climate_zone_copies_source_values_to_target_zone(self):
+    def test_sync_climate_zone_defaults_to_temperature_only(self):
         tools = {
             "get_temperature_inside_car": tool_schema("get_temperature_inside_car", {}),
             "get_seat_heating_level": tool_schema("get_seat_heating_level", {}),
@@ -10992,6 +10992,45 @@ class GuardTests(unittest.TestCase):
         ws, ex = self.make(responses, tools)
         ex.run(
             "sync_climate_zone(source_zone='PASSENGER', target_zone='DRIVER')"
+        )
+        temp_args = self._emitted(ws, "set_climate_temperature")
+        heat_args = self._emitted(ws, "set_seat_heating")
+        self.assertEqual(temp_args, {"seat_zone": "DRIVER", "temperature": 16.0})
+        self.assertIsNone(heat_args)
+
+    def test_sync_climate_zone_copies_seat_heating_when_explicitly_requested(self):
+        tools = {
+            "get_temperature_inside_car": tool_schema("get_temperature_inside_car", {}),
+            "get_seat_heating_level": tool_schema("get_seat_heating_level", {}),
+            "set_climate_temperature": tool_schema(
+                "set_climate_temperature",
+                {"seat_zone": {"type": "string"}, "temperature": {"type": "number"}},
+            ),
+            "set_seat_heating": tool_schema(
+                "set_seat_heating",
+                {"seat_zone": {"type": "string"}, "level": {"type": "integer"}},
+            ),
+        }
+        responses = {
+            "get_temperature_inside_car": (
+                "SUCCESS",
+                {
+                    "climate_temperature_driver": 27,
+                    "climate_temperature_passenger": 16,
+                },
+            ),
+            "get_seat_heating_level": (
+                "SUCCESS",
+                {"seat_heating_driver": 3, "seat_heating_passenger": 1},
+            ),
+            "set_climate_temperature": ("SUCCESS", {}),
+            "set_seat_heating": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+        ex.run(
+            "sync_climate_zone("
+            "source_zone='PASSENGER', target_zone='DRIVER', "
+            "include_temperature=True, include_seat_heating=True)"
         )
         temp_args = self._emitted(ws, "set_climate_temperature")
         heat_args = self._emitted(ws, "set_seat_heating")
@@ -11274,7 +11313,7 @@ class GuardTests(unittest.TestCase):
                 },
             ),
         }
-        _ws, ex = self.make(responses, tools)
+        ws, ex = self.make(responses, tools)
 
         result = ex.run(
             "results = batch([\n"
@@ -11290,10 +11329,13 @@ class GuardTests(unittest.TestCase):
             "    'temperature_summary': temp['summary'],\n"
             "    'seat_heating_by_zone': heat['seat_heating_by_zone'],\n"
             "    'seat_heating_summary': heat['summary'],\n"
+            "    'seats_occupied': occ['seats_occupied'],\n"
             "    'occupied_seats': occ['occupied_seats'],\n"
             "    'unoccupied_seats': occ['unoccupied_seats'],\n"
             "    'occupied_front_seats': occ['occupied_front_seats'],\n"
             "    'unoccupied_front_seats': occ['unoccupied_front_seats'],\n"
+            "    'raw_passenger_occupied': occ['seat_occupancy_by_key']['passenger'],\n"
+            "    'model_join': ', '.join(occ.get('seats_occupied', [])),\n"
             "    'occupancy_summary': occ['summary'],\n"
             "}, sort_keys=True))"
         )
@@ -11302,6 +11344,7 @@ class GuardTests(unittest.TestCase):
         payload = json.loads(result.response_text or "{}")
         self.assertEqual(payload["temperatures_by_zone"], {"DRIVER": 26.0, "PASSENGER": 23.0})
         self.assertEqual(payload["seat_heating_by_zone"], {"DRIVER": 2, "PASSENGER": 3})
+        self.assertEqual(payload["seats_occupied"], ["DRIVER"])
         self.assertEqual(payload["occupied_seats"], ["DRIVER"])
         self.assertEqual(
             payload["unoccupied_seats"],
@@ -11309,9 +11352,15 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(payload["occupied_front_seats"], ["DRIVER"])
         self.assertEqual(payload["unoccupied_front_seats"], ["PASSENGER"])
+        self.assertFalse(payload["raw_passenger_occupied"])
+        self.assertEqual(payload["model_join"], "DRIVER")
         self.assertIn("driver 26", payload["temperature_summary"])
         self.assertIn("driver level 2", payload["seat_heating_summary"])
         self.assertIn("occupied: driver", payload["occupancy_summary"])
+        self.assertEqual(ws.entities["last_seat_occupancy"]["seats_occupied"], ["DRIVER"])
+        self.assertFalse(
+            ws.entities["last_seat_occupancy"]["seat_occupancy_by_key"]["passenger"]
+        )
 
     def test_navigation_mutation_persists_returned_state_and_revision(self):
         tools = {

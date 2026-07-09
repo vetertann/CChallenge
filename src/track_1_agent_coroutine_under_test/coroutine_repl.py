@@ -1113,7 +1113,7 @@ class CoroutineWorkspace:
             "sync_window_positions": "sync_window_positions(source_windows, target_windows)",
             "sync_climate_zone": (
                 "sync_climate_zone(source_zone, target_zone, "
-                "include_temperature=True, include_seat_heating=True)"
+                "include_temperature=True, include_seat_heating=False)"
             ),
             "increase_fan_speed": "increase_fan_speed(steps=1)",
             "decrease_fan_speed": "decrease_fan_speed(steps=1)",
@@ -1914,7 +1914,7 @@ class CoroutineWorkspace:
                 "name": "sync_climate_zone",
                 "signature": (
                     "sync_climate_zone(source_zone, target_zone, "
-                    "include_temperature=True, include_seat_heating=True)"
+                    "include_temperature=True, include_seat_heating=False)"
                 ),
                 "confirmation_required": False,
                 "description": (
@@ -1931,7 +1931,7 @@ class CoroutineWorkspace:
                         "source_zone": {"type": "string", "enum": ["DRIVER", "PASSENGER"]},
                         "target_zone": {"type": "string", "enum": ["DRIVER", "PASSENGER"]},
                         "include_temperature": {"type": "boolean", "default": True},
-                        "include_seat_heating": {"type": "boolean", "default": True},
+                        "include_seat_heating": {"type": "boolean", "default": False},
                     },
                 },
                 "argument_descriptions": {
@@ -8623,6 +8623,9 @@ class CoroutineWorkspace:
                 entities["last_temperature_state"] = copy.deepcopy(payload)
             elif name == "get_seat_heating_level":
                 entities["last_seat_heating_state"] = copy.deepcopy(payload)
+            elif name == "get_seats_occupancy":
+                entities["last_seat_occupancy"] = copy.deepcopy(payload)
+                self.remember("last_seat_occupancy_turn", self.last_user_message)
             elif name == "get_climate_settings":
                 entities["last_climate_settings"] = copy.deepcopy(payload)
                 self.remember("last_climate_settings_turn", self.last_user_message)
@@ -13962,11 +13965,7 @@ class CoroutineWorkspace:
                 occupancy_result,
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -14068,6 +14067,18 @@ class CoroutineWorkspace:
                 out.append(normalized)
         return out
 
+    @staticmethod
+    def _seat_occupancy_by_key(payload: Any) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("seat_occupancy_by_key")
+        if isinstance(raw, dict):
+            return raw
+        legacy = payload.get("seats_occupied")
+        if isinstance(legacy, dict):
+            return legacy
+        return None
+
     def _set_climate_temperature_for_resolved_zones(
         self,
         zones: list[str],
@@ -14131,7 +14142,7 @@ class CoroutineWorkspace:
         source_zone: str,
         target_zone: str,
         include_temperature: bool = True,
-        include_seat_heating: bool = True,
+        include_seat_heating: bool = False,
     ) -> dict[str, Any]:
         """Copy front-zone climate values from source to target."""
 
@@ -14412,11 +14423,7 @@ class CoroutineWorkspace:
             if occupancy_result.get("status") != "SUCCESS":
                 return self._failed_tool_response(gate_name, "read seat occupancy", occupancy_result)
             occupancy_payload = result_value(occupancy_result)
-            occupied = (
-                occupancy_payload.get("seats_occupied")
-                if isinstance(occupancy_payload, dict)
-                else None
-            )
+            occupied = self._seat_occupancy_by_key(occupancy_payload)
             if not isinstance(occupied, dict):
                 return self._limitation_response(
                     gate_name,
@@ -14534,11 +14541,7 @@ class CoroutineWorkspace:
                 gate_name, "read current seat heating", levels_result
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -14694,11 +14697,7 @@ class CoroutineWorkspace:
                 occupancy_result,
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -14858,11 +14857,7 @@ class CoroutineWorkspace:
                 occupancy_result,
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -15030,11 +15025,7 @@ class CoroutineWorkspace:
                 occupancy_result,
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -18294,6 +18285,7 @@ class CoroutineWorkspace:
         if tool_name == "get_seats_occupancy":
             seats_occupied = normalized.get("seats_occupied")
             if isinstance(seats_occupied, dict):
+                normalized["seat_occupancy_by_key"] = copy.deepcopy(seats_occupied)
                 label_by_key = {
                     "driver": "DRIVER",
                     "passenger": "PASSENGER",
@@ -18317,16 +18309,16 @@ class CoroutineWorkspace:
                     and seats_occupied.get(key) is not True
                     and seats_occupied.get(key) is not False
                 ]
-                normalized.setdefault("occupied_seats", occupied)
-                normalized.setdefault("unoccupied_seats", unoccupied)
-                normalized.setdefault(
-                    "occupied_front_seats",
-                    [seat for seat in occupied if seat in {"DRIVER", "PASSENGER"}],
-                )
-                normalized.setdefault(
-                    "unoccupied_front_seats",
-                    [seat for seat in unoccupied if seat in {"DRIVER", "PASSENGER"}],
-                )
+                normalized["seats_occupied"] = occupied
+                normalized["occupied_seats"] = occupied
+                normalized["unoccupied_seats"] = unoccupied
+                normalized["occupied_front_seats"] = [
+                    seat for seat in occupied if seat in {"DRIVER", "PASSENGER"}
+                ]
+                normalized["unoccupied_front_seats"] = [
+                    seat for seat in unoccupied if seat in {"DRIVER", "PASSENGER"}
+                ]
+                normalized["unknown_seats"] = unknown
                 summary_parts = []
                 if occupied:
                     summary_parts.append(
