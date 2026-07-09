@@ -80,7 +80,7 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
 
 ## Runtime
 - You have exactly one model action surface: execute Python code.
-- Persistent Python globals include `ws`, `scratchpad`, `respond`, `stop_after_response`, `batch`, `result_by_tool`, `result_value`, `id_value`, `unique_id_intersection`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `send_contact_details_to_contact`, `get_next_calendar_entry`, `resolve_calendar_attendee_recipients`, `defrost_front_window`, `open_sunroof_safe`, `sync_sunshade_to_sunroof`, `open_close_window_safe`, `sync_window_positions`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `set_exterior_lights_safe`, `present_climate_comfort_options`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `set_all_zones_climate_temperature_safe`, `sync_climate_zone`, `increase_fan_speed`, `decrease_fan_speed`, `set_occupied_seat_heating`, `turn_off_unoccupied_seat_heating`, `optimize_seat_heating_by_occupancy`, `set_occupied_reading_lights`, `set_reading_lights_by_occupancy`, `get_route_options`, `select_route`, `select_route_by_user_preferences`, `select_poi`, `replace_final_destination_with_poi`, `get_weather_at_route_arrival`, `navigate_by_arrival_weather`, `navigate_to_poi_by_arrival_weather`, `navigate_to_poi_unless_arrival_weather`, `set_navigation_conditioned_on_arrival_weather`, `select_poi_at_location_open_at_route_arrival`, `select_charging_plug`, `find_charging_stop_on_active_route_by_soc`, `search_charging_stations_on_route`, `search_charging_stations_on_active_route`, `estimate_charging_stops_for_route_by_soc_window`, `set_navigation_via_route_stop_with_open_poi`, `set_new_navigation_via_stop`, `plan_charging_for_next_meeting`, `call_selected_charging_provider`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
+- Persistent Python globals include `ws`, `scratchpad`, `respond`, `stop_after_response`, `batch`, `result_by_tool`, `result_value`, `id_value`, `unique_id_intersection`, `pois_value`, `routes_value`, `first_number_value`, `remember`, `remember_entity`, `tool_available`, `tool_supports_arguments`, `capability_claim_gate`, `handle_pending_confirmation`, `get_navigation_state`, `get_contact_details`, `send_contact_details_to_contact`, `get_next_calendar_entry`, `resolve_calendar_attendee_recipients`, `defrost_front_window`, `open_sunroof_safe`, `sync_sunshade_to_sunroof`, `open_close_window_safe`, `sync_window_positions`, `set_fog_lights_on_safe`, `set_high_beams_on_safe`, `set_exterior_lights_safe`, `present_climate_comfort_options`, `get_distance_by_soc_value`, `set_air_conditioning_on_safe`, `close_known_windows_for_blocked_ac`, `set_climate_temperature_safe`, `set_all_zones_climate_temperature_safe`, `sync_climate_zone`, `increase_fan_speed`, `decrease_fan_speed`, `warm_occupied_zones_efficiently`, `set_occupied_seat_heating`, `turn_off_unoccupied_seat_heating`, `optimize_seat_heating_by_occupancy`, `set_occupied_reading_lights`, `set_reading_lights_by_occupancy`, `get_route_options`, `select_route`, `select_route_by_user_preferences`, `select_poi`, `replace_final_destination_with_poi`, `get_weather_at_route_arrival`, `navigate_by_arrival_weather`, `navigate_to_poi_by_arrival_weather`, `navigate_to_poi_unless_arrival_weather`, `set_navigation_conditioned_on_arrival_weather`, `select_poi_at_location_open_at_route_arrival`, `select_charging_plug`, `find_charging_stop_on_active_route_by_soc`, `search_charging_stations_on_route`, `search_charging_stations_on_active_route`, `estimate_charging_stops_for_route_by_soc_window`, `set_navigation_via_route_stop_with_open_poi`, `set_new_navigation_via_stop`, `plan_charging_for_next_meeting`, `call_selected_charging_provider`, `get_preferred_ambient_light_color`, `policy_now`, `policy_location_id`, and one bare function for each CAR-bench tool name.
 - Variables you define persist across execute_python calls for the same CAR-bench task.
 - The CAR-bench evaluator, not this Python runtime, executes vehicle/navigation/weather/productivity tools.
 - CAR-bench tool wrappers are API-like coroutine calls: calling a wrapper first checks the current evaluator tool surface. If the tool or a parameter is missing in this task, the wrapper does not emit an invalid evaluator call; it emits the prepared missing-capability response. If supported, it emits the official A2A tool call, waits for evaluator results on the next A2A inbound, then returns the parsed tool result to Python.
@@ -139,10 +139,14 @@ BASE_SYSTEM_PROMPT = """You are a CAR-bench in-car assistant agent running insid
   clarification and performs no side effects. For broad warm-up requests, ask
   for both cabin temperature and seat-heating level together if both are
   unresolved; do not ask for only one subsystem and then stop.
-- Broad warm-up plus occupied/efficient scope is a two-control clarification
-  when either value is missing. The next action should be
-  `present_climate_comfort_options(intent="warm_up")`, not a hand-written
-  question about only seat heating or only cabin temperature.
+- Broad warm-up plus occupied/efficient scope is a two-control workflow. The
+  next action should be `warm_occupied_zones_efficiently()` when either value is
+  missing; it asks one combined question for temperature and seat-heating level.
+  When both values are resolved, call
+  `warm_occupied_zones_efficiently(temperature=..., seat_heating_level=...)` so
+  occupancy is read once and both controls are applied to occupied front zones.
+  Do not hand-write a question about only seat heating or only cabin
+  temperature.
 - Broad warm-up clarification does not override a concrete unavailable
   sub-action. If the user explicitly requested steering-wheel heating and that
   wrapper is absent, report the missing capability instead of asking what level
@@ -308,8 +312,16 @@ present_climate_comfort_options(intent="stuffy_air")
 present_climate_comfort_options(intent="warm_up")
 ```
 - For broad warm-up with occupied/efficient scope and missing values, the
-  correct first action is always the `warm_up` helper above; it asks one
-  combined question for cabin temperature and seat-heating level.
+  correct first action is the dedicated helper below; it asks one combined
+  question for cabin temperature and seat-heating level:
+```python
+warm_occupied_zones_efficiently()
+```
+- When the user answers with both values, use the same helper with explicit
+  numbers:
+```python
+warm_occupied_zones_efficiently(temperature=22, seat_heating_level=3)
+```
 - If the follow-up says to turn down seat heating for both front occupants to
   level 1, the explicit zone and level are now resolved:
 ```python
@@ -733,6 +745,8 @@ def render_workspace_helpers() -> str:
         "  Built-in workspace helper, not a direct evaluator tool. Copies temperature and/or seat-heating values from DRIVER or PASSENGER to the other front zone by reading state first and then setting only the target zone. When one request asks for multiple subsystems to match the same side, use one call with the same source/target and the relevant include flags instead of making separate calls in opposite directions.\n"
         "- `present_climate_comfort_options(intent)`\n"
         "  Built-in response helper, not a direct evaluator tool. For broad comfort requests where multiple climate or seat-heating actions are possible, asks a structured clarification and performs no side effects. Use `intent=\"too_warm\"`, `intent=\"stuffy_air\"`, or `intent=\"warm_up\"`; do not pass raw user text. For broad warm-up requests, this asks for both cabin temperature and seat-heating level together. After the user chooses, call the appropriate setter or safe helper with the explicit value they provide.\n"
+        "- `warm_occupied_zones_efficiently(temperature=None, seat_heating_level=None)`\n"
+        "  Built-in workspace helper, not a direct evaluator tool. For broad warm-up requests scoped to occupied or efficient zones, call it with no values to ask one combined clarification for cabin temperature and seat-heating level. When both values are resolved, it reads seat occupancy and calls `set_climate_temperature` plus `set_seat_heating` only for occupied front zones. It does not infer values or scope from raw user text.\n"
         "- `increase_fan_speed(steps=1)` / `decrease_fan_speed(steps=1)`\n"
         "  Built-in workspace helpers, not direct evaluator tools. Read `get_climate_settings()`, change `fan_speed` by the positive step count, keep the value in range, and call `set_fan_speed`.\n"
         "- `set_occupied_seat_heating(level=None, increase_by=None, seat_zone=None)`\n"

@@ -1469,7 +1469,11 @@ class GuardTests(unittest.TestCase):
             {"direction": "WINDSHIELD"},
         )
         self.assertEqual(self._emitted(ws, "set_air_conditioning"), {"on": True})
-        self.assertEqual(result.response_text, "All-window defrost is now on.")
+        self.assertIn("All-window defrost is now on.", result.response_text)
+        self.assertIn(
+            "This includes closing the passenger window because its position reading was unavailable.",
+            result.response_text,
+        )
         self.assertNotIn("unknown", result.response_text.lower())
         self.assertEqual(
             ws.scratchpad["facts"]["last_helper_report"]["unknown_windows"][0]["tool_window"],
@@ -1747,8 +1751,11 @@ class GuardTests(unittest.TestCase):
         self.assertIn(("set_fan_airflow_direction", {"direction": "WINDSHIELD"}), emitted)
         self.assertIn(("set_air_conditioning", {"on": True}), emitted)
         self.assertIn(("set_window_defrost", {"on": True, "defrost_window": "FRONT"}), emitted)
-        self.assertEqual(result.response_text, "Front window defrost is now on.")
-        self.assertNotIn("unknown", result.response_text.lower())
+        self.assertIn("Front window defrost is now on.", result.response_text)
+        self.assertIn(
+            "This includes closing the driver and passenger windows because their position readings were unavailable.",
+            result.response_text,
+        )
         self.assertEqual(
             [item["tool_window"] for item in ws.scratchpad["facts"]["last_helper_report"]["unknown_windows"]],
             ["DRIVER", "PASSENGER"],
@@ -7671,6 +7678,93 @@ class GuardTests(unittest.TestCase):
         args = self._emitted(ws, "navigation_add_one_waypoint")
         self.assertEqual(args["route_id_leading_away_from_new_waypoint"], "R_derived")
 
+    def test_insert_mid_waypoint_narrates_both_new_segments(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+            ),
+            "navigation_add_one_waypoint": tool_schema(
+                "navigation_add_one_waypoint",
+                {
+                    "waypoint_id_to_add": {"type": "string"},
+                    "waypoint_id_before_new_waypoint": {"type": "string"},
+                    "route_id_leading_to_new_waypoint": {"type": "string"},
+                    "waypoint_id_after_new_waypoint": {"type": "string"},
+                    "route_id_leading_away_from_new_waypoint": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": ("SUCCESS", self.NAV_4WP),
+            "get_routes_from_start_to_destination": [
+                (
+                    "SUCCESS",
+                    {
+                        "routes": [
+                            {
+                                "route_id": "R_to",
+                                "start_id": "loc_b",
+                                "destination_id": "loc_new",
+                                "name_via": "A11, B22",
+                                "alias": ["fastest", "first", "shortest"],
+                            },
+                            {
+                                "route_id": "R_to_alt",
+                                "start_id": "loc_b",
+                                "destination_id": "loc_new",
+                                "name_via": "K57",
+                                "alias": ["second"],
+                            },
+                        ]
+                    },
+                ),
+                (
+                    "SUCCESS",
+                    {
+                        "routes": [
+                            {
+                                "route_id": "R_away",
+                                "start_id": "loc_new",
+                                "destination_id": "loc_c",
+                                "name_via": "C33, D44",
+                                "alias": ["fastest", "first", "shortest"],
+                            },
+                            {
+                                "route_id": "R_away_alt",
+                                "start_id": "loc_new",
+                                "destination_id": "loc_c",
+                                "name_via": "L99",
+                                "alias": ["second"],
+                            },
+                        ]
+                    },
+                ),
+            ],
+            "navigation_add_one_waypoint": ("SUCCESS", {"waypoint_added": True}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "navigation_add_one_waypoint("
+            "waypoint_id_to_add='loc_new', "
+            "waypoint_id_before_new_waypoint='loc_b', "
+            "route_id_leading_to_new_waypoint='R_to')\n"
+            "respond('Waypoint added.')"
+        )
+
+        args = self._emitted(ws, "navigation_add_one_waypoint")
+        self.assertEqual(args["route_id_leading_to_new_waypoint"], "R_to")
+        self.assertEqual(args["waypoint_id_after_new_waypoint"], "loc_c")
+        self.assertEqual(args["route_id_leading_away_from_new_waypoint"], "R_away")
+        self.assertIn("A11, B22", result.response_text)
+        self.assertIn("C33, D44", result.response_text)
+        self.assertIn("alternative routes for either new segment", result.response_text)
+
     def test_delete_already_removed_waypoint_is_idempotent(self):
         # base_88: a repeated delete of an already-removed waypoint must not be
         # emitted (would loop on NavigationDelete_005); return idempotent success.
@@ -8226,6 +8320,87 @@ class GuardTests(unittest.TestCase):
                 {"seat_zone": "PASSENGER", "temperature": 22},
             ],
         )
+
+    def test_warm_occupied_zones_asks_combined_values_when_missing(self):
+        ws, ex = self.make(
+            {
+                "get_climate_settings": (
+                    "SUCCESS",
+                    {
+                        "fan_speed": 0,
+                        "air_conditioning": False,
+                        "air_circulation": "AUTO",
+                        "fan_airflow_direction": "FEET",
+                    },
+                )
+            },
+            {"get_climate_settings": tool_schema("get_climate_settings", {})},
+        )
+
+        result = ex.run("warm_occupied_zones_efficiently()")
+
+        self.assertIn("temperature and seat-heating level", result.response_text)
+        self.assertIsNone(self._emitted(ws, "set_climate_temperature"))
+        self.assertIsNone(self._emitted(ws, "set_seat_heating"))
+        self.assertEqual(
+            ws.scratchpad["gates"]["warm_occupied_zones_efficiently"]["status"],
+            "NEEDS_CLARIFICATION",
+        )
+
+    def test_warm_occupied_zones_sets_temperature_and_heating_for_occupied_front_zones(self):
+        tools = {
+            "get_seats_occupancy": tool_schema("get_seats_occupancy", {}),
+            "set_seat_heating": tool_schema(
+                "set_seat_heating",
+                {"level": {"type": "integer"}, "seat_zone": {"type": "string"}},
+            ),
+            "set_climate_temperature": tool_schema(
+                "set_climate_temperature",
+                {"temperature": {"type": "number"}, "seat_zone": {"type": "string"}},
+            ),
+        }
+        responses = {
+            "get_seats_occupancy": (
+                "SUCCESS",
+                {"seats_occupied": {"driver": True, "passenger": True, "driver_rear": False, "passenger_rear": False}},
+            ),
+            "set_seat_heating": ("SUCCESS", {}),
+            "set_climate_temperature": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "warm_occupied_zones_efficiently(temperature=22, seat_heating_level=3)\n"
+            "respond('Done warming the occupied zones.')"
+        )
+
+        temperature_sets = [
+            call["arguments"]
+            for batch in ws.bridge.requests
+            for call in batch
+            if call["tool_name"] == "set_climate_temperature"
+        ]
+        heating_sets = [
+            call["arguments"]
+            for batch in ws.bridge.requests
+            for call in batch
+            if call["tool_name"] == "set_seat_heating"
+        ]
+        self.assertEqual(
+            temperature_sets,
+            [
+                {"seat_zone": "DRIVER", "temperature": 22},
+                {"seat_zone": "PASSENGER", "temperature": 22},
+            ],
+        )
+        self.assertEqual(
+            heating_sets,
+            [
+                {"seat_zone": "DRIVER", "level": 3},
+                {"seat_zone": "PASSENGER", "level": 3},
+            ],
+        )
+        self.assertIn("Done warming the occupied zones.", result.response_text)
 
     def test_raw_temperature_call_delegates_to_occupied_scope_helper(self):
         tools = {
