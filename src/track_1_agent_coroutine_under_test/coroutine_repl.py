@@ -97,6 +97,7 @@ WORKSPACE_HELPER_NAMES = (
     "sync_climate_zone",
     "increase_fan_speed",
     "decrease_fan_speed",
+    "warm_occupied_zones_efficiently",
     "set_occupied_seat_heating",
     "turn_off_unoccupied_seat_heating",
     "optimize_seat_heating_by_occupancy",
@@ -1112,10 +1113,13 @@ class CoroutineWorkspace:
             "sync_window_positions": "sync_window_positions(source_windows, target_windows)",
             "sync_climate_zone": (
                 "sync_climate_zone(source_zone, target_zone, "
-                "include_temperature=True, include_seat_heating=True)"
+                "include_temperature=True, include_seat_heating=False)"
             ),
             "increase_fan_speed": "increase_fan_speed(steps=1)",
             "decrease_fan_speed": "decrease_fan_speed(steps=1)",
+            "warm_occupied_zones_efficiently": (
+                "warm_occupied_zones_efficiently(temperature=None, seat_heating_level=None)"
+            ),
             "set_occupied_seat_heating": (
                 "set_occupied_seat_heating(level=None, increase_by=None, seat_zone=None)"
             ),
@@ -1398,7 +1402,8 @@ class CoroutineWorkspace:
                     "structured selectors, requires concrete attendee contact IDs, then "
                     "reads attendee emails. If the calendar entry does not provide attendee "
                     "identities, it reports that limitation directly instead of asking the "
-                    "user to invent attendees."
+                    "user to invent attendees; direct calendar reads expose the same "
+                    "limitation as attendees_unavailable_message."
                 ),
                 "required_arguments": [],
                 "optional_arguments": [
@@ -1759,6 +1764,34 @@ class CoroutineWorkspace:
                     ),
                 },
             }
+        if tool_name == "warm_occupied_zones_efficiently":
+            return {
+                "name": "warm_occupied_zones_efficiently",
+                "signature": "warm_occupied_zones_efficiently(temperature=None, seat_heating_level=None)",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in workspace helper, not a direct evaluator tool. For broad warm-up "
+                    "requests scoped to occupied or efficient zones, asks one combined "
+                    "clarification when temperature or seat-heating level is missing. When both "
+                    "values are model-resolved, reads seat occupancy and sets cabin temperature "
+                    "plus seat heating only for occupied front zones. It does not inspect raw "
+                    "user text."
+                ),
+                "required_arguments": [],
+                "optional_arguments": ["temperature", "seat_heating_level"],
+                "schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "temperature": {"type": "number", "minimum": 16, "maximum": 28},
+                        "seat_heating_level": {"type": "integer", "minimum": 0, "maximum": 3},
+                    },
+                },
+                "argument_descriptions": {
+                    "temperature": "Resolved cabin temperature in degrees Celsius.",
+                    "seat_heating_level": "Resolved seat-heating level 0-3 for occupied front seats.",
+                },
+            }
         if tool_name == "set_air_conditioning_on_safe":
             return {
                 "name": "set_air_conditioning_on_safe",
@@ -1882,7 +1915,7 @@ class CoroutineWorkspace:
                 "name": "sync_climate_zone",
                 "signature": (
                     "sync_climate_zone(source_zone, target_zone, "
-                    "include_temperature=True, include_seat_heating=True)"
+                    "include_temperature=True, include_seat_heating=False)"
                 ),
                 "confirmation_required": False,
                 "description": (
@@ -1899,7 +1932,7 @@ class CoroutineWorkspace:
                         "source_zone": {"type": "string", "enum": ["DRIVER", "PASSENGER"]},
                         "target_zone": {"type": "string", "enum": ["DRIVER", "PASSENGER"]},
                         "include_temperature": {"type": "boolean", "default": True},
-                        "include_seat_heating": {"type": "boolean", "default": True},
+                        "include_seat_heating": {"type": "boolean", "default": False},
                     },
                 },
                 "argument_descriptions": {
@@ -5324,6 +5357,15 @@ class CoroutineWorkspace:
     @staticmethod
     def _claims_phone_call_available(message: str) -> bool:
         lowered = message.casefold()
+        labeling_patterns = (
+            r"\b(?:i|we)\s+(?:would|can|could|might)\s+call\s+"
+            r"(?:this|that|it)\s+(?:the\s+)?(?:fastest|shortest|scenic|best|"
+            r"selected|chosen)?\s*(?:route|option|choice|alternative|leg|segment)\b",
+            r"\b(?:i|we)\s+(?:would|can|could|might)\s+call\s+"
+            r"(?:this|that|it)\s+(?:route|option|choice|alternative|leg|segment)\b",
+        )
+        if any(re.search(pattern, lowered) for pattern in labeling_patterns):
+            return False
         patterns = (
             r"\b(?:i|we)\s+(?:will|can|am going to|are going to|would)\s+(?:call|dial)\b",
             r"\b(?:calling|dialing)\b(?:(?![.!?]).){0,120}\b(?:now|for you)\b",
@@ -7982,6 +8024,7 @@ class CoroutineWorkspace:
                 "navigation_add_one_waypoint",
                 new_id,
             )
+        route_narration_segments: list[dict[str, Any]] = []
         # Route leading TO the new waypoint (before -> new). Resolve it ALWAYS
         # (keep a valid model id, else fastest) so the policy-022 narration fires
         # even when the model supplied the route itself.
@@ -7990,22 +8033,43 @@ class CoroutineWorkspace:
         )
         if to_id:
             kwargs = dict(kwargs, route_id_leading_to_new_waypoint=to_id)
-            self._store_route_narration(
-                to_routes,
-                to_id,
-                selector=self._recorded_selector_for_route_id(to_id),
+            route_narration_segments.append(
+                {
+                    "routes": to_routes,
+                    "selected_route_id": to_id,
+                    "selector": self._recorded_selector_for_route_id(to_id),
+                    "segment_label": self._route_segment_label(before_id, new_id),
+                    "offer_alternatives": False,
+                }
             )
         if before_id in order:
             index = order.index(before_id)
             if index + 1 < len(order):  # mid-route insert: BOTH after-args are required
                 after_id = order[index + 1]
-                away_id, _ = self._resolve_route_arg(
+                away_id, away_routes = self._resolve_route_arg(
                     kwargs.get("route_id_leading_away_from_new_waypoint"), new_id, after_id
                 )
                 kwargs = dict(kwargs, waypoint_id_after_new_waypoint=after_id)
                 if away_id:
                     kwargs["route_id_leading_away_from_new_waypoint"] = away_id
-        return self._call_raw_tool_sync("navigation_add_one_waypoint", kwargs)
+                    route_narration_segments.append(
+                        {
+                            "routes": away_routes,
+                            "selected_route_id": away_id,
+                            "selector": self._recorded_selector_for_route_id(away_id),
+                            "segment_label": self._route_segment_label(new_id, after_id),
+                            "offer_alternatives": False,
+                        }
+                    )
+        result = self._call_raw_tool_sync("navigation_add_one_waypoint", kwargs)
+        if result.get("status") == "SUCCESS" and route_narration_segments:
+            self._store_route_narration_sequence(route_narration_segments)
+        return result
+
+    def _route_segment_label(self, start_id: str, destination_id: str) -> str:
+        start_label = self._route_endpoint_label(start_id) or start_id
+        destination_label = self._route_endpoint_label(destination_id) or destination_id
+        return f"the segment from {start_label} to {destination_label}"
 
     def _already_present_result(self, tool_name: str, waypoint_id: str) -> dict[str, Any]:
         self.scratchpad["gates"]["nav_idempotent"] = {
@@ -8569,6 +8633,9 @@ class CoroutineWorkspace:
                 entities["last_temperature_state"] = copy.deepcopy(payload)
             elif name == "get_seat_heating_level":
                 entities["last_seat_heating_state"] = copy.deepcopy(payload)
+            elif name == "get_seats_occupancy":
+                entities["last_seat_occupancy"] = copy.deepcopy(payload)
+                self.remember("last_seat_occupancy_turn", self.last_user_message)
             elif name == "get_climate_settings":
                 entities["last_climate_settings"] = copy.deepcopy(payload)
                 self.remember("last_climate_settings_turn", self.last_user_message)
@@ -8998,6 +9065,7 @@ class CoroutineWorkspace:
             parts.append(topic.strip())
         if isinstance(location, str) and location.strip():
             parts.append(f"at {location.strip()}")
+        entry["display"] = " ".join(parts)
         attendee_ids = cls._string_list(entry.get("attendees"))
         if attendee_ids:
             entry["attendee_ids"] = attendee_ids
@@ -9007,8 +9075,22 @@ class CoroutineWorkspace:
             entry["unknown_response_fields"] = [
                 "result.get_entries_from_calendar.meetings.attendees"
             ]
-        entry["display"] = " ".join(parts)
+            entry["attendees_unavailable_message"] = (
+                cls._calendar_attendees_unavailable_message(entry)
+            )
         return entry
+
+    @staticmethod
+    def _calendar_attendees_unavailable_message(entry: dict[str, Any]) -> str:
+        meeting_label = str(
+            entry.get("display") or entry.get("topic") or "the calendar meeting"
+        )
+        return (
+            f"I found {meeting_label}, but the calendar entry does not provide "
+            "attendee identities. I don't have an available tool that can look up "
+            "attendee identities for that meeting, so I can't address an email to "
+            "the attendees."
+        )
 
     @staticmethod
     def _string_list(value: Any) -> list[str]:
@@ -11606,14 +11688,9 @@ class CoroutineWorkspace:
         if not attendee_ids:
             attendee_ids = self._string_list(selected.get("attendees"))
         if not attendee_ids:
-            meeting_label = str(
-                selected.get("display")
-                or selected.get("topic")
-                or "the calendar meeting"
-            )
-            message = (
-                f"I found {meeting_label}, but the calendar entry does not provide "
-                "attendee identities, so I can't address an email to the attendees."
+            message = str(
+                selected.get("attendees_unavailable_message")
+                or self._calendar_attendees_unavailable_message(selected)
             )
             report = self._store_helper_report(
                 gate_name,
@@ -13156,14 +13233,29 @@ class CoroutineWorkspace:
                 "helper": gate_name,
                 "adjusted_windows": adjusted_windows,
                 "unknown_windows": unknown_windows,
+                "unknown_window_disclosure": self._unknown_window_ac_disclosure(unknown_windows),
                 "actions": [name for name, _ in action_calls],
             },
         )
-        self._helper_message(
+        unknown_window_disclosure = report.get("unknown_window_disclosure")
+        if isinstance(unknown_window_disclosure, str) and unknown_window_disclosure:
+            self._add_response_obligation(
+                f"{gate_name}:unknown_window_closed",
+                unknown_window_disclosure,
+            )
+        message = (
             f"{defrost_label.capitalize()} is on, with the required fan, AC, "
             "and window safety settings handled."
         )
-        return {"status": "SUCCESS", "actions": action_results, "report": report}
+        if isinstance(unknown_window_disclosure, str) and unknown_window_disclosure:
+            message = message.rstrip().rstrip(".") + ". " + unknown_window_disclosure
+        self._helper_message(message)
+        return {
+            "status": "SUCCESS",
+            "actions": action_results,
+            "report": report,
+            "message": message,
+        }
 
     def _preferred_defrost_airflow_direction(self) -> str | None:
         """Return a stored defrost airflow preference that still satisfies policy 010."""
@@ -13768,6 +13860,216 @@ class CoroutineWorkspace:
             explicit_all_zones=True,
         )
 
+    def warm_occupied_zones_efficiently(
+        self,
+        temperature: int | float | str | None = None,
+        seat_heating_level: int | float | str | None = None,
+    ) -> dict[str, Any]:
+        """Warm occupied front zones without guessing missing comfort values."""
+
+        gate_name = "warm_occupied_zones_efficiently"
+        missing: list[str] = []
+        target_temp: float | None = None
+        target_level: int | None = None
+        if temperature is None:
+            missing.append("temperature")
+        else:
+            try:
+                target_temp = float(temperature)
+            except (TypeError, ValueError):
+                return self._limitation_response(
+                    gate_name,
+                    "warm occupied zones efficiently",
+                    reason="temperature must be a number in degrees Celsius",
+                )
+            if not 16 <= target_temp <= 28:
+                return self._limitation_response(
+                    gate_name,
+                    "warm occupied zones efficiently",
+                    reason="temperature must be between 16 and 28 degrees Celsius",
+                )
+            if not (target_temp * 2).is_integer():
+                return self._limitation_response(
+                    gate_name,
+                    "warm occupied zones efficiently",
+                    reason="temperature must use 0.5 degree Celsius increments",
+                )
+        if seat_heating_level is None:
+            missing.append("seat_heating_level")
+        else:
+            try:
+                numeric_level = float(seat_heating_level)
+            except (TypeError, ValueError):
+                return self._limitation_response(
+                    gate_name,
+                    "warm occupied zones efficiently",
+                    reason="seat_heating_level must be a number from 0 to 3",
+                )
+            if not numeric_level.is_integer():
+                return self._limitation_response(
+                    gate_name,
+                    "warm occupied zones efficiently",
+                    reason="seat_heating_level must be an integer from 0 to 3",
+                )
+            target_level = int(numeric_level)
+            if not 0 <= target_level <= 3:
+                return self._limitation_response(
+                    gate_name,
+                    "warm occupied zones efficiently",
+                    reason="seat_heating_level must be between 0 and 3",
+                )
+
+        if missing:
+            if len(missing) == 2:
+                prompt = (
+                    "I can warm the occupied seats efficiently by setting both cabin "
+                    "temperature and seat heating for the occupied front zones. What "
+                    "temperature and seat-heating level should I use?"
+                )
+            elif missing[0] == "temperature":
+                prompt = (
+                    f"I can set seat heating to level {target_level} for occupied front "
+                    "seats. What cabin temperature should I use?"
+                )
+            else:
+                temp_arg = (
+                    int(target_temp)
+                    if target_temp is not None and target_temp.is_integer()
+                    else target_temp
+                )
+                prompt = (
+                    f"I can set the occupied front-zone temperature to {temp_arg:g} "
+                    "degrees Celsius. What seat-heating level should I use?"
+                )
+            climate_report = self._climate_comfort_state_report()
+            climate_summary = climate_report.get("summary")
+            if isinstance(climate_summary, str) and climate_summary:
+                prompt = f"Current climate state: {climate_summary}. {prompt}"
+            report = {
+                "helper": gate_name,
+                "status": "NEEDS_CLARIFICATION",
+                "missing_values": missing,
+                "temperature": target_temp,
+                "seat_heating_level": target_level,
+                "side_effects": [],
+                "message": prompt,
+                "climate_state": climate_report,
+            }
+            self.scratchpad["gates"][gate_name] = {
+                "status": "NEEDS_CLARIFICATION",
+                "missing_values": missing,
+                "side_effects": [],
+            }
+            self._store_helper_report(gate_name, report)
+            self._abort_with_response(prompt)
+
+        assert target_temp is not None
+        assert target_level is not None
+        temp_arg: int | float = int(target_temp) if target_temp.is_integer() else target_temp
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "warm occupied zones efficiently",
+            [
+                ("get_seats_occupancy", {}),
+                ("set_climate_temperature", {"seat_zone": "DRIVER", "temperature": temp_arg}),
+                ("set_seat_heating", {"seat_zone": "DRIVER", "level": target_level}),
+            ],
+        )
+        if blocker:
+            return blocker
+        occupancy_result = self._call_raw_tool_sync("get_seats_occupancy", {})
+        if occupancy_result.get("status") != "SUCCESS":
+            return self._failed_tool_response(
+                gate_name,
+                "read seat occupancy",
+                occupancy_result,
+            )
+        occupancy_payload = result_value(occupancy_result)
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
+        if not isinstance(occupied, dict):
+            return self._limitation_response(
+                gate_name,
+                "warm occupied zones efficiently",
+                reason="the seat occupancy result had an unexpected shape",
+            )
+        zones = [
+            zone
+            for key, zone in (("driver", "DRIVER"), ("passenger", "PASSENGER"))
+            if occupied.get(key) is True
+        ]
+        if not zones:
+            message = (
+                "No heatable front seats are occupied, so I did not change cabin "
+                "temperature or seat heating."
+            )
+            report = self._store_helper_report(
+                gate_name,
+                {
+                    "helper": gate_name,
+                    "status": "SUCCESS",
+                    "actions": [],
+                    "occupied_front_zones": [],
+                    "message": message,
+                },
+            )
+            self._helper_message(message)
+            return {"status": "SUCCESS", "actions": [], "report": report, "message": message}
+
+        self.remember_entity(
+            "active_occupied_front_zone_scope",
+            {
+                "source": gate_name,
+                "zones": list(zones),
+                "turn": self.last_user_message,
+            },
+        )
+        calls = []
+        for zone in zones:
+            calls.append(("set_climate_temperature", {"seat_zone": zone, "temperature": temp_arg}))
+            calls.append(("set_seat_heating", {"seat_zone": zone, "level": target_level}))
+        blocker = self._require_tool_surface_for_calls(
+            gate_name,
+            "warm occupied zones efficiently",
+            calls,
+        )
+        if blocker:
+            return blocker
+        action_results = self._call_raw_tools_sync(calls)
+        for result in action_results:
+            if result.get("status") != "SUCCESS":
+                return self._failed_tool_response(
+                    gate_name,
+                    "warm occupied zones efficiently",
+                    result,
+                )
+        zones_text = _human_join([zone.lower() for zone in zones])
+        message = (
+            f"Temperature set to {temp_arg:g} degrees Celsius and seat heating set "
+            f"to level {target_level} for the occupied {zones_text} zones."
+        )
+        report = self._store_helper_report(
+            gate_name,
+            {
+                "helper": gate_name,
+                "status": "SUCCESS",
+                "temperature": temp_arg,
+                "seat_heating_level": target_level,
+                "occupied_front_zones": list(zones),
+                "actions": action_results,
+                "message": message,
+            },
+        )
+        self._helper_message(message)
+        return {
+            "status": "SUCCESS",
+            "actions": action_results,
+            "temperature": temp_arg,
+            "seat_heating_level": target_level,
+            "occupied_front_zones": list(zones),
+            "message": message,
+            "report": report,
+        }
+
     def _active_occupied_front_zone_scope(self) -> list[str]:
         entities = self.scratchpad.get("entities")
         if not isinstance(entities, dict):
@@ -13784,6 +14086,18 @@ class CoroutineWorkspace:
             if normalized in {"DRIVER", "PASSENGER"} and normalized not in out:
                 out.append(normalized)
         return out
+
+    @staticmethod
+    def _seat_occupancy_by_key(payload: Any) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("seat_occupancy_by_key")
+        if isinstance(raw, dict):
+            return raw
+        legacy = payload.get("seats_occupied")
+        if isinstance(legacy, dict):
+            return legacy
+        return None
 
     def _set_climate_temperature_for_resolved_zones(
         self,
@@ -13848,7 +14162,7 @@ class CoroutineWorkspace:
         source_zone: str,
         target_zone: str,
         include_temperature: bool = True,
-        include_seat_heating: bool = True,
+        include_seat_heating: bool = False,
     ) -> dict[str, Any]:
         """Copy front-zone climate values from source to target."""
 
@@ -14129,11 +14443,7 @@ class CoroutineWorkspace:
             if occupancy_result.get("status") != "SUCCESS":
                 return self._failed_tool_response(gate_name, "read seat occupancy", occupancy_result)
             occupancy_payload = result_value(occupancy_result)
-            occupied = (
-                occupancy_payload.get("seats_occupied")
-                if isinstance(occupancy_payload, dict)
-                else None
-            )
+            occupied = self._seat_occupancy_by_key(occupancy_payload)
             if not isinstance(occupied, dict):
                 return self._limitation_response(
                     gate_name,
@@ -14251,11 +14561,7 @@ class CoroutineWorkspace:
                 gate_name, "read current seat heating", levels_result
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -14411,11 +14717,7 @@ class CoroutineWorkspace:
                 occupancy_result,
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -14495,9 +14797,13 @@ class CoroutineWorkspace:
         else:
             message = "No heatable front seats matched the requested occupancy-based seat-heating targets."
         if occupied_rear_unheated:
+            affected_rear = _human_join(
+                [seat.replace("_", " ") for seat in occupied_rear_unheated]
+            )
             message += (
-                " Seat heating is unavailable for occupied rear seats: "
-                f"{_human_join([seat.replace('_', ' ') for seat in occupied_rear_unheated])}."
+                " I could not check or set seat heating for occupied rear seats because "
+                "only front-seat heating controls are available."
+                f" Affected occupied rear seats: {affected_rear}."
             )
         if unavailable_levels and actions:
             message += (
@@ -14575,11 +14881,7 @@ class CoroutineWorkspace:
                 occupancy_result,
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -14747,11 +15049,7 @@ class CoroutineWorkspace:
                 occupancy_result,
             )
         occupancy_payload = result_value(occupancy_result)
-        occupied = (
-            occupancy_payload.get("seats_occupied")
-            if isinstance(occupancy_payload, dict)
-            else None
-        )
+        occupied = self._seat_occupancy_by_key(occupancy_payload)
         if not isinstance(occupied, dict):
             return self._limitation_response(
                 gate_name,
@@ -18011,6 +18309,7 @@ class CoroutineWorkspace:
         if tool_name == "get_seats_occupancy":
             seats_occupied = normalized.get("seats_occupied")
             if isinstance(seats_occupied, dict):
+                normalized["seat_occupancy_by_key"] = copy.deepcopy(seats_occupied)
                 label_by_key = {
                     "driver": "DRIVER",
                     "passenger": "PASSENGER",
@@ -18034,16 +18333,16 @@ class CoroutineWorkspace:
                     and seats_occupied.get(key) is not True
                     and seats_occupied.get(key) is not False
                 ]
-                normalized.setdefault("occupied_seats", occupied)
-                normalized.setdefault("unoccupied_seats", unoccupied)
-                normalized.setdefault(
-                    "occupied_front_seats",
-                    [seat for seat in occupied if seat in {"DRIVER", "PASSENGER"}],
-                )
-                normalized.setdefault(
-                    "unoccupied_front_seats",
-                    [seat for seat in unoccupied if seat in {"DRIVER", "PASSENGER"}],
-                )
+                normalized["seats_occupied"] = occupied
+                normalized["occupied_seats"] = occupied
+                normalized["unoccupied_seats"] = unoccupied
+                normalized["occupied_front_seats"] = [
+                    seat for seat in occupied if seat in {"DRIVER", "PASSENGER"}
+                ]
+                normalized["unoccupied_front_seats"] = [
+                    seat for seat in unoccupied if seat in {"DRIVER", "PASSENGER"}
+                ]
+                normalized["unknown_seats"] = unknown
                 summary_parts = []
                 if occupied:
                     summary_parts.append(
@@ -18561,6 +18860,7 @@ class BlockingPythonExecutor:
             "sync_climate_zone": ws.sync_climate_zone,
             "increase_fan_speed": ws.increase_fan_speed,
             "decrease_fan_speed": ws.decrease_fan_speed,
+            "warm_occupied_zones_efficiently": ws.warm_occupied_zones_efficiently,
             "set_occupied_seat_heating": ws.set_occupied_seat_heating,
             "turn_off_unoccupied_seat_heating": ws.turn_off_unoccupied_seat_heating,
             "optimize_seat_heating_by_occupancy": ws.optimize_seat_heating_by_occupancy,

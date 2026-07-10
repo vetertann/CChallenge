@@ -460,6 +460,20 @@ class GuardTests(unittest.TestCase):
         self.assertIn("phone calling capability is unavailable", result.response_text)
         self.assertNotIn("will call", result.response_text)
 
+    def test_missing_phone_call_guard_allows_call_as_labeling_verb(self):
+        _ws, ex = self.make({}, {})
+
+        result = ex.run("respond('I would call that the fastest route.')")
+
+        self.assertEqual(result.response_text, "I would call that the fastest route.")
+
+    def test_missing_phone_call_guard_allows_option_labeling_verb(self):
+        _ws, ex = self.make({}, {})
+
+        result = ex.run("respond('We can call this option the scenic route.')")
+
+        self.assertEqual(result.response_text, "We can call this option the scenic route.")
+
     def test_missing_email_prepared_claim_is_rewritten(self):
         _ws, ex = self.make({}, {})
 
@@ -1469,7 +1483,11 @@ class GuardTests(unittest.TestCase):
             {"direction": "WINDSHIELD"},
         )
         self.assertEqual(self._emitted(ws, "set_air_conditioning"), {"on": True})
-        self.assertEqual(result.response_text, "All-window defrost is now on.")
+        self.assertIn("All-window defrost is now on.", result.response_text)
+        self.assertIn(
+            "This includes closing the passenger window because its position reading was unavailable.",
+            result.response_text,
+        )
         self.assertNotIn("unknown", result.response_text.lower())
         self.assertEqual(
             ws.scratchpad["facts"]["last_helper_report"]["unknown_windows"][0]["tool_window"],
@@ -1747,8 +1765,11 @@ class GuardTests(unittest.TestCase):
         self.assertIn(("set_fan_airflow_direction", {"direction": "WINDSHIELD"}), emitted)
         self.assertIn(("set_air_conditioning", {"on": True}), emitted)
         self.assertIn(("set_window_defrost", {"on": True, "defrost_window": "FRONT"}), emitted)
-        self.assertEqual(result.response_text, "Front window defrost is now on.")
-        self.assertNotIn("unknown", result.response_text.lower())
+        self.assertIn("Front window defrost is now on.", result.response_text)
+        self.assertIn(
+            "This includes closing the driver and passenger windows because their position readings were unavailable.",
+            result.response_text,
+        )
         self.assertEqual(
             [item["tool_window"] for item in ws.scratchpad["facts"]["last_helper_report"]["unknown_windows"]],
             ["DRIVER", "PASSENGER"],
@@ -7671,6 +7692,93 @@ class GuardTests(unittest.TestCase):
         args = self._emitted(ws, "navigation_add_one_waypoint")
         self.assertEqual(args["route_id_leading_away_from_new_waypoint"], "R_derived")
 
+    def test_insert_mid_waypoint_narrates_both_new_segments(self):
+        tools = {
+            "get_current_navigation_state": tool_schema(
+                "get_current_navigation_state",
+                {"detailed_information": {"type": "boolean"}},
+            ),
+            "get_routes_from_start_to_destination": tool_schema(
+                "get_routes_from_start_to_destination",
+                {"start_id": {"type": "string"}, "destination_id": {"type": "string"}},
+            ),
+            "navigation_add_one_waypoint": tool_schema(
+                "navigation_add_one_waypoint",
+                {
+                    "waypoint_id_to_add": {"type": "string"},
+                    "waypoint_id_before_new_waypoint": {"type": "string"},
+                    "route_id_leading_to_new_waypoint": {"type": "string"},
+                    "waypoint_id_after_new_waypoint": {"type": "string"},
+                    "route_id_leading_away_from_new_waypoint": {"type": "string"},
+                },
+            ),
+        }
+        responses = {
+            "get_current_navigation_state": ("SUCCESS", self.NAV_4WP),
+            "get_routes_from_start_to_destination": [
+                (
+                    "SUCCESS",
+                    {
+                        "routes": [
+                            {
+                                "route_id": "R_to",
+                                "start_id": "loc_b",
+                                "destination_id": "loc_new",
+                                "name_via": "A11, B22",
+                                "alias": ["fastest", "first", "shortest"],
+                            },
+                            {
+                                "route_id": "R_to_alt",
+                                "start_id": "loc_b",
+                                "destination_id": "loc_new",
+                                "name_via": "K57",
+                                "alias": ["second"],
+                            },
+                        ]
+                    },
+                ),
+                (
+                    "SUCCESS",
+                    {
+                        "routes": [
+                            {
+                                "route_id": "R_away",
+                                "start_id": "loc_new",
+                                "destination_id": "loc_c",
+                                "name_via": "C33, D44",
+                                "alias": ["fastest", "first", "shortest"],
+                            },
+                            {
+                                "route_id": "R_away_alt",
+                                "start_id": "loc_new",
+                                "destination_id": "loc_c",
+                                "name_via": "L99",
+                                "alias": ["second"],
+                            },
+                        ]
+                    },
+                ),
+            ],
+            "navigation_add_one_waypoint": ("SUCCESS", {"waypoint_added": True}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "navigation_add_one_waypoint("
+            "waypoint_id_to_add='loc_new', "
+            "waypoint_id_before_new_waypoint='loc_b', "
+            "route_id_leading_to_new_waypoint='R_to')\n"
+            "respond('Waypoint added.')"
+        )
+
+        args = self._emitted(ws, "navigation_add_one_waypoint")
+        self.assertEqual(args["route_id_leading_to_new_waypoint"], "R_to")
+        self.assertEqual(args["waypoint_id_after_new_waypoint"], "loc_c")
+        self.assertEqual(args["route_id_leading_away_from_new_waypoint"], "R_away")
+        self.assertIn("A11, B22", result.response_text)
+        self.assertIn("C33, D44", result.response_text)
+        self.assertIn("alternative routes for either new segment", result.response_text)
+
     def test_delete_already_removed_waypoint_is_idempotent(self):
         # base_88: a repeated delete of an already-removed waypoint must not be
         # emitted (would loop on NavigationDelete_005); return idempotent success.
@@ -8227,6 +8335,87 @@ class GuardTests(unittest.TestCase):
             ],
         )
 
+    def test_warm_occupied_zones_asks_combined_values_when_missing(self):
+        ws, ex = self.make(
+            {
+                "get_climate_settings": (
+                    "SUCCESS",
+                    {
+                        "fan_speed": 0,
+                        "air_conditioning": False,
+                        "air_circulation": "AUTO",
+                        "fan_airflow_direction": "FEET",
+                    },
+                )
+            },
+            {"get_climate_settings": tool_schema("get_climate_settings", {})},
+        )
+
+        result = ex.run("warm_occupied_zones_efficiently()")
+
+        self.assertIn("temperature and seat-heating level", result.response_text)
+        self.assertIsNone(self._emitted(ws, "set_climate_temperature"))
+        self.assertIsNone(self._emitted(ws, "set_seat_heating"))
+        self.assertEqual(
+            ws.scratchpad["gates"]["warm_occupied_zones_efficiently"]["status"],
+            "NEEDS_CLARIFICATION",
+        )
+
+    def test_warm_occupied_zones_sets_temperature_and_heating_for_occupied_front_zones(self):
+        tools = {
+            "get_seats_occupancy": tool_schema("get_seats_occupancy", {}),
+            "set_seat_heating": tool_schema(
+                "set_seat_heating",
+                {"level": {"type": "integer"}, "seat_zone": {"type": "string"}},
+            ),
+            "set_climate_temperature": tool_schema(
+                "set_climate_temperature",
+                {"temperature": {"type": "number"}, "seat_zone": {"type": "string"}},
+            ),
+        }
+        responses = {
+            "get_seats_occupancy": (
+                "SUCCESS",
+                {"seats_occupied": {"driver": True, "passenger": True, "driver_rear": False, "passenger_rear": False}},
+            ),
+            "set_seat_heating": ("SUCCESS", {}),
+            "set_climate_temperature": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "warm_occupied_zones_efficiently(temperature=22, seat_heating_level=3)\n"
+            "respond('Done warming the occupied zones.')"
+        )
+
+        temperature_sets = [
+            call["arguments"]
+            for batch in ws.bridge.requests
+            for call in batch
+            if call["tool_name"] == "set_climate_temperature"
+        ]
+        heating_sets = [
+            call["arguments"]
+            for batch in ws.bridge.requests
+            for call in batch
+            if call["tool_name"] == "set_seat_heating"
+        ]
+        self.assertEqual(
+            temperature_sets,
+            [
+                {"seat_zone": "DRIVER", "temperature": 22},
+                {"seat_zone": "PASSENGER", "temperature": 22},
+            ],
+        )
+        self.assertEqual(
+            heating_sets,
+            [
+                {"seat_zone": "DRIVER", "level": 3},
+                {"seat_zone": "PASSENGER", "level": 3},
+            ],
+        )
+        self.assertIn("Done warming the occupied zones.", result.response_text)
+
     def test_raw_temperature_call_delegates_to_occupied_scope_helper(self):
         tools = {
             "get_seats_occupancy": tool_schema("get_seats_occupancy", {}),
@@ -8470,9 +8659,43 @@ class GuardTests(unittest.TestCase):
         )
 
         self.assertEqual(self._seat_sets(ws), [])
-        self.assertIn("unavailable for occupied rear seats", result.response_text)
+        self.assertIn("only front-seat heating controls are available", result.response_text)
+        self.assertIn("Affected occupied rear seats: passenger rear", result.response_text)
+        self.assertNotIn("child", result.response_text.lower())
         report = ws.scratchpad["facts"]["last_helper_report"]
         self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertEqual(report["occupied_rear_unheated"], ["passenger_rear"])
+
+    def test_optimize_seat_heating_by_occupancy_reports_front_partial_with_rear_limitation(self):
+        ws, ex = self._seat_ws(
+            {
+                "driver": True,
+                "passenger": False,
+                "driver_rear": False,
+                "passenger_rear": True,
+            },
+            {"seat_heating_driver": "unknown", "seat_heating_passenger": 2},
+        )
+
+        result = ex.run(
+            "r = optimize_seat_heating_by_occupancy("
+            "occupied_level=1, unoccupied_level=0)\n"
+            "respond(r['message'])"
+        )
+
+        self.assertEqual(
+            self._seat_sets(ws),
+            [
+                {"seat_zone": "DRIVER", "level": 1},
+                {"seat_zone": "PASSENGER", "level": 0},
+            ],
+        )
+        self.assertIn("requested occupancy-based final state", result.response_text)
+        self.assertIn("only front-seat heating controls are available", result.response_text)
+        self.assertIn("Affected occupied rear seats: passenger rear", result.response_text)
+        self.assertNotIn("child", result.response_text.lower())
+        report = ws.scratchpad["facts"]["last_helper_report"]
+        self.assertEqual(report["status"], "PARTIAL")
         self.assertEqual(report["occupied_rear_unheated"], ["passenger_rear"])
 
     def _reading_light_ws(self, occupancy, status=None):
@@ -9194,6 +9417,8 @@ class GuardTests(unittest.TestCase):
 
         self.assertIn("I found 15:30", ws._response_text or "")
         self.assertIn("does not provide attendee identities", ws._response_text or "")
+        self.assertIn("available tool", ws._response_text or "")
+        self.assertIn("look up attendee identities", ws._response_text or "")
         self.assertEqual(
             [[call["tool_name"] for call in request] for request in ws.bridge.requests],
             [["get_entries_from_calendar"]],
@@ -9206,6 +9431,53 @@ class GuardTests(unittest.TestCase):
             report["missing_response_fields"],
         )
         self.assertTrue(ws.entities["last_calendar"]["entries"][0]["attendees_unknown"])
+        self.assertIn(
+            "available tool",
+            ws.entities["last_calendar"]["entries"][0]["attendees_unavailable_message"],
+        )
+
+    def test_direct_calendar_read_exposes_unknown_attendees_limitation_message(self):
+        tools = {
+            "get_entries_from_calendar": tool_schema(
+                "get_entries_from_calendar",
+                {"month": {"type": "integer"}, "day": {"type": "integer"}},
+                required=["month", "day"],
+            ),
+        }
+        responses = {
+            "get_entries_from_calendar": (
+                "SUCCESS",
+                {
+                    "date": {"year": 2025, "month": 3, "day": 13},
+                    "meetings": [
+                        {
+                            "start": {"hour": "15", "minute": "30"},
+                            "duration": "30min",
+                            "location": "Bratislava",
+                            "attendees": "unknown",
+                            "topic": "Marketing Campaign",
+                        }
+                    ],
+                },
+            ),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "calendar = get_entries_from_calendar(month=3, day=13)\n"
+            "entry = calendar['entries'][0]\n"
+            "respond(entry['attendees_unavailable_message'])"
+        )
+
+        self.assertIn("I found 15:30", result.response_text)
+        self.assertIn("does not provide attendee identities", result.response_text)
+        self.assertIn("available tool", result.response_text)
+        self.assertIn("look up attendee identities", result.response_text)
+        self.assertTrue(ws.entities["last_calendar"]["entries"][0]["attendees_unknown"])
+        self.assertIn(
+            "attendees_unavailable_message",
+            ws.entities["last_calendar"]["entries"][0],
+        )
 
     def test_calendar_attendee_recipient_helper_returns_emails_for_known_attendees(self):
         tools = {
@@ -10786,7 +11058,7 @@ class GuardTests(unittest.TestCase):
             "Temperature set to 22 degrees Celsius for all zones.",
         )
 
-    def test_sync_climate_zone_copies_source_values_to_target_zone(self):
+    def test_sync_climate_zone_defaults_to_temperature_only(self):
         tools = {
             "get_temperature_inside_car": tool_schema("get_temperature_inside_car", {}),
             "get_seat_heating_level": tool_schema("get_seat_heating_level", {}),
@@ -10817,6 +11089,45 @@ class GuardTests(unittest.TestCase):
         ws, ex = self.make(responses, tools)
         ex.run(
             "sync_climate_zone(source_zone='PASSENGER', target_zone='DRIVER')"
+        )
+        temp_args = self._emitted(ws, "set_climate_temperature")
+        heat_args = self._emitted(ws, "set_seat_heating")
+        self.assertEqual(temp_args, {"seat_zone": "DRIVER", "temperature": 16.0})
+        self.assertIsNone(heat_args)
+
+    def test_sync_climate_zone_copies_seat_heating_when_explicitly_requested(self):
+        tools = {
+            "get_temperature_inside_car": tool_schema("get_temperature_inside_car", {}),
+            "get_seat_heating_level": tool_schema("get_seat_heating_level", {}),
+            "set_climate_temperature": tool_schema(
+                "set_climate_temperature",
+                {"seat_zone": {"type": "string"}, "temperature": {"type": "number"}},
+            ),
+            "set_seat_heating": tool_schema(
+                "set_seat_heating",
+                {"seat_zone": {"type": "string"}, "level": {"type": "integer"}},
+            ),
+        }
+        responses = {
+            "get_temperature_inside_car": (
+                "SUCCESS",
+                {
+                    "climate_temperature_driver": 27,
+                    "climate_temperature_passenger": 16,
+                },
+            ),
+            "get_seat_heating_level": (
+                "SUCCESS",
+                {"seat_heating_driver": 3, "seat_heating_passenger": 1},
+            ),
+            "set_climate_temperature": ("SUCCESS", {}),
+            "set_seat_heating": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+        ex.run(
+            "sync_climate_zone("
+            "source_zone='PASSENGER', target_zone='DRIVER', "
+            "include_temperature=True, include_seat_heating=True)"
         )
         temp_args = self._emitted(ws, "set_climate_temperature")
         heat_args = self._emitted(ws, "set_seat_heating")
@@ -11099,7 +11410,7 @@ class GuardTests(unittest.TestCase):
                 },
             ),
         }
-        _ws, ex = self.make(responses, tools)
+        ws, ex = self.make(responses, tools)
 
         result = ex.run(
             "results = batch([\n"
@@ -11115,10 +11426,13 @@ class GuardTests(unittest.TestCase):
             "    'temperature_summary': temp['summary'],\n"
             "    'seat_heating_by_zone': heat['seat_heating_by_zone'],\n"
             "    'seat_heating_summary': heat['summary'],\n"
+            "    'seats_occupied': occ['seats_occupied'],\n"
             "    'occupied_seats': occ['occupied_seats'],\n"
             "    'unoccupied_seats': occ['unoccupied_seats'],\n"
             "    'occupied_front_seats': occ['occupied_front_seats'],\n"
             "    'unoccupied_front_seats': occ['unoccupied_front_seats'],\n"
+            "    'raw_passenger_occupied': occ['seat_occupancy_by_key']['passenger'],\n"
+            "    'model_join': ', '.join(occ.get('seats_occupied', [])),\n"
             "    'occupancy_summary': occ['summary'],\n"
             "}, sort_keys=True))"
         )
@@ -11127,6 +11441,7 @@ class GuardTests(unittest.TestCase):
         payload = json.loads(result.response_text or "{}")
         self.assertEqual(payload["temperatures_by_zone"], {"DRIVER": 26.0, "PASSENGER": 23.0})
         self.assertEqual(payload["seat_heating_by_zone"], {"DRIVER": 2, "PASSENGER": 3})
+        self.assertEqual(payload["seats_occupied"], ["DRIVER"])
         self.assertEqual(payload["occupied_seats"], ["DRIVER"])
         self.assertEqual(
             payload["unoccupied_seats"],
@@ -11134,9 +11449,15 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(payload["occupied_front_seats"], ["DRIVER"])
         self.assertEqual(payload["unoccupied_front_seats"], ["PASSENGER"])
+        self.assertFalse(payload["raw_passenger_occupied"])
+        self.assertEqual(payload["model_join"], "DRIVER")
         self.assertIn("driver 26", payload["temperature_summary"])
         self.assertIn("driver level 2", payload["seat_heating_summary"])
         self.assertIn("occupied: driver", payload["occupancy_summary"])
+        self.assertEqual(ws.entities["last_seat_occupancy"]["seats_occupied"], ["DRIVER"])
+        self.assertFalse(
+            ws.entities["last_seat_occupancy"]["seat_occupancy_by_key"]["passenger"]
+        )
 
     def test_navigation_mutation_persists_returned_state_and_revision(self):
         tools = {
