@@ -460,6 +460,20 @@ class GuardTests(unittest.TestCase):
         self.assertIn("phone calling capability is unavailable", result.response_text)
         self.assertNotIn("will call", result.response_text)
 
+    def test_missing_phone_call_guard_allows_call_as_labeling_verb(self):
+        _ws, ex = self.make({}, {})
+
+        result = ex.run("respond('I would call that the fastest route.')")
+
+        self.assertEqual(result.response_text, "I would call that the fastest route.")
+
+    def test_missing_phone_call_guard_allows_option_labeling_verb(self):
+        _ws, ex = self.make({}, {})
+
+        result = ex.run("respond('We can call this option the scenic route.')")
+
+        self.assertEqual(result.response_text, "We can call this option the scenic route.")
+
     def test_missing_email_prepared_claim_is_rewritten(self):
         _ws, ex = self.make({}, {})
 
@@ -8645,9 +8659,43 @@ class GuardTests(unittest.TestCase):
         )
 
         self.assertEqual(self._seat_sets(ws), [])
-        self.assertIn("unavailable for occupied rear seats", result.response_text)
+        self.assertIn("only front-seat heating controls are available", result.response_text)
+        self.assertIn("Affected occupied rear seats: passenger rear", result.response_text)
+        self.assertNotIn("child", result.response_text.lower())
         report = ws.scratchpad["facts"]["last_helper_report"]
         self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertEqual(report["occupied_rear_unheated"], ["passenger_rear"])
+
+    def test_optimize_seat_heating_by_occupancy_reports_front_partial_with_rear_limitation(self):
+        ws, ex = self._seat_ws(
+            {
+                "driver": True,
+                "passenger": False,
+                "driver_rear": False,
+                "passenger_rear": True,
+            },
+            {"seat_heating_driver": "unknown", "seat_heating_passenger": 2},
+        )
+
+        result = ex.run(
+            "r = optimize_seat_heating_by_occupancy("
+            "occupied_level=1, unoccupied_level=0)\n"
+            "respond(r['message'])"
+        )
+
+        self.assertEqual(
+            self._seat_sets(ws),
+            [
+                {"seat_zone": "DRIVER", "level": 1},
+                {"seat_zone": "PASSENGER", "level": 0},
+            ],
+        )
+        self.assertIn("requested occupancy-based final state", result.response_text)
+        self.assertIn("only front-seat heating controls are available", result.response_text)
+        self.assertIn("Affected occupied rear seats: passenger rear", result.response_text)
+        self.assertNotIn("child", result.response_text.lower())
+        report = ws.scratchpad["facts"]["last_helper_report"]
+        self.assertEqual(report["status"], "PARTIAL")
         self.assertEqual(report["occupied_rear_unheated"], ["passenger_rear"])
 
     def _reading_light_ws(self, occupancy, status=None):
@@ -9369,6 +9417,8 @@ class GuardTests(unittest.TestCase):
 
         self.assertIn("I found 15:30", ws._response_text or "")
         self.assertIn("does not provide attendee identities", ws._response_text or "")
+        self.assertIn("available tool", ws._response_text or "")
+        self.assertIn("look up attendee identities", ws._response_text or "")
         self.assertEqual(
             [[call["tool_name"] for call in request] for request in ws.bridge.requests],
             [["get_entries_from_calendar"]],
@@ -9381,6 +9431,53 @@ class GuardTests(unittest.TestCase):
             report["missing_response_fields"],
         )
         self.assertTrue(ws.entities["last_calendar"]["entries"][0]["attendees_unknown"])
+        self.assertIn(
+            "available tool",
+            ws.entities["last_calendar"]["entries"][0]["attendees_unavailable_message"],
+        )
+
+    def test_direct_calendar_read_exposes_unknown_attendees_limitation_message(self):
+        tools = {
+            "get_entries_from_calendar": tool_schema(
+                "get_entries_from_calendar",
+                {"month": {"type": "integer"}, "day": {"type": "integer"}},
+                required=["month", "day"],
+            ),
+        }
+        responses = {
+            "get_entries_from_calendar": (
+                "SUCCESS",
+                {
+                    "date": {"year": 2025, "month": 3, "day": 13},
+                    "meetings": [
+                        {
+                            "start": {"hour": "15", "minute": "30"},
+                            "duration": "30min",
+                            "location": "Bratislava",
+                            "attendees": "unknown",
+                            "topic": "Marketing Campaign",
+                        }
+                    ],
+                },
+            ),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "calendar = get_entries_from_calendar(month=3, day=13)\n"
+            "entry = calendar['entries'][0]\n"
+            "respond(entry['attendees_unavailable_message'])"
+        )
+
+        self.assertIn("I found 15:30", result.response_text)
+        self.assertIn("does not provide attendee identities", result.response_text)
+        self.assertIn("available tool", result.response_text)
+        self.assertIn("look up attendee identities", result.response_text)
+        self.assertTrue(ws.entities["last_calendar"]["entries"][0]["attendees_unknown"])
+        self.assertIn(
+            "attendees_unavailable_message",
+            ws.entities["last_calendar"]["entries"][0],
+        )
 
     def test_calendar_attendee_recipient_helper_returns_emails_for_known_attendees(self):
         tools = {

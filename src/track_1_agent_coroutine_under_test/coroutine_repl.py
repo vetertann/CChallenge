@@ -1402,7 +1402,8 @@ class CoroutineWorkspace:
                     "structured selectors, requires concrete attendee contact IDs, then "
                     "reads attendee emails. If the calendar entry does not provide attendee "
                     "identities, it reports that limitation directly instead of asking the "
-                    "user to invent attendees."
+                    "user to invent attendees; direct calendar reads expose the same "
+                    "limitation as attendees_unavailable_message."
                 ),
                 "required_arguments": [],
                 "optional_arguments": [
@@ -5356,6 +5357,15 @@ class CoroutineWorkspace:
     @staticmethod
     def _claims_phone_call_available(message: str) -> bool:
         lowered = message.casefold()
+        labeling_patterns = (
+            r"\b(?:i|we)\s+(?:would|can|could|might)\s+call\s+"
+            r"(?:this|that|it)\s+(?:the\s+)?(?:fastest|shortest|scenic|best|"
+            r"selected|chosen)?\s*(?:route|option|choice|alternative|leg|segment)\b",
+            r"\b(?:i|we)\s+(?:would|can|could|might)\s+call\s+"
+            r"(?:this|that|it)\s+(?:route|option|choice|alternative|leg|segment)\b",
+        )
+        if any(re.search(pattern, lowered) for pattern in labeling_patterns):
+            return False
         patterns = (
             r"\b(?:i|we)\s+(?:will|can|am going to|are going to|would)\s+(?:call|dial)\b",
             r"\b(?:calling|dialing)\b(?:(?![.!?]).){0,120}\b(?:now|for you)\b",
@@ -9055,6 +9065,7 @@ class CoroutineWorkspace:
             parts.append(topic.strip())
         if isinstance(location, str) and location.strip():
             parts.append(f"at {location.strip()}")
+        entry["display"] = " ".join(parts)
         attendee_ids = cls._string_list(entry.get("attendees"))
         if attendee_ids:
             entry["attendee_ids"] = attendee_ids
@@ -9064,8 +9075,22 @@ class CoroutineWorkspace:
             entry["unknown_response_fields"] = [
                 "result.get_entries_from_calendar.meetings.attendees"
             ]
-        entry["display"] = " ".join(parts)
+            entry["attendees_unavailable_message"] = (
+                cls._calendar_attendees_unavailable_message(entry)
+            )
         return entry
+
+    @staticmethod
+    def _calendar_attendees_unavailable_message(entry: dict[str, Any]) -> str:
+        meeting_label = str(
+            entry.get("display") or entry.get("topic") or "the calendar meeting"
+        )
+        return (
+            f"I found {meeting_label}, but the calendar entry does not provide "
+            "attendee identities. I don't have an available tool that can look up "
+            "attendee identities for that meeting, so I can't address an email to "
+            "the attendees."
+        )
 
     @staticmethod
     def _string_list(value: Any) -> list[str]:
@@ -11663,14 +11688,9 @@ class CoroutineWorkspace:
         if not attendee_ids:
             attendee_ids = self._string_list(selected.get("attendees"))
         if not attendee_ids:
-            meeting_label = str(
-                selected.get("display")
-                or selected.get("topic")
-                or "the calendar meeting"
-            )
-            message = (
-                f"I found {meeting_label}, but the calendar entry does not provide "
-                "attendee identities, so I can't address an email to the attendees."
+            message = str(
+                selected.get("attendees_unavailable_message")
+                or self._calendar_attendees_unavailable_message(selected)
             )
             report = self._store_helper_report(
                 gate_name,
@@ -14777,9 +14797,13 @@ class CoroutineWorkspace:
         else:
             message = "No heatable front seats matched the requested occupancy-based seat-heating targets."
         if occupied_rear_unheated:
+            affected_rear = _human_join(
+                [seat.replace("_", " ") for seat in occupied_rear_unheated]
+            )
             message += (
-                " Seat heating is unavailable for occupied rear seats: "
-                f"{_human_join([seat.replace('_', ' ') for seat in occupied_rear_unheated])}."
+                " I could not check or set seat heating for occupied rear seats because "
+                "only front-seat heating controls are available."
+                f" Affected occupied rear seats: {affected_rear}."
             )
         if unavailable_levels and actions:
             message += (

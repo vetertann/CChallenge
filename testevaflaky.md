@@ -45,8 +45,56 @@ Additional current evidence:
   fastest replacement passed policy but failed action matching, while
   shortest-after-user-selection passed all action/tool checks but failed only
   the policy LLM.
+- `disambiguation_29` is organizer-confirmed evaluator-side. The assistant
+  correctly treated "change my destination to Barcelona; looking for a good
+  restaurant there" as a POI-resolution task, waited for the restaurant and
+  explicit route choice, then called the official final-destination replacement
+  tool with the selected restaurant and route. All action/tool checks passed;
+  only the policy LLM incorrectly demanded proactive fastest-route selection.
 
 ## Strong Eval-Side Cases
+
+### `disambiguation_29`: explicit POI destination and route choice judged as default-fastest
+
+Classification: organizer-confirmed evaluator-side issue.
+
+Organizer feedback:
+`The instruction for the user is not clear enough so it acts not leading to the intended ground truth. But yes, from that trace assistant acts correctly, so it is evaluator side.`
+
+Why this is not an agent fix:
+- The initial request can reasonably mean that the real new destination is a
+  restaurant in Barcelona, not Barcelona city itself.
+- The action oracle accepted that reading: all action and tool checks passed
+  when the assistant waited for the restaurant choice and then changed the
+  final destination directly to that restaurant.
+- After the restaurant was resolved, the user explicitly selected the route via
+  `A53, A85, B884`, so the "no route selection specified" default-fastest
+  condition no longer applied.
+
+Trace evidence:
+- `get_routes_from_start_to_destination` for Madrid to Barcelona returned
+  `rll_mad_bar_404893` via `L169, L468` as fastest/shortest and
+  `rll_mad_bar_523698` via `A53, A85, B884` as second.
+- `search_poi_at_location` found `El Rincón de Tapas`.
+- The user then said: `I'd like to go to El Rincón de Tapas. What are the other route options to Barcelona?`
+- The assistant fetched routes directly to `poi_res_853877`; the user selected:
+  `I'd like to take the route via A53, A85, B884.`
+- The assistant called:
+  `navigation_replace_final_destination(new_destination_id="poi_res_853877", route_id_leading_to_new_destination="rlp_mad_res_588035")`.
+- Tool result: `destination_replaced=true`.
+
+Evaluator fields in the failing branch:
+- `r_actions = 1.0`
+- `r_actions_intermediate = 1.0`
+- `r_actions_final = 1.0`
+- `r_tool_subset = 1.0`
+- `r_tool_execution = 1.0`
+- `r_policy = 0.0`
+
+Interpretation:
+Count this as a pass for adjusted-score analysis. Do not tune the agent to
+mutate navigation to Barcelona city before the POI is resolved, and do not
+override an explicit user-selected route with the default fastest route.
 
 ### `disambiguation_39`: confirmation simulator branch stops before required `send_email`
 
