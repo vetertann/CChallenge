@@ -85,8 +85,8 @@ _WRAPPED_TOOL_USAGE_NOTES = {
         "Python read wrapper for current ambient-light on/off state and color."
     ),
     "get_car_color": (
-        "Python read wrapper for the vehicle color. Direct get_car_color() returns "
-        "the color string, e.g. PURPLE."
+        "Python read wrapper for the vehicle color. Read result_value(get_car_color()) "
+        "or get_car_color()['result'] for the color string, e.g. PURPLE."
     ),
     "get_charging_specs_and_status": (
         "Python read wrapper for battery specs, SOC, and remaining_range. Read it "
@@ -138,8 +138,9 @@ _WRAPPED_TOOL_USAGE_NOTES = {
         "heating or reading-light actions."
     ),
     "get_steering_wheel_heating_level": (
-        "Python read wrapper for current steering-wheel heating level. Direct "
-        "get_steering_wheel_heating_level() returns the integer level."
+        "Python read wrapper for current steering-wheel heating level. Read "
+        "result_value(get_steering_wheel_heating_level()) or "
+        "get_steering_wheel_heating_level()['result'] for the integer level."
     ),
     "get_sunroof_and_sunshade_position": (
         "Python read wrapper for current sunroof and sunshade percentages."
@@ -148,8 +149,9 @@ _WRAPPED_TOOL_USAGE_NOTES = {
         "Python read wrapper for current driver/passenger cabin temperatures."
     ),
     "get_trunk_door_position": (
-        "Python read wrapper for current trunk-door position. Direct "
-        "get_trunk_door_position() returns the position string, e.g. closed."
+        "Python read wrapper for current trunk-door position. Read "
+        "result_value(get_trunk_door_position()) or "
+        "get_trunk_door_position()['result'] for the position string, e.g. closed."
     ),
     "get_user_preferences": (
         "Python read wrapper for learned preferences. Treat preferences as evidence "
@@ -275,9 +277,9 @@ _WRAPPED_TOOL_USAGE_NOTES = {
 
 
 _COMPACT_WRAPPED_TOOL_SIGNATURES = {
-    "get_car_color": "get_car_color() -> str",
-    "get_steering_wheel_heating_level": "get_steering_wheel_heating_level() -> int",
-    "get_trunk_door_position": "get_trunk_door_position() -> str",
+    "get_car_color": "get_car_color()",
+    "get_steering_wheel_heating_level": "get_steering_wheel_heating_level()",
+    "get_trunk_door_position": "get_trunk_door_position()",
     "planning_tool": "planning_tool(command, ...)",
 }
 
