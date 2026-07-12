@@ -2226,6 +2226,84 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(result.response_text, "507.0")
 
+    def test_charging_time_dynamic_key_aliased_inside_result_value(self):
+        ws, ex = self.make(
+            {
+                "calculate_charging_time_by_soc": (
+                    "SUCCESS",
+                    {"time_from_10.0_until_80.0_percent_soc": "14min"},
+                )
+            },
+            {
+                "calculate_charging_time_by_soc": tool_schema(
+                    "calculate_charging_time_by_soc",
+                    {
+                        "charging_station_id": {"type": "string"},
+                        "charging_station_plug_id": {"type": "string"},
+                        "start_state_of_charge": {"type": "number"},
+                        "target_state_of_charge": {"type": "number"},
+                    },
+                )
+            },
+        )
+
+        result = ex.run(
+            "charge_time = calculate_charging_time_by_soc(\n"
+            "    charging_station_id='poi_cha_1',\n"
+            "    charging_station_plug_id='plug_1',\n"
+            "    start_state_of_charge=10,\n"
+            "    target_state_of_charge=80,\n"
+            ")\n"
+            "payload = result_value(charge_time)\n"
+            "respond(f\"{payload.get('minutes')}|{payload.get('time')}|{payload.get('charging_time')}|{charge_time.get('minutes')}\")"
+        )
+
+        self.assertEqual(result.response_text, "14|14 min|14 min|14")
+        plan = ws.scratchpad["entities"]["selected_charging_plan"]
+        self.assertEqual(plan["result"]["minutes"], 14)
+        self.assertEqual(plan["result"]["time"], "14 min")
+        self.assertNotIn("time_from_10.0_until_80.0_percent_soc", plan["result"])
+
+    def test_charging_time_model_minutes_pattern_does_not_false_fail(self):
+        ws, ex = self.make(
+            {
+                "calculate_charging_time_by_soc": (
+                    "SUCCESS",
+                    {"time_from_10.0_until_80.0_percent_soc": "14min"},
+                )
+            },
+            {
+                "calculate_charging_time_by_soc": tool_schema(
+                    "calculate_charging_time_by_soc",
+                    {
+                        "charging_station_id": {"type": "string"},
+                        "charging_station_plug_id": {"type": "string"},
+                        "start_state_of_charge": {"type": "number"},
+                        "target_state_of_charge": {"type": "number"},
+                    },
+                )
+            },
+        )
+
+        result = ex.run(
+            "charge_time = calculate_charging_time_by_soc(\n"
+            "    charging_station_id='poi_cha_1',\n"
+            "    charging_station_plug_id='plug_1',\n"
+            "    start_state_of_charge=10,\n"
+            "    target_state_of_charge=80,\n"
+            ")\n"
+            "minutes = result_value(charge_time, {}).get('minutes')\n"
+            "if minutes is None:\n"
+            "    respond(\"I couldn't calculate the charging time right now.\")\n"
+            "else:\n"
+            "    respond(f\"Charging to 80% will take about {int(minutes)} minutes.\")"
+        )
+
+        self.assertEqual(
+            result.response_text,
+            "Charging to 80% will take about 14 minutes.",
+        )
+
     def test_car_color_direct_wrapper_returns_standard_envelope(self):
         ws, ex = self.make(
             {"get_car_color": ("SUCCESS", {"car_color": "PURPLE"})},

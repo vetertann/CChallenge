@@ -18696,6 +18696,37 @@ class CoroutineWorkspace:
                 normalized.setdefault("distance_km", distance_km)
                 normalized.setdefault("distance", distance_display)
                 normalized.setdefault("summary", f"distance: {distance_display}")
+        if tool_name == "calculate_charging_time_by_soc":
+            minutes = self._parse_first_number(normalized.get("minutes"))
+            raw_key: str | None = None
+            raw_value: Any = None
+            for key in list(normalized):
+                if not isinstance(key, str):
+                    continue
+                key_text = key.lower()
+                if key_text in {"status", "minutes", "time", "charging_time", "summary"}:
+                    continue
+                if (
+                    key_text.startswith("time_")
+                    or "charging_time" in key_text
+                    or ("time" in key_text and ("_from_" in key_text or "_until_" in key_text))
+                ):
+                    value = normalized.pop(key)
+                    parsed_minutes = self._parse_first_number(value)
+                    if parsed_minutes is not None:
+                        minutes = parsed_minutes
+                        raw_key = key
+                        raw_value = value
+                        break
+            if minutes is not None:
+                time_display = f"{minutes:g} min"
+                normalized.setdefault("minutes", minutes)
+                normalized.setdefault("charging_time", time_display)
+                normalized.setdefault("time", time_display)
+                normalized.setdefault("summary", f"charging time: {time_display}")
+                if raw_key is not None:
+                    normalized.setdefault("raw_key", raw_key)
+                    normalized.setdefault("raw_value", raw_value)
         if tool_name == "get_temperature_inside_car":
             temperatures_by_zone: dict[str, Any] = {}
             for zone, key in (
