@@ -493,6 +493,173 @@ class GuardTests(unittest.TestCase):
         self.assertIn("unavailable", result.response_text.casefold())
         self.assertNotIn("what level", result.response_text.casefold())
 
+    def test_missing_action_value_helper_reports_missing_tool_before_asking(self):
+        ws, ex = self.make({}, {})
+
+        result = ex.run(
+            "ask_for_missing_action_value(\n"
+            "    requirements=[{'tool_name': 'set_steering_wheel_heating', 'arguments': ['level']}],\n"
+            "    action='set steering wheel heating',\n"
+            "    question='What steering wheel heating level should I use?',\n"
+            ")"
+        )
+
+        self.assertIn("can't set steering wheel heating", result.response_text)
+        self.assertIn("steering wheel heating", result.response_text.casefold())
+        self.assertIn("unavailable", result.response_text.casefold())
+        self.assertNotIn("what steering wheel heating level", result.response_text.casefold())
+        self.assertEqual(ws.bridge.requests, [])
+
+    def test_missing_action_value_helper_reports_missing_parameter_before_asking(self):
+        ws, ex = self.make(
+            {},
+            {
+                "set_steering_wheel_heating": tool_schema(
+                    "set_steering_wheel_heating",
+                    {"on": {"type": "boolean"}},
+                    required=["on"],
+                ),
+            },
+        )
+
+        result = ex.run(
+            "ask_for_missing_action_value(\n"
+            "    requirements=[{'tool_name': 'set_steering_wheel_heating', 'arguments': ['level']}],\n"
+            "    action='set steering wheel heating',\n"
+            "    question='What steering wheel heating level should I use?',\n"
+            ")"
+        )
+
+        self.assertIn("can't set steering wheel heating", result.response_text)
+        self.assertIn("missing the required tool parameter", result.response_text)
+        self.assertIn("set_steering_wheel_heating.level", result.response_text)
+        self.assertNotIn("what steering wheel heating level", result.response_text.casefold())
+        self.assertEqual(ws.bridge.requests, [])
+
+    def test_missing_action_value_helper_asks_when_tool_and_parameter_available(self):
+        ws, ex = self.make(
+            {},
+            {
+                "set_steering_wheel_heating": tool_schema(
+                    "set_steering_wheel_heating",
+                    {"level": {"type": "integer"}},
+                    required=["level"],
+                ),
+            },
+        )
+
+        result = ex.run(
+            "ask_for_missing_action_value(\n"
+            "    requirements=[{'tool_name': 'set_steering_wheel_heating', 'arguments': ['level']}],\n"
+            "    action='set steering wheel heating',\n"
+            "    question='What steering wheel heating level should I use?',\n"
+            ")"
+        )
+
+        self.assertEqual(result.response_text, "What steering wheel heating level should I use?")
+        self.assertEqual(ws.bridge.requests, [])
+        self.assertEqual(
+            ws.scratchpad["gates"]["ask_for_missing_action_value"]["status"],
+            "NEEDS_CLARIFICATION",
+        )
+
+    def test_missing_action_value_helper_rejects_workspace_helper_requirements(self):
+        ws, _ex = self.make({}, {})
+
+        with self.assertRaisesRegex(ValueError, "not workspace helpers"):
+            ws.ask_for_missing_action_value(
+                requirements=[
+                    {"tool_name": "set_occupied_seat_heating", "arguments": ["level"]},
+                ],
+                action="set occupied seat heating",
+                question="What seat-heating level should I use?",
+            )
+
+    def test_missing_action_value_helper_rejects_lookup_tools(self):
+        ws, _ex = self.make(
+            {},
+            {
+                "get_location_id_by_location_name": tool_schema(
+                    "get_location_id_by_location_name",
+                    {"location": {"type": "string"}},
+                    required=["location"],
+                ),
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "read, lookup, search"):
+            ws.ask_for_missing_action_value(
+                requirements=[
+                    {
+                        "tool_name": "get_location_id_by_location_name",
+                        "arguments": ["location"],
+                    },
+                ],
+                action="change final destination",
+                question="Which city do you mean?",
+            )
+
+    def test_preferred_climate_temperature_reads_stored_driver_preference(self):
+        ws, _ex = self.make({}, {})
+        ws.scratchpad["entities"]["user_preferences"] = {
+            "status": "SUCCESS",
+            "preferences": {
+                "vehicle_settings": {
+                    "climate_control": [
+                        "user (driver) comfort temperature level is 22 degrees",
+                    ],
+                },
+            },
+            "summary": [
+                "vehicle_settings.climate_control: "
+                "user (driver) comfort temperature level is 22 degrees",
+            ],
+        }
+
+        result = ws.get_preferred_climate_temperature(seat_zone="DRIVER")
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(result["temperature"], 22)
+        self.assertEqual(result["temperature_unit"], "Celsius")
+
+    def test_missing_action_value_helper_blocks_preference_backed_climate_temperature(self):
+        ws, _ex = self.make(
+            {},
+            {
+                "set_climate_temperature": tool_schema(
+                    "set_climate_temperature",
+                    {
+                        "seat_zone": {"type": "string"},
+                        "temperature": {"type": "number"},
+                    },
+                    required=["seat_zone", "temperature"],
+                ),
+            },
+        )
+        ws.scratchpad["entities"]["user_preferences"] = {
+            "status": "SUCCESS",
+            "preferences": {
+                "vehicle_settings": {
+                    "climate_control": [
+                        "user (driver) comfort temperature level is 22 degrees",
+                    ],
+                },
+            },
+            "summary": [
+                "vehicle_settings.climate_control: "
+                "user (driver) comfort temperature level is 22 degrees",
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "already resolve this climate temperature"):
+            ws.ask_for_missing_action_value(
+                requirements=[
+                    {"tool_name": "set_climate_temperature", "arguments": ["temperature"]},
+                ],
+                action="set driver zone temperature",
+                question="What temperature should I set for the driver zone?",
+            )
+
     def test_pending_confirmation_survives_preflight_read_only(self):
         ws, ex = self.make(
             {
@@ -1376,6 +1543,67 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(result.response_text, "Window positions synchronized.")
 
+    def test_sync_window_positions_rejects_mismatched_groups_for_model_retry(self):
+        ws, ex = self.make({}, {})
+
+        result = ex.run("sync_window_positions(source_windows='REAR', target_windows='ALL')")
+
+        self.assertIsNone(result.response_text)
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.error["type"], "ValueError")
+        self.assertIn("incompatible group sizes", result.error["message"])
+        self.assertIn("PASSENGER_REAR", result.error["message"])
+        self.assertEqual(
+            ws.scratchpad["gates"]["sync_window_positions"]["status"],
+            "BAD_ARGUMENT",
+        )
+        self.assertEqual(ws.bridge.requests, [])
+
+    def test_sync_window_positions_copies_one_exact_source_to_all_windows(self):
+        ws, ex = self.make(
+            {
+                "get_vehicle_window_positions": (
+                    "SUCCESS",
+                    {
+                        "window_driver_position": 25,
+                        "window_passenger_position": 50,
+                        "window_driver_rear_position": 25,
+                        "window_passenger_rear_position": 5,
+                    },
+                ),
+                "open_close_window": ("SUCCESS", {}),
+            },
+            {
+                "get_vehicle_window_positions": tool_schema("get_vehicle_window_positions", {}),
+                "open_close_window": tool_schema(
+                    "open_close_window",
+                    {"window": {"type": "string"}, "percentage": {"type": "number"}},
+                ),
+            },
+        )
+
+        result = ex.run(
+            "report = sync_window_positions("
+            "source_windows='PASSENGER_REAR', target_windows='ALL')\n"
+            "respond(report['message'])"
+        )
+
+        calls = [
+            call["arguments"]
+            for batch in ws.bridge.requests
+            for call in batch
+            if call["tool_name"] == "open_close_window"
+        ]
+        self.assertEqual(
+            calls,
+            [
+                {"window": "DRIVER", "percentage": 5},
+                {"window": "PASSENGER", "percentage": 5},
+                {"window": "DRIVER_REAR", "percentage": 5},
+            ],
+        )
+        self.assertEqual(result.response_text, "Window positions synchronized.")
+
     def test_raw_ac_on_delegates_to_policy_helper(self):
         ws, ex = self.make(
             {
@@ -1998,7 +2226,85 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(result.response_text, "507.0")
 
-    def test_car_color_direct_wrapper_returns_scalar_value(self):
+    def test_charging_time_dynamic_key_aliased_inside_result_value(self):
+        ws, ex = self.make(
+            {
+                "calculate_charging_time_by_soc": (
+                    "SUCCESS",
+                    {"time_from_10.0_until_80.0_percent_soc": "14min"},
+                )
+            },
+            {
+                "calculate_charging_time_by_soc": tool_schema(
+                    "calculate_charging_time_by_soc",
+                    {
+                        "charging_station_id": {"type": "string"},
+                        "charging_station_plug_id": {"type": "string"},
+                        "start_state_of_charge": {"type": "number"},
+                        "target_state_of_charge": {"type": "number"},
+                    },
+                )
+            },
+        )
+
+        result = ex.run(
+            "charge_time = calculate_charging_time_by_soc(\n"
+            "    charging_station_id='poi_cha_1',\n"
+            "    charging_station_plug_id='plug_1',\n"
+            "    start_state_of_charge=10,\n"
+            "    target_state_of_charge=80,\n"
+            ")\n"
+            "payload = result_value(charge_time)\n"
+            "respond(f\"{payload.get('minutes')}|{payload.get('time')}|{payload.get('charging_time')}|{charge_time.get('minutes')}\")"
+        )
+
+        self.assertEqual(result.response_text, "14|14 min|14 min|14")
+        plan = ws.scratchpad["entities"]["selected_charging_plan"]
+        self.assertEqual(plan["result"]["minutes"], 14)
+        self.assertEqual(plan["result"]["time"], "14 min")
+        self.assertNotIn("time_from_10.0_until_80.0_percent_soc", plan["result"])
+
+    def test_charging_time_model_minutes_pattern_does_not_false_fail(self):
+        ws, ex = self.make(
+            {
+                "calculate_charging_time_by_soc": (
+                    "SUCCESS",
+                    {"time_from_10.0_until_80.0_percent_soc": "14min"},
+                )
+            },
+            {
+                "calculate_charging_time_by_soc": tool_schema(
+                    "calculate_charging_time_by_soc",
+                    {
+                        "charging_station_id": {"type": "string"},
+                        "charging_station_plug_id": {"type": "string"},
+                        "start_state_of_charge": {"type": "number"},
+                        "target_state_of_charge": {"type": "number"},
+                    },
+                )
+            },
+        )
+
+        result = ex.run(
+            "charge_time = calculate_charging_time_by_soc(\n"
+            "    charging_station_id='poi_cha_1',\n"
+            "    charging_station_plug_id='plug_1',\n"
+            "    start_state_of_charge=10,\n"
+            "    target_state_of_charge=80,\n"
+            ")\n"
+            "minutes = result_value(charge_time, {}).get('minutes')\n"
+            "if minutes is None:\n"
+            "    respond(\"I couldn't calculate the charging time right now.\")\n"
+            "else:\n"
+            "    respond(f\"Charging to 80% will take about {int(minutes)} minutes.\")"
+        )
+
+        self.assertEqual(
+            result.response_text,
+            "Charging to 80% will take about 14 minutes.",
+        )
+
+    def test_car_color_direct_wrapper_returns_standard_envelope(self):
         ws, ex = self.make(
             {"get_car_color": ("SUCCESS", {"car_color": "PURPLE"})},
             {"get_car_color": tool_schema("get_car_color", {})},
@@ -2006,12 +2312,12 @@ class GuardTests(unittest.TestCase):
 
         result = ex.run(
             "color = get_car_color()\n"
-            "respond(color)"
+            "respond(f\"{color['status']}|{color['result']}|{color['car_color']}\")"
         )
 
-        self.assertEqual(result.response_text, "PURPLE")
+        self.assertEqual(result.response_text, "SUCCESS|PURPLE|PURPLE")
 
-    def test_car_color_result_value_accepts_already_unwrapped_scalar(self):
+    def test_car_color_result_value_unwraps_standard_envelope(self):
         ws, ex = self.make(
             {"get_car_color": ("SUCCESS", {"car_color": "PURPLE"})},
             {"get_car_color": tool_schema("get_car_color", {})},
@@ -2023,6 +2329,40 @@ class GuardTests(unittest.TestCase):
         )
 
         self.assertEqual(result.response_text, "PURPLE")
+
+    def test_car_color_dict_unwrap_pattern_sets_ambient_lights(self):
+        ws, ex = self.make(
+            {
+                "get_car_color": ("SUCCESS", {"car_color": "WHITE"}),
+                "set_ambient_lights": ("SUCCESS", {"on": True, "lightcolor": "WHITE"}),
+            },
+            {
+                "get_car_color": tool_schema("get_car_color", {}),
+                "set_ambient_lights": tool_schema(
+                    "set_ambient_lights",
+                    {
+                        "on": {"type": "boolean"},
+                        "lightcolor": {"type": "string"},
+                    },
+                    required=["on", "lightcolor"],
+                ),
+            },
+        )
+
+        result = ex.run(
+            "color_result = get_car_color()\n"
+            "car_color = color_result.get('result') if isinstance(color_result, dict) else None\n"
+            "if not car_color:\n"
+            "    respond('Sorry, I could not determine the car color.')\n"
+            "else:\n"
+            "    set_ambient_lights(on=True, lightcolor=car_color)\n"
+            "    respond(f'Ambient lights set to match the car color: {car_color}.')"
+        )
+
+        self.assertEqual(
+            result.response_text,
+            "Ambient lights set to match the car color: WHITE.",
+        )
 
     def test_car_color_batch_result_unwraps_to_scalar_value(self):
         ws, ex = self.make(
@@ -2038,21 +2378,23 @@ class GuardTests(unittest.TestCase):
 
         self.assertEqual(result.response_text, "PURPLE")
 
-    def test_zero_arg_single_value_reads_return_scalar_values(self):
+    def test_zero_arg_single_value_reads_return_standard_envelopes(self):
         cases = [
             (
                 "get_steering_wheel_heating_level",
                 {"steering_wheel_heating": 1},
-                "1",
+                "steering_wheel_heating",
+                "1|1",
             ),
             (
                 "get_trunk_door_position",
                 {"trunk_door_position": "closed"},
-                "closed",
+                "trunk_door_position",
+                "closed|closed",
             ),
         ]
 
-        for tool_name, payload, expected in cases:
+        for tool_name, payload, field, expected in cases:
             with self.subTest(tool_name=tool_name):
                 ws, ex = self.make(
                     {tool_name: ("SUCCESS", payload)},
@@ -2061,7 +2403,7 @@ class GuardTests(unittest.TestCase):
 
                 result = ex.run(
                     f"value = {tool_name}()\n"
-                    "respond(str(value))"
+                    f"respond(f\"{{value['result']}}|{{value['{field}']}}\")"
                 )
 
                 self.assertEqual(result.response_text, expected)
@@ -9911,6 +10253,123 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(call["arguments"]["email_addresses"], ["other@example.com"])
         self.assertNotIn("contact_recipient_role_guard", ws.scratchpad["gates"])
 
+    def test_pending_email_content_blocks_silent_recipient_role_overwrite(self):
+        tools = {
+            "get_contact_information": tool_schema(
+                "get_contact_information",
+                {"contact_ids": {"type": "array", "items": {"type": "string"}}},
+                required=["contact_ids"],
+            ),
+            "send_email": tool_schema(
+                "send_email",
+                {
+                    "email_addresses": {"type": "array", "items": {"type": "string"}},
+                    "content_message": {"type": "string"},
+                },
+                required=["email_addresses", "content_message"],
+                description="REQUIRES_CONFIRMATION Send an email.",
+            ),
+        }
+        contacts_payload = {
+            "con_recipient": {
+                "email": "recipient@example.com",
+                "phone_number": "+15550100",
+            },
+            "con_subject": {
+                "email": "subject@example.com",
+                "phone_number": "+15550200",
+            },
+        }
+        ws, ex = self.make(
+            {"get_contact_information": ("SUCCESS", contacts_payload)},
+            tools,
+        )
+
+        ws.observe_user("Email the grounded contact.")
+        first = ex.run(
+            "get_contact_details("
+            "'con_recipient', required_fields=['email'], role='email_recipient')\n"
+            "ask_for_missing_action_value(\n"
+            "    requirements=[{'tool_name': 'send_email', 'arguments': ['content_message']}],\n"
+            "    action='send email',\n"
+            "    question='What should the email say?',\n"
+            ")"
+        )
+        self.assertEqual(first.response_text, "What should the email say?")
+
+        ws.observe_user("Share the other contact's details.")
+        result = ex.run(
+            "get_contact_details("
+            "'con_subject', required_fields=['email', 'phone_number'], "
+            "role='email_recipient')"
+        )
+
+        self.assertIsNone(result.response_text)
+        self.assertIsNotNone(result.error)
+        self.assertEqual(result.error["type"], "ValueError")
+        self.assertIn("pending email draft already has recipient", result.error["message"])
+        self.assertIn("contact_details_subject", result.error["message"])
+        self.assertEqual(
+            ws.scratchpad["entities"]["contact_roles"]["email_recipient"]["contact_ids"],
+            ["con_recipient"],
+        )
+        self.assertEqual(
+            ws.scratchpad["gates"]["pending_email_recipient_role_guard"]["status"],
+            "BLOCKED",
+        )
+
+    def test_pending_email_content_still_allows_explicit_new_recipient_send(self):
+        tools = {
+            "get_contact_information": tool_schema(
+                "get_contact_information",
+                {"contact_ids": {"type": "array", "items": {"type": "string"}}},
+                required=["contact_ids"],
+            ),
+            "send_email": tool_schema(
+                "send_email",
+                {
+                    "email_addresses": {"type": "array", "items": {"type": "string"}},
+                    "content_message": {"type": "string"},
+                },
+                required=["email_addresses", "content_message"],
+                description="REQUIRES_CONFIRMATION Send an email.",
+            ),
+        }
+        ws, ex = self.make(
+            {
+                "get_contact_information": (
+                    "SUCCESS",
+                    {"con_recipient": {"email": "recipient@example.com"}},
+                ),
+                "send_email": ("SUCCESS", {}),
+            },
+            tools,
+        )
+
+        ws.observe_user("Email the grounded contact.")
+        ex.run(
+            "get_contact_details("
+            "'con_recipient', required_fields=['email'], role='email_recipient')\n"
+            "ask_for_missing_action_value(\n"
+            "    requirements=[{'tool_name': 'send_email', 'arguments': ['content_message']}],\n"
+            "    action='send email',\n"
+            "    question='What should the email say?',\n"
+            ")"
+        )
+        ws.observe_user("Actually send it to someone else.")
+        result = ex.run(
+            "send_email("
+            "email_addresses=['other@example.com'], "
+            "content_message='Updated message.')"
+        )
+
+        self.assertIsNone(result.error)
+        self.assertIn("other@example.com", result.response_text)
+        pending = ws.scratchpad["facts"]["pending_confirmation"]
+        call = pending["on_confirm_calls"][0]
+        self.assertEqual(call["arguments"]["email_addresses"], ["other@example.com"])
+        self.assertNotIn("pending_email_recipient_role_guard", ws.scratchpad["gates"])
+
     def test_email_confirmation_reports_same_turn_charging_search_result(self):
         tools = {
             "search_poi_along_the_route": tool_schema(
@@ -11038,6 +11497,46 @@ class GuardTests(unittest.TestCase):
                 "The second subgoal is complete.",
             ],
         )
+
+    def test_policy_warning_survives_terminal_clarification(self):
+        tools = {
+            "get_temperature_inside_car": tool_schema("get_temperature_inside_car", {}),
+            "set_climate_temperature": tool_schema(
+                "set_climate_temperature",
+                {"seat_zone": {"type": "string"}, "temperature": {"type": "number"}},
+            ),
+            "set_seat_heating": tool_schema(
+                "set_seat_heating",
+                {"seat_zone": {"type": "string"}, "level": {"type": "integer"}},
+            ),
+        }
+        responses = {
+            "get_temperature_inside_car": (
+                "SUCCESS",
+                {
+                    "climate_temperature_driver": 21,
+                    "climate_temperature_passenger": 20,
+                },
+            ),
+            "set_climate_temperature": ("SUCCESS", {}),
+        }
+        ws, ex = self.make(responses, tools)
+
+        result = ex.run(
+            "set_climate_temperature_safe(seat_zone='DRIVER', temperature=28)\n"
+            "ask_for_missing_action_value(\n"
+            "    requirements=[{'tool_name': 'set_seat_heating', 'arguments': ['level']}],\n"
+            "    action='turn on driver seat heating',\n"
+            "    question='What seat-heating level should I set for the driver seat?',\n"
+            ")"
+        )
+
+        self.assertIn("driver temperature set to 28 degrees Celsius", result.response_text)
+        self.assertIn("more than 3 degrees different", result.response_text)
+        self.assertIn("What seat-heating level should I set", result.response_text)
+        self.assertNotIn("more than 3 degrees different from the passenger side. Heads up", result.response_text)
+        self.assertNotIn("pending_helper_messages", ws.scratchpad["facts"])
+        self.assertNotIn("pending_response_obligations", ws.scratchpad["facts"])
 
     def test_temperature_response_adds_celsius_after_successful_setter(self):
         tools = {

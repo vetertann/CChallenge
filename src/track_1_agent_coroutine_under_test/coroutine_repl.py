@@ -72,6 +72,16 @@ ORIGINAL_TOOL_SCHEMAS = _load_original_tool_schemas()
 ORIGINAL_TOOL_METADATA = _load_original_tool_metadata()
 ALL_TOOL_NAMES = list(ORIGINAL_TOOL_SCHEMAS)
 
+ASK_MISSING_ACTION_VALUE_DISALLOWED_PREFIXES = (
+    "get_",
+    "search_",
+    "calculate_",
+    "navigation_",
+)
+ASK_MISSING_ACTION_VALUE_DISALLOWED_TOOLS = {
+    "set_new_navigation",
+}
+
 WORKSPACE_HELPER_NAMES = (
     "handle_pending_confirmation",
     "get_distance_by_soc_value",
@@ -90,6 +100,7 @@ WORKSPACE_HELPER_NAMES = (
     "set_high_beams_on_safe",
     "set_exterior_lights_safe",
     "present_climate_comfort_options",
+    "ask_for_missing_action_value",
     "set_air_conditioning_on_safe",
     "close_known_windows_for_blocked_ac",
     "set_climate_temperature_safe",
@@ -124,6 +135,7 @@ WORKSPACE_HELPER_NAMES = (
     "plan_charging_for_next_meeting",
     "call_selected_charging_provider",
     "get_preferred_ambient_light_color",
+    "get_preferred_climate_temperature",
     "set_new_navigation_guarded",
     "get_routes_guarded",
     "get_weather_guarded",
@@ -164,8 +176,8 @@ SCRATCHPAD_ENTITY_ALIASES = frozenset(
 _RESERVED_BATCH_ENVELOPE_KEYS = frozenset({"status", "tool_name", "tool_call_id", "result"})
 
 # Zero-argument read tools whose successful result is one scalar fact. The Python
-# wrapper returns that value directly; failures still go through standard wrapper
-# failure/limitation handling.
+# wrapper returns the standard tool envelope with that scalar in result; failures
+# still go through standard wrapper failure/limitation handling.
 SINGLE_VALUE_READ_TOOL_FIELDS: dict[str, str] = {
     "get_car_color": "car_color",
     "get_steering_wheel_heating_level": "steering_wheel_heating",
@@ -1072,9 +1084,9 @@ class CoroutineWorkspace:
 
     def tool_signature(self, tool_name: str) -> str:
         helper_signatures = {
-            "get_car_color": "get_car_color() -> str",
-            "get_steering_wheel_heating_level": "get_steering_wheel_heating_level() -> int",
-            "get_trunk_door_position": "get_trunk_door_position() -> str",
+            "get_car_color": "get_car_color()",
+            "get_steering_wheel_heating_level": "get_steering_wheel_heating_level()",
+            "get_trunk_door_position": "get_trunk_door_position()",
             "handle_pending_confirmation": "handle_pending_confirmation()",
             "defrost_front_window": "defrost_front_window()",
             "open_sunroof_safe": "open_sunroof_safe(percentage)",
@@ -1082,6 +1094,9 @@ class CoroutineWorkspace:
             "set_high_beams_on_safe": "set_high_beams_on_safe()",
             "set_exterior_lights_safe": "set_exterior_lights_safe(intent)",
             "present_climate_comfort_options": "present_climate_comfort_options(intent)",
+            "ask_for_missing_action_value": (
+                "ask_for_missing_action_value(requirements, question, action=None)"
+            ),
             "get_distance_by_soc_value": (
                 "get_distance_by_soc_value(initial_state_of_charge, final_state_of_charge=0)"
             ),
@@ -1215,6 +1230,9 @@ class CoroutineWorkspace:
             ),
             "call_selected_charging_provider": "call_selected_charging_provider()",
             "get_preferred_ambient_light_color": "get_preferred_ambient_light_color()",
+            "get_preferred_climate_temperature": (
+                "get_preferred_climate_temperature(seat_zone=None)"
+            ),
         }
         if tool_name in helper_signatures:
             return helper_signatures[tool_name]
@@ -1629,7 +1647,10 @@ class CoroutineWorkspace:
                     "requests. It reads get_vehicle_window_positions, requires both "
                     "the source and target current window-position fields to be known, "
                     "then copies each source percentage to the paired target window via "
-                    "open_close_window_safe. It does not inspect raw user text."
+                    "open_close_window_safe. One exact source window may be copied to "
+                    "many target windows; grouped sources require equal-size grouped "
+                    "targets or equal-length explicit lists. It does not inspect raw "
+                    "user text."
                 ),
                 "required_arguments": ["source_windows", "target_windows"],
                 "optional_arguments": [],
@@ -1641,7 +1662,9 @@ class CoroutineWorkspace:
                             "description": (
                                 "One window, group, or list resolved by the model. "
                                 "Supported values include FRONT, REAR, ALL, DRIVER, "
-                                "PASSENGER, DRIVER_REAR, PASSENGER_REAR."
+                                "PASSENGER, DRIVER_REAR, PASSENGER_REAR. If the user "
+                                "names one exact source window, pass the exact source "
+                                "instead of broadening it to a group."
                             ),
                         },
                         "target_windows": {
@@ -2781,6 +2804,33 @@ class CoroutineWorkspace:
                 "schema": {"type": "object", "required": [], "properties": {}},
                 "argument_descriptions": {},
             }
+        if tool_name == "get_preferred_climate_temperature":
+            return {
+                "name": "get_preferred_climate_temperature",
+                "signature": "get_preferred_climate_temperature(seat_zone=None)",
+                "confirmation_required": False,
+                "description": (
+                    "Built-in read-only preference helper. Reads already preflighted "
+                    "vehicle climate preferences from scratchpad and extracts a unique "
+                    "stored temperature for the requested seat zone when present. "
+                    "Returns NOT_FOUND or AMBIGUOUS instead of choosing."
+                ),
+                "required_arguments": [],
+                "optional_arguments": ["seat_zone"],
+                "schema": {
+                    "type": "object",
+                    "required": [],
+                    "properties": {
+                        "seat_zone": {
+                            "type": "string",
+                            "enum": ["DRIVER", "PASSENGER", "ALL_ZONES"],
+                        },
+                    },
+                },
+                "argument_descriptions": {
+                    "seat_zone": "Optional climate zone whose stored preference should be used.",
+                },
+            }
         if tool_name == "set_occupied_seat_heating":
             return {
                 "name": "set_occupied_seat_heating",
@@ -2939,12 +2989,10 @@ class CoroutineWorkspace:
         properties = schema.get("properties", {}) or {}
         return all(str(name) in properties for name in argument_names)
 
-    def capability_claim_gate(
+    def _capability_requirements_status(
         self,
         requirements: list[Any],
-        gate_name: str = "capability_claim",
-    ) -> bool:
-        self._ensure_scratchpad_shape()
+    ) -> dict[str, Any]:
         normalized: list[dict[str, Any]] = []
         missing_tools: list[str] = []
         missing_arguments: list[dict[str, Any]] = []
@@ -2965,7 +3013,7 @@ class CoroutineWorkspace:
                     raw_args = item[1]
                     argument_names = [raw_args] if isinstance(raw_args, str) else [str(name) for name in raw_args or []]
             if not tool_name:
-                raise ValueError("capability_claim_gate requirements must include a tool name")
+                raise ValueError("capability requirements must include a tool name")
             normalized.append({"tool_name": tool_name, "arguments": argument_names})
             if not self.tool_available(tool_name):
                 missing_tools.append(tool_name)
@@ -2975,14 +3023,157 @@ class CoroutineWorkspace:
                 missing = [name for name in argument_names if name not in properties]
                 if missing:
                     missing_arguments.append({"tool_name": tool_name, "missing_arguments": missing})
-        ok = not missing_tools and not missing_arguments
-        self.scratchpad["gates"][gate_name] = {
-            "status": "YES" if ok else "NO",
+        return {
+            "ok": not missing_tools and not missing_arguments,
             "requirements": normalized,
-            "missing_tools": missing_tools,
+            "missing_tools": sorted(set(missing_tools)),
             "missing_arguments": missing_arguments,
         }
+
+    def capability_claim_gate(
+        self,
+        requirements: list[Any],
+        gate_name: str = "capability_claim",
+    ) -> bool:
+        self._ensure_scratchpad_shape()
+        status = self._capability_requirements_status(requirements)
+        ok = bool(status["ok"])
+        self.scratchpad["gates"][gate_name] = {
+            "status": "YES" if ok else "NO",
+            "requirements": status["requirements"],
+            "missing_tools": status["missing_tools"],
+            "missing_arguments": status["missing_arguments"],
+        }
         return ok
+
+    def ask_for_missing_action_value(
+        self,
+        requirements: list[Any],
+        question: str,
+        action: str | None = None,
+    ) -> dict[str, Any]:
+        """Ask a clarification only after checking the requested action exists.
+
+        This helper is for concrete side effects whose user-level value is still
+        unresolved. It checks only the live per-task tool surface; it does not
+        call the action tool and does not compare against any external catalog.
+        """
+
+        gate_name = "ask_for_missing_action_value"
+        self._ensure_scratchpad_shape()
+        if not isinstance(requirements, list) or not requirements:
+            raise ValueError("ask_for_missing_action_value requires a non-empty requirements list")
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("ask_for_missing_action_value requires a non-empty question")
+        status = self._capability_requirements_status(requirements)
+        helper_requirements = [
+            req["tool_name"]
+            for req in status["requirements"]
+            if req["tool_name"] in WORKSPACE_HELPER_NAMES
+        ]
+        if helper_requirements:
+            helpers = ", ".join(sorted(set(helper_requirements)))
+            raise ValueError(
+                "ask_for_missing_action_value requirements must name wrapped "
+                "evaluator tools and parameters, not workspace helpers. "
+                f"Received workspace helper requirement(s): {helpers}. "
+                "For example, use set_seat_heating with arguments ['level'] "
+                "for a seat-heating level clarification."
+            )
+        invalid_action_tools = [
+            req["tool_name"]
+            for req in status["requirements"]
+            if self._invalid_missing_action_value_tool(req["tool_name"])
+        ]
+        if invalid_action_tools:
+            tools = ", ".join(sorted(set(invalid_action_tools)))
+            raise ValueError(
+                "ask_for_missing_action_value is only for unresolved parameters "
+                "of concrete side-effect tools. Do not use it for read, lookup, "
+                "search, calculation, or navigation-planning tools. "
+                f"Invalid requirement tool(s): {tools}."
+            )
+        action_text = action
+        if not isinstance(action_text, str) or not action_text.strip():
+            first = status["requirements"][0]["tool_name"] if status["requirements"] else "requested action"
+            action_text = f"use {_tool_label(first)}"
+        if not status["ok"]:
+            return self._limitation_response(
+                gate_name,
+                action_text,
+                missing_tools=status["missing_tools"],
+                missing_arguments=status["missing_arguments"],
+            )
+        preference_blocker = self._missing_action_value_preference_blocker(
+            status["requirements"],
+            action_text,
+        )
+        if preference_blocker:
+            raise ValueError(preference_blocker)
+        message = question.strip()
+        report = {
+            "helper": gate_name,
+            "status": "NEEDS_CLARIFICATION",
+            "requirements": status["requirements"],
+            "action": _clean_action_phrase(action_text),
+            "message": message,
+            "side_effects": [],
+            "created_user_turn_index": self._user_turn_index,
+        }
+        self.scratchpad["gates"][gate_name] = {
+            "status": "NEEDS_CLARIFICATION",
+            "requirements": status["requirements"],
+            "action": report["action"],
+            "side_effects": [],
+            "created_user_turn_index": self._user_turn_index,
+        }
+        self._store_helper_report(gate_name, report)
+        self._abort_with_response(message)
+
+    @staticmethod
+    def _invalid_missing_action_value_tool(tool_name: str) -> bool:
+        if tool_name in ASK_MISSING_ACTION_VALUE_DISALLOWED_TOOLS:
+            return True
+        return tool_name.startswith(ASK_MISSING_ACTION_VALUE_DISALLOWED_PREFIXES)
+
+    def _missing_action_value_preference_blocker(
+        self,
+        requirements: list[dict[str, Any]],
+        action_text: str,
+    ) -> str | None:
+        for req in requirements:
+            if req.get("tool_name") != "set_climate_temperature":
+                continue
+            arguments = req.get("arguments") or []
+            if "temperature" not in arguments:
+                continue
+            seat_zone = self._seat_zone_hint_from_action(action_text)
+            preferred = self.get_preferred_climate_temperature(seat_zone=seat_zone)
+            if preferred.get("status") != "SUCCESS":
+                continue
+            temperature = preferred.get("temperature")
+            zone_text = seat_zone or "the applicable zone"
+            source = preferred.get("preference_text")
+            source_text = f" Preference: {source}" if source else ""
+            return (
+                "Stored preferences already resolve this climate temperature. "
+                f"Use get_preferred_climate_temperature(seat_zone={zone_text!r}) "
+                f"or call set_climate_temperature_safe(..., temperature={temperature!r}) "
+                "if that preference applies; do not ask the user for this value."
+                f"{source_text}"
+            )
+        return None
+
+    @staticmethod
+    def _seat_zone_hint_from_action(action_text: str) -> str | None:
+        text = action_text.casefold()
+        if "driver" in text or "user" in text:
+            return "DRIVER"
+        if "passenger" in text:
+            return "PASSENGER"
+        if "all zone" in text or "all-zone" in text or "all zones" in text:
+            return "ALL_ZONES"
+        return None
 
     def reset_actions(self) -> None:
         self._response_text = None
@@ -3172,6 +3363,39 @@ class CoroutineWorkspace:
                 output = output.rstrip().rstrip(".") + ". " + required.strip()
                 lowered = output.lower()
         return output
+
+    def _prepend_pending_helper_messages(self, message: str) -> str:
+        facts = self.scratchpad.get("facts")
+        messages = (
+            facts.get("pending_helper_messages")
+            if isinstance(facts, dict)
+            else None
+        )
+        if isinstance(facts, dict):
+            facts.pop("pending_helper_messages", None)
+        if not isinstance(messages, list):
+            return message
+        output = message.strip()
+        lowered = output.lower()
+        prefixes: list[str] = []
+        for item in messages:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            clean = item.strip()
+            if clean.lower() in lowered:
+                continue
+            prefixes.append(clean)
+            lowered = (clean + ". " + output).lower()
+        if not prefixes:
+            return output
+        prefix = ". ".join(part.rstrip().rstrip(".") for part in prefixes)
+        return prefix + ". " + output
+
+    def _compose_terminal_response(self, message: str) -> str:
+        """Preserve completed-helper disclosures before a terminal ask/block."""
+
+        message = self._prepend_pending_helper_messages(message)
+        return self._append_response_obligations(message)
 
     def _append_pending_route_narration(self, message: str) -> str:
         """Append a grounded route-selection sentence, once, if pending."""
@@ -4440,7 +4664,7 @@ class CoroutineWorkspace:
         return str(report.get("message") or "")
 
     def _abort_with_response(self, message: str) -> NoReturn:
-        self._respond_locked(message)
+        self._respond_locked(self._compose_terminal_response(message))
         raise ResponseReady()
 
     def _abort_missing_tool_response(
@@ -9282,6 +9506,80 @@ class CoroutineWorkspace:
             "user_turn_index": self._user_turn_index,
         }
 
+    def _pending_email_content_value_clarification(self) -> dict[str, Any] | None:
+        self._ensure_scratchpad_shape()
+        gates = self.scratchpad.get("gates")
+        if not isinstance(gates, dict):
+            return None
+        gate = gates.get("ask_for_missing_action_value")
+        if not isinstance(gate, dict):
+            return None
+        if gate.get("status") != "NEEDS_CLARIFICATION":
+            return None
+        created_turn = gate.get("created_user_turn_index")
+        if isinstance(created_turn, int) and not isinstance(created_turn, bool):
+            if created_turn < self._user_turn_index - 1:
+                return None
+        requirements = gate.get("requirements")
+        if not isinstance(requirements, list):
+            return None
+        for req in requirements:
+            if not isinstance(req, dict):
+                continue
+            if req.get("tool_name") != "send_email":
+                continue
+            arguments = req.get("arguments")
+            if isinstance(arguments, list) and "content_message" in arguments:
+                return gate
+        return None
+
+    def _guard_pending_email_recipient_role_overwrite(
+        self,
+        role_key: str,
+        contact_ids: list[str],
+    ) -> None:
+        recipient_roles = (
+            "email_recipient",
+            "message_recipient",
+            "recipient_contact",
+            "recipient",
+        )
+        if role_key not in recipient_roles:
+            return
+        if not self._pending_email_content_value_clarification():
+            return
+        existing = self._contact_role_entry(*recipient_roles)
+        existing_ids = self._contact_role_entry_contact_ids(existing)
+        if not existing_ids:
+            return
+        new_ids = [
+            contact_id
+            for contact_id in contact_ids
+            if isinstance(contact_id, str) and contact_id
+        ]
+        if not new_ids or set(new_ids) == set(existing_ids):
+            return
+        self.scratchpad["gates"]["pending_email_recipient_role_guard"] = {
+            "status": "BLOCKED",
+            "existing_recipient_contact_ids": existing_ids,
+            "attempted_recipient_contact_ids": new_ids,
+            "role": role_key,
+            "reason": (
+                "A pending email draft already has a recipient while only the "
+                "email message content is unresolved."
+            ),
+        }
+        raise ValueError(
+            "A pending email draft already has recipient contact ID(s) "
+            f"{existing_ids}, and only send_email.content_message is unresolved. "
+            f"Do not overwrite role={role_key!r} with different contact ID(s) "
+            f"{new_ids}. If the new contact is the person whose details belong "
+            "inside the email body, use role='contact_details_subject' or call "
+            "send_contact_details_to_contact(...). If the user explicitly changed "
+            "the recipient, pass the new email address directly to send_email "
+            "instead of silently overwriting the stored recipient role."
+        )
+
     def call_tool_sync(self, tool_name: str, arguments: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
         """Public policy-aware single-call entry point."""
 
@@ -10519,14 +10817,24 @@ class CoroutineWorkspace:
         return new_call
 
     @staticmethod
-    def _contact_role_entry_contact_id(entry: Any) -> str | None:
+    def _contact_role_entry_contact_ids(entry: Any) -> list[str]:
         if not isinstance(entry, dict):
-            return None
+            return []
         contact_ids = entry.get("contact_ids")
-        if not isinstance(contact_ids, list) or len(contact_ids) != 1:
+        if not isinstance(contact_ids, list):
+            return []
+        return [
+            contact_id
+            for contact_id in contact_ids
+            if isinstance(contact_id, str) and contact_id
+        ]
+
+    @staticmethod
+    def _contact_role_entry_contact_id(entry: Any) -> str | None:
+        contact_ids = CoroutineWorkspace._contact_role_entry_contact_ids(entry)
+        if len(contact_ids) != 1:
             return None
-        contact_id = contact_ids[0]
-        return contact_id if isinstance(contact_id, str) and contact_id else None
+        return contact_ids[0]
 
     @staticmethod
     def _contact_role_entry_turn_index(entry: Any) -> int | None:
@@ -11250,6 +11558,9 @@ class CoroutineWorkspace:
         ids = [contact_ids] if isinstance(contact_ids, str) else list(contact_ids)
         if not ids or not all(isinstance(contact_id, str) and contact_id for contact_id in ids):
             raise ValueError("contact_ids must contain at least one grounded contact ID")
+        role_key = self._normalize_contact_role(role)
+        if role_key:
+            self._guard_pending_email_recipient_role_overwrite(role_key, ids)
         call = ("get_contact_information", {"contact_ids": ids})
         blocker = self._require_tool_surface_for_calls(
             gate_name,
@@ -11333,7 +11644,6 @@ class CoroutineWorkspace:
             "first": contacts[0],
             "raw_result": result,
         }
-        role_key = self._normalize_contact_role(role)
         if role_key:
             normalized["role"] = role_key
         if len(contacts) == 1:
@@ -12784,10 +13094,23 @@ class CoroutineWorkspace:
         elif len(source_keys) == len(target_keys):
             pairs = list(zip(source_keys, target_keys))
         else:
-            return self._limitation_response(
-                gate_name,
-                "sync the window positions",
-                reason="the number of source windows does not match the number of target windows",
+            self.scratchpad["gates"][gate_name] = {
+                "status": "BAD_ARGUMENT",
+                "source_windows": source_windows,
+                "target_windows": target_windows,
+                "resolved_source_windows": source_keys,
+                "resolved_target_windows": target_keys,
+                "reason": "source and target window groups have incompatible sizes",
+            }
+            raise ValueError(
+                "sync_window_positions source_windows and target_windows resolved "
+                f"to incompatible group sizes: source_windows={source_windows!r} "
+                f"resolved to {source_keys}, while target_windows={target_windows!r} "
+                f"resolved to {target_keys}. To copy one current window position "
+                "to many windows, pass one exact source window such as DRIVER, "
+                "PASSENGER, DRIVER_REAR, or PASSENGER_REAR. To pair groups, pass "
+                "equal-size source and target groups or explicit equal-length lists. "
+                "If the source window is unresolved, ask the user before changing windows."
             )
 
         required_calls: list[tuple[str, dict[str, Any]]] = [("get_vehicle_window_positions", {})]
@@ -17523,31 +17846,35 @@ class CoroutineWorkspace:
             return self._failed_tool_response(tool_name, action, result)
 
         value = result_value(result)
+        scalar: Any | None = None
         if isinstance(value, UnknownToolResponseValue):
             value.require()
         if isinstance(value, str):
             if value.strip():
-                return value.strip()
+                scalar = value.strip()
         elif value is not None and not isinstance(value, dict):
-            return value
+            scalar = value
         elif isinstance(value, dict):
             field_value = value.get(field)
             if isinstance(field_value, UnknownToolResponseValue):
                 field_value.require()
             if isinstance(field_value, str) and field_value.strip():
-                return field_value.strip()
-            if field_value is not None and not isinstance(field_value, (dict, list)):
-                return field_value
+                scalar = field_value.strip()
+            elif field_value is not None and not isinstance(field_value, (dict, list)):
+                scalar = field_value
+        if scalar is None:
             return self._limitation_response(
                 tool_name,
                 action,
                 reason=f"the {field} result had an unexpected shape",
             )
-        return self._limitation_response(
-            tool_name,
-            action,
-            reason=f"the {field} result had an unexpected shape",
-        )
+
+        envelope = dict(result)
+        envelope["status"] = "SUCCESS"
+        envelope["tool_name"] = tool_name
+        envelope["result"] = scalar
+        envelope[field] = scalar
+        return envelope
 
     def get_preferred_ambient_light_color(self) -> dict[str, Any]:
         """Extract a unique ambient light color from user vehicle-setting preferences."""
@@ -17592,6 +17919,105 @@ class CoroutineWorkspace:
         if len(unique) > 1:
             return {"status": "AMBIGUOUS", "lightcolors": unique, "raw_result": raw}
         return {"status": "NOT_FOUND", "lightcolors": [], "raw_result": raw}
+
+    def get_preferred_climate_temperature(
+        self,
+        seat_zone: str | None = None,
+    ) -> dict[str, Any]:
+        """Extract a unique stored climate temperature preference.
+
+        This reads only the already preflighted preference facts in scratchpad.
+        It does not inspect the current user message.
+        """
+
+        self._ensure_scratchpad_shape()
+        candidates = self._climate_temperature_preference_candidates(seat_zone)
+        unique_temperatures = sorted({candidate["temperature"] for candidate in candidates})
+        if len(unique_temperatures) == 1:
+            temperature = unique_temperatures[0]
+            matching = [
+                candidate
+                for candidate in candidates
+                if candidate["temperature"] == temperature
+            ]
+            return {
+                "status": "SUCCESS",
+                "temperature": int(temperature) if float(temperature).is_integer() else temperature,
+                "temperature_unit": "Celsius",
+                "seat_zone": seat_zone,
+                "preference_text": matching[0]["text"] if matching else None,
+                "preference_texts": [candidate["text"] for candidate in matching],
+            }
+        if len(unique_temperatures) > 1:
+            return {
+                "status": "AMBIGUOUS",
+                "temperatures": unique_temperatures,
+                "seat_zone": seat_zone,
+                "preference_texts": [candidate["text"] for candidate in candidates],
+            }
+        return {
+            "status": "NOT_FOUND",
+            "temperatures": [],
+            "seat_zone": seat_zone,
+            "preference_texts": [],
+        }
+
+    def _climate_temperature_preference_candidates(
+        self,
+        seat_zone: str | None,
+    ) -> list[dict[str, Any]]:
+        texts = self._preference_texts_at_path(("vehicle_settings", "climate_control"))
+        if not texts:
+            return []
+        normalized_zone = seat_zone.upper() if isinstance(seat_zone, str) else None
+        candidates: list[dict[str, Any]] = []
+        for text in texts:
+            lowered = text.casefold()
+            if not any(token in lowered for token in ("temperature", "degree", "celsius", "comfort")):
+                continue
+            if not self._climate_preference_matches_zone(lowered, normalized_zone):
+                continue
+            for match in re.finditer(r"(?<![\w.])-?\d+(?:\.\d+)?(?![\w.])", text):
+                number = float(match.group(0))
+                if 10 <= number <= 35:
+                    candidates.append({"temperature": number, "text": text})
+        return candidates
+
+    @staticmethod
+    def _climate_preference_matches_zone(text: str, seat_zone: str | None) -> bool:
+        if seat_zone == "DRIVER":
+            return "driver" in text or "user" in text
+        if seat_zone == "PASSENGER":
+            return "passenger" in text
+        if seat_zone == "ALL_ZONES":
+            return "all zone" in text or "all-zone" in text or "all zones" in text
+        return True
+
+    def _preference_texts_at_path(self, path: tuple[str, ...]) -> list[str]:
+        self._ensure_scratchpad_shape()
+        stored = self.scratchpad["entities"].get("user_preferences")
+        preferences = stored.get("preferences") if isinstance(stored, dict) else None
+        node: Any = preferences
+        for key in path:
+            if not isinstance(node, dict):
+                return []
+            node = node.get(key)
+        texts: list[str] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped:
+                    texts.append(stripped)
+            elif isinstance(value, dict):
+                for inner in value.values():
+                    collect(inner)
+            elif isinstance(value, list):
+                for inner in value:
+                    collect(inner)
+
+        collect(node)
+        return texts
 
     @staticmethod
     def _extract_routes(value: Any) -> list[dict[str, Any]]:
@@ -18270,6 +18696,37 @@ class CoroutineWorkspace:
                 normalized.setdefault("distance_km", distance_km)
                 normalized.setdefault("distance", distance_display)
                 normalized.setdefault("summary", f"distance: {distance_display}")
+        if tool_name == "calculate_charging_time_by_soc":
+            minutes = self._parse_first_number(normalized.get("minutes"))
+            raw_key: str | None = None
+            raw_value: Any = None
+            for key in list(normalized):
+                if not isinstance(key, str):
+                    continue
+                key_text = key.lower()
+                if key_text in {"status", "minutes", "time", "charging_time", "summary"}:
+                    continue
+                if (
+                    key_text.startswith("time_")
+                    or "charging_time" in key_text
+                    or ("time" in key_text and ("_from_" in key_text or "_until_" in key_text))
+                ):
+                    value = normalized.pop(key)
+                    parsed_minutes = self._parse_first_number(value)
+                    if parsed_minutes is not None:
+                        minutes = parsed_minutes
+                        raw_key = key
+                        raw_value = value
+                        break
+            if minutes is not None:
+                time_display = f"{minutes:g} min"
+                normalized.setdefault("minutes", minutes)
+                normalized.setdefault("charging_time", time_display)
+                normalized.setdefault("time", time_display)
+                normalized.setdefault("summary", f"charging time: {time_display}")
+                if raw_key is not None:
+                    normalized.setdefault("raw_key", raw_key)
+                    normalized.setdefault("raw_value", raw_value)
         if tool_name == "get_temperature_inside_car":
             temperatures_by_zone: dict[str, Any] = {}
             for zone, key in (
@@ -18837,6 +19294,7 @@ class BlockingPythonExecutor:
             "tool_available": ws.tool_available,
             "tool_supports_arguments": ws.tool_supports_arguments,
             "capability_claim_gate": ws.capability_claim_gate,
+            "ask_for_missing_action_value": ws.ask_for_missing_action_value,
             "handle_pending_confirmation": ws.handle_pending_confirmation,
             "defrost_front_window": ws.defrost_front_window,
             "open_sunroof_safe": ws.open_sunroof_safe,
@@ -18887,6 +19345,7 @@ class BlockingPythonExecutor:
             "plan_charging_for_next_meeting": ws.plan_charging_for_next_meeting,
             "call_selected_charging_provider": ws.call_selected_charging_provider,
             "get_preferred_ambient_light_color": ws.get_preferred_ambient_light_color,
+            "get_preferred_climate_temperature": ws.get_preferred_climate_temperature,
             "policy_now": ws.policy_now,
             "policy_location_id": ws.policy_location_id,
         }
