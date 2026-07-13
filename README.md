@@ -55,9 +55,9 @@ ghcr.io/vetertann/car-coroutine-agent@sha256:d21b3745dfb36a00c56380d47e0b6b2f0d7
 
 ## Same Architecture Across Model Scale
 
-The harness is designed to reward reasoning, not to scaffold a specific model.
-The evidence is that the *identical* agent gives solid results on a smaller
-model and improves on a larger one, with no architecture change:
+The *identical* agent gives solid results on a smaller model and improves on a
+larger one with no architecture change, because the harness encodes task
+structure the model can reuse:
 
 - **Cerebras `gpt-oss-120b`** (Track 2) — public test split, 3 trials:
   **Pass¹ 93.3% / Pass³ 87.3%** (per-split Pass¹: base 90.0, hallucination 98.7,
@@ -68,11 +68,11 @@ model and improves on a larger one, with no architecture change:
   digest-pinned GHCR smoke) and resolves the residual cases where the 120b model
   was flaky.
 
-This is a shipping rule, not an accident: a change is accepted only if a
-stronger model already outperformed a weaker one on the bare prompt, and a
-persistent 120b failure is first reproduced on `gpt-5.5` to separate a reasoning
-gap (encode more deterministic structure) from a structural defect (fix the
-existing harness). See
+A development rule enforces this: a change ships only if a stronger model
+already outperformed a weaker one on the bare prompt, and a persistent 120b
+failure is first reproduced on `gpt-5.5` to separate a reasoning gap (encode
+more deterministic structure) from a structural defect (fix the existing
+harness). See
 [development discipline](docs/development-discipline.md).
 
 ---
