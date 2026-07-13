@@ -13,7 +13,7 @@ GEMINI_API_KEY = "${GEMINI_API_KEY:?Set GEMINI_API_KEY}"
 LOGURU_LEVEL = "${LOGURU_LEVEL:-INFO}"
 
 [agent_under_test]
-image = "ghcr.io/<ORG>/car-coroutine-agent@sha256:REPLACE_WITH_DIGEST"
+image = "ghcr.io/vetertann/car-coroutine-agent@sha256:d21b3745dfb36a00c56380d47e0b6b2f0d78a32f3315072505238eabf389cc86"
 
 [agent_under_test.env]
 OPENAI_API_KEY = "${OPENAI_API_KEY:?Set OPENAI_API_KEY}"
