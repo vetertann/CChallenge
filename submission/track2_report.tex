@@ -62,7 +62,11 @@ deterministic CAR-bench policies are encoded directly as logic in the tool
 layer rather than as prompt rules, enforcing compliance at zero reasoning cost.
 The agent attains Pass\textsuperscript{1} 93.3\% and Pass\textsuperscript{3}
 87.3\% on the public test split while remaining well within the Track~2
-five-call and token budgets.
+five-call and token budgets. A single static prompt, appended with per-task
+state at the tail, stays byte-identical across calls and across tasks; across
+our development runs 73\% of input tokens were served from the provider's prefix
+cache (near 89\% once the prompt is frozen and the cache is warm), compounding
+the few-call design into a small fraction of nominal input compute.
 \end{abstract}
 
 \section{Introduction}
@@ -300,6 +304,22 @@ The agent reaches Pass\textsuperscript{1} 93.3\% and Pass\textsuperscript{3}
 87.3\% (Table~\ref{tab:reliability}). The gap between them is
 model-compliance variance under a temperature-0 model sensitive to simulator
 phrasing, concentrated in the base split; 87\% of tasks pass all three trials.
+
+\paragraph{Prefix-cache efficiency.}
+The system prompt is one large static block --- runtime rules, the domain skill,
+and the full tool catalog --- and per-task state is appended only at the tail, so
+the cacheable prefix is byte-identical across every model call and, crucially,
+\emph{across tasks}. We deliberately do not swap skills per task, which would
+break this prefix. Across all development runs on Cerebras (918M input tokens
+over three weeks) this yields a \textbf{73.2\% input-token cache rate} (672M of
+918M tokens). The aggregate is held down by frequent prompt edits during active
+development; with the frozen submission prompt the per-minute rate reaches
+88.7\% (p90) and 99.9\% at peak once the cache is warm, and a hidden-set run is
+long enough to sit there. Combined with the two-call-per-task design, real
+per-task input compute is a small fraction of the nominal $\sim$88k tokens. The
+mechanism is provider-general: any prefix-caching backend (Cerebras here, and
+the OpenAI route used in our Open-track submission) benefits from the same
+stable-prefix, tail-accumulation structure.
 
 \paragraph{Compute compliance.}
 The internal loop is capped at five sequential model calls per step, matching
