@@ -1,8 +1,5 @@
-# CAR-bench IJCAI-ECAI 2026 — Track 2 (Cerebras Fast-Reasoning) submission.
-# Agent: coroutine-bridge runtime on Cerebras gpt-oss-120b.
-# Replace <ORG> and the sha256 digest after the GHCR push (step 3 of
-# docs/submission-prep.md). Evaluator image is the official organizer image
-# and must not be changed.
+# Small Track 2 container smoke scenario using the pushed digest.
+# This mirrors the final image reference that organizers will pull.
 
 [evaluator]
 image = "ghcr.io/car-bench/car-bench-evaluator:latest"
@@ -29,9 +26,16 @@ CAR_AGENT_STORM_RETRY_TEMPERATURES = "${CAR_AGENT_STORM_RETRY_TEMPERATURES:-0.15
 LOGURU_LEVEL = "${LOGURU_LEVEL:-INFO}"
 
 [config]
-num_trials = 3
-task_split = "hidden"
-tasks_base_num_tasks = -1
-tasks_hallucination_num_tasks = -1
-tasks_disambiguation_num_tasks = -1
+num_trials = 1
+task_split = "test"
+tasks_base_num_tasks = 2
+tasks_hallucination_num_tasks = 2
+tasks_disambiguation_num_tasks = 1
 max_steps = 50
+
+user_model = "gemini/gemini-2.5-flash"
+user_provider = "gemini"
+user_thinking = false
+
+policy_evaluator_model = "gemini/gemini-2.5-flash"
+policy_evaluator_provider = "gemini"
