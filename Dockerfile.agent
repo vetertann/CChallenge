@@ -37,6 +37,11 @@ EXPOSE 8080
 
 # All model configuration (provider, model id, API keys, base URL, reasoning
 # effort, temperature, tool mode, skill file) is read from env vars by config.py.
-# We pass ONLY host/port here so the container listens on 0.0.0.0:$PORT and the
-# evaluator can reach it. No model CLI flags -> pure env-driven configuration.
-CMD ["sh", "-c", "python /app/src/track_1_agent_coroutine_under_test/server.py --host 0.0.0.0 --port ${PORT:-8080}"]
+# The server is the ENTRYPOINT; runtime args come from CMD for a plain
+# `docker run`, or from the harness-generated compose `command:` (which appends
+# --host/--port/--card-url) that OVERRIDES CMD. Exec-form ENTRYPOINT+CMD (not
+# `sh -c`) is required so those args reach argparse directly. This matches the
+# official evaluator image's ENTRYPOINT+CMD contract. No model CLI flags here
+# -> pure env-driven configuration.
+ENTRYPOINT ["python", "/app/src/track_1_agent_coroutine_under_test/server.py"]
+CMD ["--host", "0.0.0.0", "--port", "8080"]
