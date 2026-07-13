@@ -1,0 +1,34 @@
+# CAR-bench IJCAI-ECAI 2026 — Track 1 (Open) local digest smoke.
+# Agent: same public digest-pinned coroutine-bridge image as Track 2, routed to
+# OpenAI GPT-5.5. Temperature is intentionally not sent on the gpt-5* path; the
+# model's default reasoning effort is used. The evaluator image is the official
+# organizer image and must not be changed.
+
+[evaluator]
+image = "ghcr.io/car-bench/car-bench-evaluator:latest"
+
+[evaluator.env]
+GEMINI_API_KEY = "${GEMINI_API_KEY:?Set GEMINI_API_KEY}"
+LOGURU_LEVEL = "${LOGURU_LEVEL:-INFO}"
+
+[agent_under_test]
+image = "ghcr.io/vetertann/car-coroutine-agent@sha256:d21b3745dfb36a00c56380d47e0b6b2f0d78a32f3315072505238eabf389cc86"
+
+[agent_under_test.env]
+OPENAI_API_KEY = "${OPENAI_API_KEY:?Set OPENAI_API_KEY}"
+CAR_AGENT_MODEL_PROVIDER = "${CAR_AGENT_MODEL_PROVIDER:-openai}"
+CAR_AGENT_MODEL = "${CAR_AGENT_MODEL:-gpt-5.5}"
+CAR_AGENT_SKILL = "${CAR_AGENT_SKILL:-car_domain_120b.md}"
+CAR_AGENT_TOOL_MODE = "${CAR_AGENT_TOOL_MODE:-prompt_json}"
+CAR_AGENT_MAX_OUTPUT_TOKENS = "${CAR_AGENT_MAX_OUTPUT_TOKENS:-2048}"
+CAR_AGENT_MAX_INTERNAL_STEPS = "${CAR_AGENT_MAX_INTERNAL_STEPS:-5}"
+CAR_AGENT_MAX_ATTEMPTS = "${CAR_AGENT_MAX_ATTEMPTS:-6}"
+LOGURU_LEVEL = "${LOGURU_LEVEL:-INFO}"
+
+[config]
+num_trials = 1
+task_split = "test"
+tasks_base_num_tasks = 2
+tasks_hallucination_num_tasks = 2
+tasks_disambiguation_num_tasks = 1
+max_steps = 50

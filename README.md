@@ -1,12 +1,87 @@
-# IJCAI-ECAI 2026 Competition
-# CAR-bench: Building Reliable LLM Agents Under Real-World Uncertainty
+# CAR-bench Coroutine-Bridge Agent — IJCAI-ECAI 2026 Submission
 
 [![Paper](https://img.shields.io/badge/Paper-2601.22027-b31b1b.svg)](https://arxiv.org/abs/2601.22027)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![A2A](https://img.shields.io/badge/A2A-Protocol-blue.svg)](https://a2a-protocol.org)
 [![Website](https://img.shields.io/badge/Website-CAR--bench-blue)](https://car-bench.github.io/car-bench/)
 
-Dockerized A2A starter kit for the CAR-bench Challenge at IJCAI-ECAI 2026.
+Participant submission for the CAR-bench Challenge at IJCAI-ECAI 2026. The agent
+is a **coroutine-bridge harness** that runs the model as a single code-action
+program over the official A2A boundary. The **same image** is submitted to both
+tracks and routed to a different model per track by environment variables.
+
+> **Fork provenance.** This repository is a fork of the official CAR-bench
+> starter kit. Everything under
+> [**CAR-bench Starter Kit (Upstream)**](#car-bench-starter-kit-upstream) —
+> the A2A harness, the evaluator, and the reference agents — is upstream
+> material authored by the CAR-bench organizers. The participant contribution is
+> the coroutine-bridge agent in
+> [`src/track_1_agent_coroutine_under_test/`](src/track_1_agent_coroutine_under_test/),
+> the design docs in [`docs/`](docs/), and the submission scenarios in
+> [`submission/`](submission/).
+
+## The Agent
+
+The model's only action is to emit a Python program that runs in a persistent
+interpreter. When that program calls a tool wrapper, a coroutine bridge suspends
+it, emits the official A2A tool call, and resumes the *same* stack frame when
+results return — without another model call. One program therefore drives many
+sequential and parallel tool round-trips per model invocation.
+
+Because the action surface is executable code, deterministic CAR-bench policies
+are encoded as logic in the tool layer — guarded wrappers, a confirmation state
+machine, live tool-surface membership checks, and result normalization — rather
+than as prompt rules. The runtime owns facts and strict policy; the model owns
+interpretation. This removes whole failure classes (result-key guessing,
+ungrounded IDs, silently hallucinated fields) at zero model-attention cost.
+
+Deep dives: [architecture](docs/coroutine-agent-architecture.md) ·
+[development discipline](docs/development-discipline.md) ·
+[submission runbook](docs/submission-prep.md).
+
+## One Image, Both Tracks
+
+Both submissions run the identical public image, digest-pinned; only the agent
+env block (provider / model / API key) differs.
+
+```
+ghcr.io/vetertann/car-coroutine-agent@sha256:d21b3745dfb36a00c56380d47e0b6b2f0d78a32f3315072505238eabf389cc86
+```
+
+| Track | Model | Inference route | Scenario |
+| --- | --- | --- | --- |
+| **Track 2** (Cerebras Fast-Reasoning) | `gpt-oss-120b` | Cerebras SDK | [`submission/track2_scenario.toml`](submission/track2_scenario.toml) |
+| **Track 1** (Open) | `gpt-5.5` | OpenAI SDK | [`submission/track1_scenario.toml`](submission/track1_scenario.toml) |
+
+## Same Architecture Across Model Scale
+
+The harness is designed to reward reasoning, not to scaffold a specific model.
+The evidence is that the *identical* agent gives solid results on a smaller
+model and improves on a larger one, with no architecture change:
+
+- **Cerebras `gpt-oss-120b`** (Track 2) — public test split, 3 trials:
+  **Pass¹ 93.3% / Pass³ 87.3%** (per-split Pass¹: base 90.0, hallucination 98.7,
+  disambiguation 90.7), at a median of **2 model calls and ~1.8 s model latency
+  per task** against 7 A2A turns.
+- **OpenAI `gpt-5.5`** (Track 1) — same image and skill, no architecture change.
+  The stronger model runs the identical contract (validated 5/5 on the
+  digest-pinned GHCR smoke) and resolves the residual cases where the 120b model
+  was flaky.
+
+This is a shipping rule, not an accident: a change is accepted only if a
+stronger model already outperformed a weaker one on the bare prompt, and a
+persistent 120b failure is first reproduced on `gpt-5.5` to separate a reasoning
+gap (encode more deterministic structure) from a structural defect (fix the
+existing harness). See
+[development discipline](docs/development-discipline.md).
+
+---
+
+# CAR-bench Starter Kit (Upstream)
+
+The remainder of this README is the upstream starter-kit documentation from the
+official CAR-bench organizers, kept so the repository stays self-contained and
+reproducible.
 
 [Overview](#overview) | [Setup](#setup) | [Build An Agent](#build-an-agent) | [Validate](#validate-your-agent) | [Submit](#submission-instructions) | [Evaluation](#evaluation-summary) | [Read More](#read-more)
 
