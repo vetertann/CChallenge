@@ -1,0 +1,275 @@
+%%%% CAR-bench IJCAI-ECAI 2026 — Track 1 (Open) technical report.
+%%%% Compile from a directory containing ijcai26.sty, named.bst, and track1_report.bib
+%%%% (copy them from ../FormattingGuidelines-IJCAI-ECAI-26/, or build there).
+%%%% 4-page content limit (competition rule). Keep \linenumbers ON for submission.
+
+\documentclass{article}
+\pdfpagewidth=8.5in
+\pdfpageheight=11in
+
+\usepackage{ijcai26}
+\usepackage{times}
+\usepackage{soul}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage[utf8]{inputenc}
+\usepackage[small]{caption}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage[switch]{lineno}
+
+% Comment out for camera-ready.
+\linenumbers
+
+\urlstyle{same}
+
+\pdfinfo{
+/TemplateVersion (IJCAI.2026.0)
+}
+
+\title{Develop Small, Deploy Large: A Coroutine-Bridge Harness that\\
+Transfers Reliability Across Model Scale on CAR-bench}
+
+\author{
+    Ivan Matveev
+    \affiliations
+    Proxima Ultra
+    \emails
+    i.a.matveev@gmail.com
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+CAR-bench measures whether tool-using agents stay reliable under real-world
+uncertainty. We submit a coroutine-bridge harness whose only model action is to
+emit a Python program that blocks and resumes in place across evaluator tool
+exchanges, so deterministic policy lives as executable logic in the tool layer
+rather than as prompt rules. Our Track~1 methodology treats model scale like a
+train/test split: the harness is engineered and regression-tested against a
+small, fast model (\texttt{gpt-oss-120b}) and then deployed unchanged on a
+larger model (OpenAI \texttt{gpt-5.5}). Because the harness encodes transferable
+task structure, the identical agent runs on the larger model with no
+architecture change and resolves the residual cases the small model handled
+unreliably. The design's efficiency is model-independent: two model calls carry
+a full multi-turn task on both models. Since the larger model's calls are an
+order of magnitude more expensive in latency, the bridge's call-minimization
+pays off more, not less, at scale.
+\end{abstract}
+
+\section{Introduction}
+
+CAR-bench evaluates the \emph{consistency} and \emph{limit-awareness} of LLM
+agents across 58 interconnected tools, 19 domain policies, and 254 public tasks
+in base, hallucination, and disambiguation categories~\cite{kirmayr2026carbench}.
+The Open track ranks agents by hidden-set Pass\textsuperscript{3}, which credits
+a task only when all three trials pass, and additionally rewards innovation in
+harnessing and reliability design.
+
+Our submission is built on one idea applied twice. The model's only action is to
+emit an executable Python program~\cite{wang2024codeact}; a coroutine bridge
+suspends that program when it calls a tool, emits the official Agent-to-Agent
+(A2A) tool call, and resumes the same stack frame when results return --- with no
+new model call. Because the action surface is code, deterministic CAR-bench
+policies are compiled into the tool layer as ordinary logic rather than written
+as prompt rules the model must remember.
+
+The Track~1 contribution is a \emph{methodology}, stated as an analogy to a
+train/test split over model scale. We ``train'' the harness --- hand-engineer it
+and lock it with regression tests --- against a small, cheap, fast model where
+iteration is inexpensive, and ``test'' it by deploying the identical agent on a
+larger model. A change is accepted only if it improves the structure both models
+can use, never if it patches a weakness specific to the small one. The result is
+an agent whose reliability transfers upward across a large capability gap without
+re-engineering.
+
+\section{The Coroutine Bridge}
+
+CAR-bench externalizes tool execution to the evaluator so it can score the tool
+trajectory and inject environment perturbations. Every batch of tool calls the
+agent emits returns as a fresh A2A message. A conventional next-action agent
+therefore spends one model call per sequential tool step. The bridge removes this
+tax: the model emits one program, and tool results are delivered back into the
+blocked Python frame, which resumes without a model invocation
+(Figure~\ref{fig:bridge}). One program drives many sequential and parallel tool
+round-trips per model call. Independent reads are issued together through
+\texttt{batch([...])}, which collapses independent round-trips into one parallel
+A2A message. Every tool call still appears in the official trajectory, so the
+technique is fully compliant.
+
+\begin{figure}[t]
+\centering
+\resizebox{\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  msg/.style={-{Stealth[length=2mm]}, thick},
+  ret/.style={-{Stealth[length=2mm]}, thick, dashed},
+  call/.style={-{Stealth[length=2mm]}, very thick, blue!70!black},
+  callret/.style={-{Stealth[length=2mm]}, very thick, dashed, blue!70!black},
+  life/.style={dashed, gray!60},
+  hdr/.style={draw, rounded corners, fill=gray!12, minimum height=6mm,
+              inner sep=4pt, font=\small\bfseries},
+  note/.style={draw, fill=yellow!22, rounded corners, font=\footnotesize,
+               inner sep=2.5pt},
+  lbl/.style={font=\footnotesize, above, midway},
+  step/.style={font=\footnotesize\itshape, fill=blue!6},
+]
+\def\xE{0}\def\xW{4.2}\def\xM{8.4}\def\xP{13.2}
+\node[hdr] (E) at (\xE,0) {Evaluator};
+\node[hdr] (W) at (\xW,0) {Worker};
+\node[hdr] (M) at (\xM,0) {Model};
+\node[hdr] (P) at (\xP,0) {Python frame $+$ Bridge};
+\foreach \x in {\xE,\xW,\xM,\xP} \draw[life] (\x,-0.45) -- (\x,-8.0);
+\draw[msg] (\xE,-0.9) -- node[lbl]{user message (A2A)} (\xW,-0.9);
+\node[step] at ({(\xW+\xM)/2},-1.35) {model call 1 of $\leq$5};
+\draw[call]    (\xW,-1.9) -- node[lbl]{execute\_python} (\xM,-1.9);
+\draw[callret] (\xM,-2.5) -- node[lbl]{Python program} (\xW,-2.5);
+\draw[msg] (\xW,-3.1) -- node[lbl]{run program} (\xP,-3.1);
+\draw[msg] (\xP,-3.9) -- node[lbl]{tool\_calls (A2A)} (\xE,-3.9);
+\draw[ret] (\xE,-4.5) -- node[lbl]{tool\_results (A2A)} (\xP,-4.5);
+\node[note, anchor=east] at (\xP-0.25,-5.0) {resume --- no model call};
+\draw[msg] (\xP,-5.6) -- node[lbl]{dependent tool\_call (A2A)} (\xE,-5.6);
+\draw[ret] (\xE,-6.2) -- node[lbl]{tool\_results (A2A)} (\xP,-6.2);
+\node[note, anchor=east] at (\xP-0.25,-6.7) {resume --- no model call};
+\draw[ret] (\xP,-7.3) -- node[lbl]{observation / respond()} (\xW,-7.3);
+\end{tikzpicture}}
+\caption{One user turn. Blue = model call; black solid = request, dashed =
+return. A single \texttt{execute\_python} program drives several evaluator tool
+round-trips; each returning tool result resumes the blocked Python frame with no
+new model call. The loop is bounded at five sequential model calls (Track budget).}
+\label{fig:bridge}
+\end{figure}
+
+\paragraph{Policy as code.}
+Many CAR-bench policies are deterministic given grounded facts: whether opening a
+window past 25\% needs an air-conditioning confirmation, whether high beams are
+blocked while fog lights are on, which route default applies to a new segment.
+The code-action surface lets us encode these as logic in the tool layer ---
+guarded wrappers that fire whether the model calls the public name or the helper,
+a confirmation state machine that stores the fully grounded pending action,
+live tool-surface membership checks for missing capabilities, and result
+normalization that gives stable field names. The runtime owns facts and strict
+policy; the model owns interpretation of the request. A policy in the prompt can
+be forgotten under attention pressure; a policy in tool code is enforced by
+construction, at zero model-attention cost. This is what makes the harness
+transfer across models: the enforced structure is identical regardless of which
+model reasons over it.
+
+\section{Develop Small, Deploy Large}
+
+We treat model capability as a train/test axis. The small model
+(\texttt{gpt-oss-120b}) is the development crucible: cheap and fast enough to run
+full three-trial public-test sweeps repeatedly, so the harness can be hardened
+against real failures. Two rules govern what ships.
+
+First, a change is accepted only if a \emph{stronger} model already outperformed
+a \emph{weaker} one on the bare prompt, before any domain skill. The bare-prompt
+ordering (stronger $>$ weaker) is the signal that a task rewards reasoning and
+structure rather than memorized scaffolding. A change that improved the small
+model while regressing the large one is rejected as overfitting to the small
+model's weaknesses.
+
+Second, when the small model failed a task, we reproduced it on \texttt{gpt-5.5}
+before acting. If the stronger model passed, the ceiling was reachable within the
+current architecture and the fix was to encode the missing determinism as tool
+code (policy as code). If both failed, the defect was in existing harness and was
+repaired there rather than patched over. Candidate changes were judged on
+consistent-failure sets across runs, never single noisy trials, because near the
+plateau one trial moves several points on evaluator/simulator variance alone.
+
+For Track~1 we then \emph{deploy} the identical agent --- same image, same domain
+skill, no architecture change --- on \texttt{gpt-5.5}, selected purely through
+environment variables. Nothing about the harness is model-specific, so the larger
+model inherits the same enforced policy and normalization and applies stronger
+interpretation on top.
+
+\section{Results}
+
+The development benchmark is the full public test split on the small model
+(\texttt{gpt-oss-120b}, 125 tasks, 3 trials): \textbf{Pass\textsuperscript{1}
+93.3\%} and \textbf{Pass\textsuperscript{3} 87.3\%} (per-split
+Pass\textsuperscript{1}: base 90.0, hallucination 98.7, disambiguation 90.7). We
+do not self-evaluate the hidden set; the numbers below characterize the deployed
+\texttt{gpt-5.5} agent from our own runs. The user simulator and policy judge are
+Gemini~2.5~Flash, the organizers' default.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Per task (median) & \texttt{gpt-oss-120b} & \texttt{gpt-5.5} \\
+\midrule
+Model calls          & 2      & 2      \\
+A2A turns            & 7      & 10     \\
+Model latency / call & $\sim$1\,s & $\sim$10\,s \\
+Input tokens         & 78k    & 76k    \\
+Output tokens        & 1.4k   & 0.9k   \\
+Thinking tokens      & \multicolumn{1}{c}{--} & 0.15k \\
+\bottomrule
+\end{tabular}
+\caption{The call-decoupling is model-independent: two model calls carry a full
+multi-turn task on both models (7 vs.\ 10 A2A turns). \texttt{gpt-5.5} figures are
+measured over the OpenAI API in our runs; all three token fields, including
+\texttt{thinking\_tokens}, populate.}
+\label{tab:profile}
+\end{table}
+
+\paragraph{The efficiency is structural.}
+Table~\ref{tab:profile} shows the coroutine bridge holds a median of two model
+calls per task on \emph{both} models, even though the tasks require seven to ten
+A2A tool round-trips. A conventional next-action agent would issue one model call
+per round-trip. The saving is a property of the harness, not of any model.
+
+\paragraph{Call-minimization pays off more at scale.}
+The larger model's completions are roughly an order of magnitude slower
+($\sim$10\,s vs.\ $\sim$1\,s per call in our measurements over the OpenAI API).
+Every model call the bridge avoids therefore saves about ten seconds on
+\texttt{gpt-5.5}. A per-turn baseline on the same tasks would issue roughly ten
+model calls instead of two; the bridge removes on the order of eighty seconds of
+sequential model latency per task. The more expensive the model, the more the
+structure is worth --- the same design that trims latency on a fast small model
+trims far more on a slow large one.
+
+\paragraph{Reliability transfer.}
+During development, \texttt{gpt-5.5} served as the stronger-model oracle on
+residual failure clusters --- tasks curated precisely because the small model was
+unreliable on them. On the final agent it resolves those targeted cases and
+passes the digest-pinned GHCR validation smoke. The Open-track
+Pass\textsuperscript{3} is what the organizers measure on the hidden set; our
+evidence is that the harness developed on the small model deploys unchanged and
+improves on the larger one.
+
+\paragraph{Compute compliance.}
+The internal loop is capped at five sequential model calls per step; observed
+usage is a median of two (p90 four). Mean input plus output stays well under the
+budget. Token and latency accounting is reported through \texttt{turn\_metrics}
+on each concluding response, aggregated across intermediate tool exchanges, so
+per-task totals are complete; \texttt{prompt\_tokens}, \texttt{completion\_tokens},
+and \texttt{thinking\_tokens} all populate on the \texttt{gpt-5.5} route.
+
+\section{Limitations and Conclusion}
+
+We report a full public-test evaluation on the development model and a targeted
+plus smoke validation on the deployment model; a full self-evaluation on
+\texttt{gpt-5.5} was not run because the hidden set is organizer-scored and a
+full sweep on a frontier model is costly. Worker state is in memory and not
+recoverable across process restarts. Latency figures for \texttt{gpt-5.5} are
+wall-clock over the public OpenAI API and include network and provider queueing.
+
+The submission makes one architectural bet and reuses it across a large
+capability gap: put deterministic policy in code the model calls, minimize the
+number of expensive model calls, and let a small fast model do the development
+that a large model then benefits from unchanged. The same image serves both the
+Cerebras Track~2 and this Open-track submission, differing only by environment
+variables --- direct evidence that the reliability is in the harness, not the
+model.
+
+\bibliographystyle{named}
+\bibliography{track1_report}
+
+\end{document}
