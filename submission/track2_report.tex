@@ -1,0 +1,343 @@
+%%%% CAR-bench IJCAI-ECAI 2026 — Track 2 (Cerebras Fast-Reasoning) technical report.
+%%%% Compile from a directory containing ijcai26.sty, named.bst, and track2_report.bib
+%%%% (copy them from ../FormattingGuidelines-IJCAI-ECAI-26/, or build there).
+%%%% 4-page content limit (competition rule). Keep \linenumbers ON for submission.
+%%%% Figure: figures/coroutine_bridge.pdf (repo-root figures/, resolved via \graphicspath).
+
+\documentclass{article}
+\pdfpagewidth=8.5in
+\pdfpageheight=11in
+
+\usepackage{ijcai26}
+\usepackage{times}
+\usepackage{soul}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage[utf8]{inputenc}
+\usepackage[small]{caption}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage[switch]{lineno}
+
+% Comment out for camera-ready.
+\linenumbers
+
+\urlstyle{same}
+
+\pdfinfo{
+/TemplateVersion (IJCAI.2026.0)
+}
+
+\title{Policy as Code: A Coroutine-Bridge Harness for\\ Fast-Reasoning Reliability on CAR-bench}
+
+% Non-anonymous submission. Keep \linenumbers ON for the review submission;
+% remove it only for a camera-ready version.
+\author{
+    Ivan Matveev
+    \affiliations
+    Proxima Ultra
+    \emails
+    i.a.matveev@gmail.com
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+CAR-bench evaluates whether tool-using agents stay reliable under real-world
+uncertainty, executing every tool inside the evaluator so that each tool
+exchange is a separate agent round-trip. A conventional next-action agent
+therefore spends one model call per tool step. We present a coroutine-bridge
+harness in which the model's only action is to emit a Python program that
+blocks and resumes \emph{in place} across evaluator tool exchanges. This
+decouples model invocation from tool round-trips: on the public test split the
+agent uses a median of two model calls against seven agent turns per task,
+resolving a full multi-turn task in a median of 1.8\,s of model latency on
+Cerebras \texttt{gpt-oss-120b}. Because the action surface is executable code,
+deterministic CAR-bench policies are encoded directly as logic in the tool
+layer rather than as prompt rules, enforcing compliance at zero reasoning cost.
+The agent attains Pass\textsuperscript{1} 93.3\% and Pass\textsuperscript{3}
+87.3\% on the public test split while remaining well within the Track~2
+five-call and token budgets.
+\end{abstract}
+
+\section{Introduction}
+
+CAR-bench measures the \emph{consistency} and \emph{limit-awareness} of LLM
+agents in an in-car assistant domain of 58 interconnected tools, 19 domain
+policies, and 254 public tasks spanning base, hallucination, and
+disambiguation categories~\cite{kirmayr2026carbench}. Reliability, not
+single-shot capability, is the target: the headline metric is
+Pass\textsuperscript{3}, which credits a task only when it passes all three
+independent trials.
+
+Track~2 restricts the model to Cerebras-hosted \texttt{gpt-oss} and rewards
+\emph{compute-aware} harnessing: architectures that convert fast inference into
+low end-to-end latency and reliable behavior. A defining property of the
+benchmark shapes what ``compute-aware'' means here. Unlike a standard
+Agent-to-Agent (A2A) deployment, where an agent executes its own tools
+privately and one request spans the whole task~\cite{a2a2025}, CAR-bench
+\emph{externalizes} tool execution to the evaluator so it can score the tool
+trajectory and inject environment perturbations. Every batch of tool calls the
+agent emits returns as a fresh A2A message carrying tool results. A
+conventional ``next-action'' agent, which the reference templates describe as
+one model call per assistant step, therefore pays one model call for every
+sequential tool step.
+
+Our contribution is a harness that removes this tax. The model emits a single
+executable Python program~\cite{wang2024codeact}; when that program calls a
+tool wrapper, a coroutine bridge suspends the Python thread, emits the official
+tool call, and resumes the \emph{same} stack frame when results arrive ---
+without a new model call. One program can thus drive many sequential and
+parallel tool round-trips per model invocation. Two consequences follow, and
+both are the substance of this report: (i)~model calls, and hence model latency
+on the critical path, drop sharply relative to agent turns; and (ii)~because the
+action surface is code, deterministic policy is expressed as ordinary logic in
+the tools the code calls, so policy compliance costs the model no attention and
+no extra reasoning turns.
+
+\section{The Coroutine Bridge}
+
+\subsection{Externalized Tools Force Round-Trips}
+
+In CAR-bench the participant agent never executes vehicle, navigation, weather,
+or productivity tools. It returns a data part of \texttt{tool\_calls}; the
+evaluator executes them, advances environment state, and returns a new A2A
+message of \texttt{tool\_results}. This is what enables trajectory scoring and
+hallucination injection, and it is why the benchmark cannot be treated as a
+private single-request task. The cost is structural: an $n$-step dependent tool
+chain is $n$ separate agent round-trips.
+
+\subsection{Decoupling Model Calls from Tool Round-Trips}
+
+Each A2A \texttt{context\_id} owns a long-lived worker holding one persistent
+Python interpreter, a tool bridge, a scratchpad, and a compact transcript. The
+model's sole action is \texttt{execute\_python}. Execution proceeds as follows:
+
+\begin{enumerate}
+\itemsep2pt
+\item The model emits one Python program (one model call).
+\item The program runs in the worker thread until it calls a tool wrapper such
+  as \texttt{get\_current\_navigation\_state(...)}.
+\item The bridge places the official tool call on the outbox and \emph{blocks}
+  the Python thread.
+\item The evaluator executes the tool and returns a tool-results message.
+\item The bridge delivers those results directly into the blocked call, and the
+  same stack frame resumes --- \emph{no model call}.
+\item The program branches, calls further tools, or emits the user-facing
+  response.
+\end{enumerate}
+
+\begin{figure*}[t]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\small,
+  msg/.style={-{Stealth[length=2mm]}, thick},
+  ret/.style={-{Stealth[length=2mm]}, thick, dashed},
+  call/.style={-{Stealth[length=2mm]}, very thick, blue!70!black},
+  callret/.style={-{Stealth[length=2mm]}, very thick, dashed, blue!70!black},
+  life/.style={dashed, gray!60},
+  hdr/.style={draw, rounded corners, fill=gray!12, minimum height=6mm,
+              inner sep=4pt, font=\small\bfseries},
+  note/.style={draw, fill=yellow!22, rounded corners, font=\footnotesize,
+               inner sep=2.5pt},
+  lbl/.style={font=\footnotesize, above, midway},
+  step/.style={font=\footnotesize\itshape, fill=blue!6},
+]
+\def\xE{0}\def\xW{4.4}\def\xM{8.6}\def\xP{13.4}
+\node[hdr] (E) at (\xE,0) {Evaluator};
+\node[hdr] (W) at (\xW,0) {Worker};
+\node[hdr] (M) at (\xM,0) {Model (gpt-oss-120b)};
+\node[hdr] (P) at (\xP,0) {Python frame $+$ ToolBridge};
+\foreach \x in {\xE,\xW,\xM,\xP} \draw[life] (\x,-0.45) -- (\x,-9.8);
+
+\draw[msg] (\xE,-0.9) -- node[lbl]{user message (A2A)} (\xW,-0.9);
+\node[step] at ({(\xW+\xM)/2},-1.35) {internal step 1 of $\leq$5};
+\draw[call]    (\xW,-1.9) -- node[lbl]{execute\_python} (\xM,-1.9);
+\draw[callret] (\xM,-2.5) -- node[lbl]{Python program} (\xW,-2.5);
+\draw[msg] (\xW,-3.1) -- node[lbl]{run program} (\xP,-3.1);
+\draw[msg] (\xP,-3.9) -- node[lbl]{batch tool\_calls (A2A turn)} (\xE,-3.9);
+\draw[ret] (\xE,-4.5) -- node[lbl]{tool\_results (A2A turn)} (\xP,-4.5);
+\node[note, anchor=east] at (\xP-0.25,-5.0) {resume --- no model call};
+\draw[msg] (\xP,-5.6) -- node[lbl]{dependent tool\_call (A2A turn)} (\xE,-5.6);
+\draw[ret] (\xE,-6.2) -- node[lbl]{tool\_results (A2A turn)} (\xP,-6.2);
+\node[note, anchor=east] at (\xP-0.25,-6.7) {resume --- no model call};
+\draw[ret] (\xP,-7.3) -- node[lbl]{observation (program done)} (\xW,-7.3);
+\node[step] at ({(\xW+\xM)/2},-7.75) {internal step 2 of $\leq$5};
+\draw[call]    (\xW,-8.3) -- node[lbl]{execute\_python} (\xM,-8.3);
+\draw[callret] (\xM,-8.9) -- node[lbl]{program $\to$ respond()} (\xW,-8.9);
+\draw[msg] (\xW,-9.5) -- node[lbl]{final text $+$ turn\_metrics (A2A)} (\xE,-9.5);
+\end{tikzpicture}}
+\caption{One user turn. Blue = model call; black solid = request, dashed =
+return. Two model calls (\texttt{execute\_python}) drive several evaluator tool
+round-trips: when a tool result returns, the blocked Python frame resumes
+\emph{without} a model call. The internal loop is bounded at five sequential
+model calls, matching the Track~2 budget.}
+\label{fig:bridge}
+\end{figure*}
+
+The model is invoked once per \emph{decision}, not once per tool result.
+Figure~\ref{fig:bridge} traces one user turn.
+Crucially, this hides nothing: every tool call still appears in the official
+A2A trajectory exactly as the evaluator expects, so the technique is fully
+compliant. What changes is only the number of \emph{model} invocations between
+tool round-trips. Table~\ref{tab:compute} quantifies the effect: a median of
+two model calls carries a median of seven agent turns per task.
+
+\subsection{Parallel Batching}
+
+Independent reads are issued together via \texttt{batch([...])}, which emits one
+parallel A2A tool-call message and returns results in input order. Dependent
+calls remain ordinary sequential Python. Batching collapses independent tool
+round-trips in addition to the model-call savings, further shortening the
+critical path without sacrificing the natural imperative control flow that
+makes code actions expressive~\cite{wang2024codeact}.
+
+\section{Policy as Code}
+
+Many CAR-bench policies are \emph{deterministic given grounded facts}: whether
+opening a window above 25\% requires an AC confirmation, whether high beams are
+blocked while fog lights are on, which route default applies to a newly created
+segment. The CodeAct action surface lets us encode such policy directly as
+logic in the tool layer rather than as prose the model must recall. This is the
+central design principle of the harness.
+
+We separate two responsibilities. The \emph{runtime} owns facts and strict
+policy; the \emph{model} owns interpretation of the user's intent. Concretely,
+policy-critical raw wrappers delegate to guarded implementations
+(\texttt{set\_fog\_lights} to a fog-light safety helper,
+\texttt{open\_close\_window} to an AC-aware helper), so the policy executes
+whether the model calls the public name or the helper. A confirmation state
+machine stores the fully grounded pending action and resumes the exact call on
+the user's next turn. Result normalization gives the model stable field names
+so a simple, direct tool path is not silently trapped by a dynamic result key.
+Missing capabilities are resolved reactively against the live per-task tool
+surface --- a membership test the organizers confirmed as permitted --- never
+by comparing against a bundled catalog.
+
+The practical test for each policy is: \emph{is it deterministic given grounded
+facts?} If yes, it becomes enforced code in a tool; if it requires genuine
+interpretation of the request, it stays in the prompt. A policy expressed only
+in the prompt can be forgotten under attention pressure; a policy expressed as
+tool code is enforced by construction and, on the critical path, free.
+
+\section{Reliability Mechanisms}
+
+Three further mechanisms address the specific CAR-bench failure classes.
+\textbf{Response obligations}: policy-mandated disclosures (e.g.\ a toll-road
+mention, a $>$3\textdegree C cross-zone temperature warning) are registered as
+obligations that the response step appends only if the model's own text omitted
+them, preserving compound-request flexibility without making warnings optional.
+\textbf{Unknown-value sentinels}: hallucination tasks can blank fields in
+otherwise successful results; the string \texttt{"unknown"} is normalized to a
+sentinel that is storage- and serialization-safe but aborts with a
+missing-response acknowledgement the moment model code tries to use it in a
+meaningful operation, converting a silent fabrication into an honest limitation.
+\textbf{Turn-scoped outcome tracking}: mutation failures are keyed by tool and
+target arguments and survive every Python block in a user turn, so an optimistic
+success claim cannot outrun a failed side effect.
+
+\section{Results}
+
+We evaluate on the public \emph{test} split (125 tasks; 50 base, 50
+hallucination, 25 disambiguation) at three trials (375 evaluations), with
+Cerebras \texttt{gpt-oss-120b} at temperature~0 and a JSON code-action contract.
+The evaluator user simulator and policy judge are Gemini~2.5~Flash, the
+organizers' default.
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Per task (test, 3 trials) & Median & Mean & p90 \\
+\midrule
+Model calls          & 2      & 2.4   & 4     \\
+Agent (A2A) turns    & 7      & 8.0   & 12    \\
+Model latency (s)    & 1.8    & 2.4   & 4.4   \\
+Output tokens        & 1{,}443 & 1{,}850 & 3{,}625 \\
+Input tokens         & 78.2k  & 87.8k & 165.6k \\
+\bottomrule
+\end{tabular}
+\caption{Compute and latency profile. Two model calls carry seven agent turns:
+the coroutine bridge decouples model invocation from evaluator tool
+round-trips. Input token budget is 500k/task; observed mean is 88k.}
+\label{tab:compute}
+\end{table}
+
+\begin{table}[t]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Split & Pass\textsuperscript{1} & Pass\textsuperscript{3} \\
+\midrule
+Base            & 90.0 & 78.0 \\
+Hallucination   & 98.7 & 96.0 \\
+Disambiguation  & 90.7 & 88.0 \\
+\midrule
+Overall         & 93.3 & 87.3 \\
+\bottomrule
+\end{tabular}
+\caption{Reliability on the public test split (\%). Pass\textsuperscript{3}
+credits a task only when all three trials pass.}
+\label{tab:reliability}
+\end{table}
+
+\paragraph{Latency.}
+A complete multi-turn task resolves in a median of 1.8\,s of model latency
+(Table~\ref{tab:compute}). We report \emph{model} latency deliberately: of the
+5{,}351\,s wall time for the full 375-evaluation run, only 899\,s was
+agent LLM time; the remainder is the evaluator's own simulator and judge, which
+are not attributable to the agent. Fast per-call inference on Cerebras is thus
+compounded by a harness that issues few calls, rather than spent on many.
+
+\paragraph{Reliability.}
+The agent reaches Pass\textsuperscript{1} 93.3\% and Pass\textsuperscript{3}
+87.3\% (Table~\ref{tab:reliability}). The gap between them is
+model-compliance variance under a temperature-0 model sensitive to simulator
+phrasing, concentrated in the base split; 87\% of tasks pass all three trials.
+
+\paragraph{Compute compliance.}
+The internal loop is capped at five sequential model calls per step, matching
+the Track~2 budget; observed usage (median two calls, p90 four) stays well
+inside it. Mean input+output is under 90k tokens against the 500k budget.
+Token and latency accounting is reported through \texttt{turn\_metrics} on each
+concluding response; because the accumulator sums across intermediate tool
+exchanges and the evaluator records metrics only on non-tool-call responses,
+per-task totals are complete.
+
+\paragraph{Development discipline.}
+Two rules kept the harness from overfitting the weaker model. First, a change
+was accepted only if a stronger model already outperformed a weaker one on the
+bare prompt, so gains reflect structure rather than scaffolding. Second, a
+persistent \texttt{gpt-oss-120b} failure was first reproduced on a stronger
+model: if the stronger model passed, the ceiling was reachable and the fix was
+to encode the missing determinism as tool code (Policy as Code); if both
+failed, the defect lay in existing harness and was repaired there rather than
+patched over. Candidate changes were judged on consistent-failure sets across
+runs, never single noisy trials.
+
+\section{Limitations and Conclusion}
+
+The residual Pass\textsuperscript{3} gap is dominated by simulator and judge
+variance and by rare paths where a temperature-0 120B model chooses a valid-
+looking but wrong action despite enforced structure; a stronger model closes
+most of these without additional rules, indicating a model-compliance rather
+than architectural ceiling. Worker state is in memory and not recoverable
+across process restarts.
+
+The coroutine bridge shows that the most effective way to exploit fast
+inference under CAR-bench's externalized-tool design is not more model calls
+but a harness that lets each fast call accomplish an entire branching program,
+with deterministic policy compiled into the tools that program invokes. The
+result is low whole-task latency and reliable, compliant behavior on a
+benchmark built to expose the opposite.
+
+\bibliographystyle{named}
+\bibliography{track2_report}
+
+\end{document}

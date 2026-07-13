@@ -1145,10 +1145,21 @@ The accumulated metrics are attached under
 The accumulator survives intermediate coroutine tool exchanges and resets
 after the text response.
 
-Current limitation: tool-call-only A2A messages emitted directly by
-`ToolBridge` do not carry a `turn_metrics` payload. This should be revisited
-before final Track 2 compliance validation if organizers require metrics on
-every outward assistant step rather than the concluding text response.
+Resolved (2026-07-13): tool-call-only A2A messages emitted directly by
+`ToolBridge` carry no `turn_metrics` payload, and that matches the official
+evaluator's aggregation — `car_bench_evaluator.py` records `turn_metrics`
+only on non-tool-call responses (`if not next_message.get("tool_calls")
+...`), so metrics attached to tool-call messages would be dropped anyway.
+Because `SessionMetrics` accumulates across intermediate tool exchanges and
+resets only after the concluding text response, every internal LLM call is
+counted exactly once and per-task totals (`agent_input_tokens`,
+`agent_output_tokens`, `agent_thinking_tokens` in result JSONs) are complete.
+Verified against the 2026-07-11 3-trial full-test results. Residual
+undercount edge cases only: the max-internal-steps fallback and
+worker-crash/outbox-timeout fallbacks emit text without metadata (those
+tokens roll into the next turn's report, or go unreported if the task ends
+there), and a conversation terminated by the evaluator mid-coroutine never
+reports its in-flight turn. Both can only understate usage.
 
 ## Logging and Trace Explorer
 
@@ -1248,7 +1259,8 @@ Provider-specific keys and base URLs are defined in `config.py`.
 - The confirmation intent parser is deliberately simple.
 - Worker state is in memory and is not recoverable after process restart.
 - ToolBridge waits up to 600 seconds for evaluator results.
-- Metrics on tool-call-only outward A2A messages need final Track 2 review.
+- Metrics on tool-call-only outward A2A messages: resolved as compliant (see
+  Metrics section); only rare fallback paths can understate token usage.
 
 ## Maintenance Rules
 

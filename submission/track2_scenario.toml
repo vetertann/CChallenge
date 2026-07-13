@@ -1,0 +1,37 @@
+# CAR-bench IJCAI-ECAI 2026 — Track 2 (Cerebras Fast-Reasoning) submission.
+# Agent: coroutine-bridge runtime on Cerebras gpt-oss-120b.
+# Replace <ORG> and the sha256 digest after the GHCR push (step 3 of
+# docs/submission-prep.md). Evaluator image is the official organizer image
+# and must not be changed.
+
+[evaluator]
+image = "ghcr.io/car-bench/car-bench-evaluator:latest"
+
+[evaluator.env]
+GEMINI_API_KEY = "${GEMINI_API_KEY:?Set GEMINI_API_KEY}"
+LOGURU_LEVEL = "${LOGURU_LEVEL:-INFO}"
+
+[agent_under_test]
+image = "ghcr.io/<ORG>/car-coroutine-agent@sha256:REPLACE_WITH_DIGEST"
+
+[agent_under_test.env]
+CEREBRAS_API_KEY = "${CEREBRAS_API_KEY:?Set CEREBRAS_API_KEY}"
+CAR_AGENT_MODEL_PROVIDER = "${CAR_AGENT_MODEL_PROVIDER:-cerebras}"
+CAR_AGENT_MODEL = "${CAR_AGENT_MODEL:-gpt-oss-120b}"
+CAR_AGENT_SKILL = "${CAR_AGENT_SKILL:-car_domain_120b.md}"
+CAR_AGENT_TOOL_MODE = "${CAR_AGENT_TOOL_MODE:-prompt_json}"
+CAR_AGENT_TEMPERATURE = "${CAR_AGENT_TEMPERATURE:-0}"
+CAR_AGENT_REASONING_EFFORT = "${CAR_AGENT_REASONING_EFFORT:-}"
+CAR_AGENT_MAX_OUTPUT_TOKENS = "${CAR_AGENT_MAX_OUTPUT_TOKENS:-2048}"
+CAR_AGENT_MAX_INTERNAL_STEPS = "${CAR_AGENT_MAX_INTERNAL_STEPS:-5}"
+CAR_AGENT_MAX_ATTEMPTS = "${CAR_AGENT_MAX_ATTEMPTS:-6}"
+CAR_AGENT_STORM_RETRY_TEMPERATURES = "${CAR_AGENT_STORM_RETRY_TEMPERATURES:-0.15,0.4,0.8}"
+LOGURU_LEVEL = "${LOGURU_LEVEL:-INFO}"
+
+[config]
+num_trials = 3
+task_split = "hidden"
+tasks_base_num_tasks = -1
+tasks_hallucination_num_tasks = -1
+tasks_disambiguation_num_tasks = -1
+max_steps = 50

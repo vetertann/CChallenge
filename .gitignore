@@ -23,3 +23,6 @@ docker-compose.yml
 a2a-scenario.toml
 scenarios/**/docker-compose.yml
 scenarios/**/a2a-scenario.toml
+
+# Generated trace explorer UI (build_trace_explorer.py)
+trace_explorer.html
