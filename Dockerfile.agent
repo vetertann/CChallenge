@@ -19,6 +19,14 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# 0) System deps. curl is required by the harness-generated compose healthcheck
+#    (test: ["CMD","curl","-f",".../agent-card.json"]) that gates
+#    depends_on: service_healthy. The slim base omits it; the official images
+#    use a non-slim base that already ships it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # 1) Install runtime deps first for better layer caching.
 COPY agent-requirements.txt /app/agent-requirements.txt
 RUN pip install --no-cache-dir -r /app/agent-requirements.txt
