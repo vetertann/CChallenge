@@ -1,8 +1,8 @@
 # CAR-bench IJCAI-ECAI 2026 — Track 2 (Cerebras Fast-Reasoning) submission.
 # Agent: coroutine-bridge runtime on Cerebras gpt-oss-120b.
-# Replace <ORG> and the sha256 digest after the GHCR push (step 3 of
-# docs/submission-prep.md). Evaluator image is the official organizer image
-# and must not be changed.
+# Agent image is public and digest-pinned; contract validated 5/5 via a
+# digest-pinned compose smoke against the official evaluator image. The
+# evaluator image is the official organizer image and must not be changed.
 
 [evaluator]
 image = "ghcr.io/car-bench/car-bench-evaluator:latest"
